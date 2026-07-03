@@ -1,0 +1,37 @@
+{
+  "feature": "demo",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "run-fixture-1",
+  "andon_issue": 1,
+  "steps": [
+    {
+      "id": "step-hello",
+      "title": "Render the demo greeting",
+      "intent": "Show the operator-facing hello-world greeting",
+      "acceptance": "GET /demo returns 200 with the exact greeting",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-hello-copy",
+      "kind": "exact-copy",
+      "check": "Response body of GET /demo equals \"Hello, operator!\"",
+      "maps_to": ["step-hello"]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-empty-name",
+      "description": "No operator name configured falls back to the default greeting",
+      "step_id": "step-hello"
+    }
+  ]
+}

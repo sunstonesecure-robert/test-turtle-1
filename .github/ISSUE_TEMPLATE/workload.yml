@@ -1,0 +1,20 @@
+name: Workload intake
+description: Introduce a new workload (a title alone is valid — FR-031). Prefer the dashboard's Introduce action, which validates readiness and slug uniqueness first.
+title: "[workload] "
+labels: ["workload:proposed"]
+body:
+  - type: input
+    id: slug
+    attributes:
+      label: Workload slug
+      description: Kebab-case identity everything keys on (plan branches, CURRENT pointer, chunks, runs). Must be unique.
+      placeholder: demo
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description (optional)
+      description: One-line titles are fine while the workload is proposed; elaborate just-in-time (FR-016).
+    validations:
+      required: false

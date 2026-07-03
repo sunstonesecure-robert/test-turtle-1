@@ -1,0 +1,24 @@
+{
+  "feature": "demo",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "run-fixture-assumption",
+  "andon_issue": 1,
+  "steps": [
+    {
+      "id": "step-guess",
+      "title": "Guess a requirement",
+      "intent": "Assumed behavior with no named stand-in",
+      "acceptance": "unverifiable",
+      "priority": "SHOULD",
+      "evidence_tag": "assumption",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [],
+  "boundary_cases": []
+}

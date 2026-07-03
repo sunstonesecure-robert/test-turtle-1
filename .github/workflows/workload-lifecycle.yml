@@ -1,0 +1,47 @@
+# workload-lifecycle — gated single writer for workload state (deterministic, no
+# LLM — plain Actions YAML, not gh-aw, by design; it NEEDS direct issues/actions
+# writes for label flips, run cancellation, close+lock).
+# Step 1 runs lifecycle-gate (tracer: L0/L1; L2–L9 join with US10–US13); a red gate
+# reports unmet items and performs nothing. Step 2 flips the workload:* label,
+# appends the workload-event:v1 comment, and close+locks on archive. There is no
+# delete action anywhere — unknown actions exit 2 (FR-042).
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: workload-lifecycle
+on:
+  repository_dispatch:
+    types: [workload-lifecycle]
+permissions:
+  contents: read
+  issues: write # workload:* labels + event comments — this workflow is their ONLY writer
+  actions: write # cancel in-flight runs on workload cancel (SC-014)
+concurrency:
+  group: workload-lifecycle-${{ github.event.client_payload.workload }}
+jobs:
+  transition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: lifecycle-gate (refusal performs nothing)
+        run: >-
+          npx tsx scripts/gates/lifecycle-gate.ts
+          --workload ${{ github.event.client_payload.workload }}
+          --action ${{ github.event.client_payload.action }}
+          --repo ${{ github.repository }} --json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: apply transition (label flip + event comment; close+lock on archive)
+        run: >-
+          npx tsx scripts/lifecycle-apply.ts
+          --workload ${{ github.event.client_payload.workload }}
+          --action ${{ github.event.client_payload.action }}
+          --actor ${{ github.event.client_payload.actor }}
+          --reason "${{ github.event.client_payload.reason }}"
+          --revisit "${{ github.event.client_payload.revisit }}"
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-turtles/schemas/plan.schema.json",
+  "title": "Agentic Turtles Plan Document",
+  "description": "Structured plan proposed by an agent and frozen by operator approval. System of record for steps, priorities, evidence tags, boundary cases, and verification targets.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["feature", "version", "run_id", "andon_issue", "steps", "verification_targets", "boundary_cases"],
+  "properties": {
+    "feature": { "type": "string", "pattern": "^[0-9]{3}-[a-z0-9-]+$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "supersedes": { "type": ["integer", "null"], "minimum": 1 },
+    "run_id": { "type": "string", "minLength": 1 },
+    "andon_issue": { "type": "integer", "minimum": 1 },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/PlanStep" }
+    },
+    "verification_targets": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/VerificationTarget" }
+    },
+    "boundary_cases": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/BoundaryCase" }
+    }
+  },
+  "$defs": {
+    "PlanStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "intent", "acceptance", "priority", "evidence_tag", "high_stakes", "depends_on"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^step-[a-z0-9-]+$" },
+        "title": { "type": "string", "minLength": 1 },
+        "intent": { "type": "string", "minLength": 1 },
+        "acceptance": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Empirically testable outcome metric (FR-017)"
+        },
+        "priority": { "enum": ["MUST", "SHOULD", "COULD"] },
+        "evidence_tag": { "enum": ["verified", "assumption"] },
+        "stand_in": {
+          "type": ["string", "null"],
+          "description": "Most representative named stand-in source; required when evidence_tag=assumption (FR-020)"
+        },
+        "high_stakes": { "type": "boolean" },
+        "authority": {
+          "enum": ["customer", "clinical", "legal", null],
+          "description": "Required when high_stakes=true (FR-023). Extensible in future schema versions."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^step-[a-z0-9-]+$" },
+          "description": "Dependency edges used to propagate wrong-assumption flags (FR-022)"
+        },
+        "tracking_issue": { "type": ["integer", "null"], "minimum": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "evidence_tag": { "const": "assumption" } } },
+          "then": { "required": ["stand_in"], "properties": { "stand_in": { "type": "string", "minLength": 1 } } }
+        },
+        {
+          "if": { "properties": { "high_stakes": { "const": true } } },
+          "then": { "properties": { "authority": { "enum": ["customer", "clinical", "legal"] } }, "required": ["authority"] }
+        }
+      ]
+    },
+    "VerificationTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "check", "maps_to"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^vt-[a-z0-9-]+$" },
+        "kind": { "enum": ["expected-output", "exact-copy", "boundary-behavior"] },
+        "check": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A single pass/fail assertion (FR-011)"
+        },
+        "maps_to": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^step-[a-z0-9-]+$" }
+        }
+      }
+    },
+    "BoundaryCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^bc-[a-z0-9-]+$" },
+        "description": { "type": "string", "minLength": 1 },
+        "step_id": { "type": "string", "pattern": "^step-[a-z0-9-]+$" }
+      }
+    }
+  }
+}

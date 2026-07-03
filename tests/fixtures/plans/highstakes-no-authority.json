@@ -1,0 +1,26 @@
+{
+  "feature": "demo",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "run-fixture-highstakes",
+  "andon_issue": 1,
+  "steps": [
+    {
+      "id": "step-dosing",
+      "title": "Dosing logic",
+      "intent": "High-stakes step with no confirming authority named",
+      "acceptance": "dose within safe range",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": true,
+      "authority": null,
+      "depends_on": [],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    { "id": "vt-dose", "kind": "boundary-behavior", "check": "Dose never exceeds the safe maximum", "maps_to": ["step-dosing"] }
+  ],
+  "boundary_cases": []
+}

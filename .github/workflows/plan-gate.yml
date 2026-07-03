@@ -1,0 +1,31 @@
+# plan-gate — required status check on every approval PR (deterministic, no LLM:
+# constitution Deterministic-First — plain Actions YAML, not gh-aw, by design).
+# Branch protection marks this check required, so a red gate makes the operator's
+# go-ahead (merge) physically impossible (FR-005/FR-012). Exit codes: 0 green ·
+# 1 gate failure · 2 usage/IO · 3 API unavailable (fails closed and reruns).
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: plan-gate
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+  issues: read
+  checks: write
+concurrency:
+  group: plan-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  plan-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: plan-gate (G1, G7–G10; G2–G6 join as US2/US5/US6 land)
+        run: npx tsx scripts/gates/plan-gate.ts --plan plan.json --repo ${{ github.repository }} --json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

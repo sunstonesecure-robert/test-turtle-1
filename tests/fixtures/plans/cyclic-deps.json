@@ -1,0 +1,39 @@
+{
+  "feature": "demo",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "run-fixture-cyclic",
+  "andon_issue": 1,
+  "steps": [
+    {
+      "id": "step-a",
+      "title": "A",
+      "intent": "A",
+      "acceptance": "A passes",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": ["step-b"],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-b",
+      "title": "B",
+      "intent": "B",
+      "acceptance": "B passes",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": ["step-a"],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    { "id": "vt-a", "kind": "expected-output", "check": "A output equals expected", "maps_to": ["step-a", "step-b"] }
+  ],
+  "boundary_cases": []
+}
