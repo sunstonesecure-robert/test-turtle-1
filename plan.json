@@ -1,0 +1,39 @@
+{
+  "feature": "demo",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "demo-run-demo",
+  "andon_issue": 3,
+  "steps": [
+    {
+      "id": "step-hello",
+      "title": "Render the demo greeting",
+      "intent": "Show the operator-facing hello-world greeting on the demo page",
+      "acceptance": "GET /demo returns HTTP 200 and the body contains the exact greeting string",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-hello-copy",
+      "kind": "exact-copy",
+      "check": "Response body of GET /demo equals \"Hello, operator!\"",
+      "maps_to": [
+        "step-hello"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-empty-name",
+      "description": "When no operator name is configured, the greeting falls back to \"Hello, operator!\"",
+      "step_id": "step-hello"
+    }
+  ]
+}
