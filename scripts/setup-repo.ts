@@ -3,6 +3,7 @@ import { createClient, repoFromEnv, type RepoRef } from '../dashboard/lib/github
 import { ALL_LABELS } from '../dashboard/lib/github/labels';
 import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET } from './gates/lib/readiness';
 import { runGates, printReport } from './gates/lib/runner';
+import { installOversightFiles } from './install';
 
 /**
  * Day-1 `init` (T017/T126, FR-028/FR-030): reconcile the repository to the
@@ -41,6 +42,8 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         `(${(error as Error).message?.split(' - ')[0] ?? '403'})`,
     );
   };
+  const { data: repoInfo } = await gh.repos.get({ ...repo });
+  const isOrgRepo = repoInfo.owner?.type === 'Organization';
   const { data: rulesets } = await gh
     .request('GET /repos/{owner}/{repo}/rulesets', { ...repo })
     .catch((error: unknown) => ((error as { status?: number }).status === 403 ? planLimited(error) : Promise.reject(error)));
@@ -72,6 +75,16 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         target: 'branch',
         enforcement: 'active',
         conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
+        // Required checks gate ALL pushes to main, not just PR merges — without these
+        // bypasses the post-merge single writer could never update plans/**/CURRENT
+        // and admins could never bootstrap. 5 = repository admin role; 15368 = the
+        // github-actions integration (the workflows' GITHUB_TOKEN identity — org repos
+        // only; personal repos reject Integration bypass actors, so there the CURRENT
+        // update runs under an admin credential instead).
+        bypass_actors: [
+          { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
+          ...(isOrgRepo ? [{ actor_id: 15368, actor_type: 'Integration', bypass_mode: 'always' }] : []),
+        ],
         rules: [
           {
             type: 'required_status_checks',
@@ -128,6 +141,25 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
       })
       .catch((error: unknown) => ((error as { status?: number }).status === 403 ? missingAdminScope(error) : Promise.reject(error)));
     changed.push('environment agent-build');
+  }
+
+  // Install/update the governed-repo files (templates + gate toolchain) as one
+  // git-tree commit — idempotent: unchanged content produces no commit (T178).
+  // Writing .github/workflows/ files needs the "workflows" permission (quickstart §0).
+  try {
+    const install = await installOversightFiles(gh, repo);
+    if (install.committed) {
+      changed.push(`installed oversight files (${install.fileCount} files, ${install.commitSha})`);
+    }
+  } catch (error: unknown) {
+    const status = (error as { status?: number }).status;
+    if (status === 403 || status === 422) {
+      throw new Error(
+        'installing oversight files into the target failed — the bootstrap credential needs ' +
+          `"Workflows: Read and write" in addition to Administration (quickstart §0). API said: ${(error as Error).message?.split(' - ')[0] ?? status}`,
+      );
+    }
+    throw error;
   }
 
   return { changed, skipped, alreadyInitialized: changed.length === 0 };
