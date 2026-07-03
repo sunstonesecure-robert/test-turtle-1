@@ -4,7 +4,8 @@
 # On merge of an approval PR from plan/<slug>/v<N>: (1) annotated tag at the merge
 # SHA — create-ref fails if it exists, first writer wins (FR-027, SC-008); tag
 # message records approver + timestamp (FR-006, FR-026); (2) plans/<slug>/CURRENT →
-# the new tag; (3) andon:resolved on the plan's Andon issue (FR-007).
+# the new tag; (3) andon:resolved on the plan's Andon issue + close it (FR-006/FR-007;
+# closed, not locked — the break stays a searchable record).
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: plan-post-merge
 on:
@@ -13,7 +14,7 @@ on:
     branches: [main]
 permissions:
   contents: write # tag + CURRENT pointer — this workflow is their ONLY writer
-  issues: write # andon:resolved
+  issues: write # andon:resolved + close
 concurrency:
   group: plan-post-merge-${{ github.event.pull_request.head.ref }}
 jobs:

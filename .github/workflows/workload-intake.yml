@@ -1,0 +1,39 @@
+# workload-intake — normalizes GitHub-UI intake (deterministic, no LLM — plain
+# Actions YAML). The "Workload intake" issue template renders form fields as
+# markdown, not the machine-readable workload:v1 marker the contract requires,
+# so this workflow extracts + validates the slug (format, uniqueness) and
+# rewrites the body with the marker + appends the introduced event comment —
+# the same end state as dashboard intake (FR-031). A refusal comments the
+# reason and removes workload:proposed; re-adding the label retries.
+# Readiness (FR-029) is structural here: this workflow only exists where init
+# installed it (readiness I5). Dashboard intake keeps the explicit check.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: workload-intake
+on:
+  issues:
+    types: [opened, labeled]
+permissions:
+  contents: read
+  issues: write # marker rewrite + event/refusal comments + label removal on refusal
+concurrency:
+  group: workload-intake-${{ github.event.issue.number }}
+jobs:
+  normalize:
+    if: >-
+      contains(github.event.issue.labels.*.name, 'workload:proposed') &&
+      (github.event.action == 'opened' || github.event.label.name == 'workload:proposed')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: normalize intake (marker + introduced event; refusal comments + delabels)
+        run: >-
+          npx tsx scripts/intake-normalize.ts
+          --issue ${{ github.event.issue.number }}
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

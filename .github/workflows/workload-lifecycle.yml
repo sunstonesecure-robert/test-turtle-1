@@ -4,18 +4,44 @@
 # Step 1 runs lifecycle-gate (tracer: L0/L1; L2–L9 join with US10–US13); a red gate
 # reports unmet items and performs nothing. Step 2 flips the workload:* label,
 # appends the workload-event:v1 comment, and close+locks on archive. There is no
-# delete action anywhere — unknown actions exit 2 (FR-042).
+# delete action anywhere — unknown actions exit 2 (FR-042), and `delete` is not
+# offered in the dispatch choices.
+# Two entry points, one writer: repository_dispatch (dashboard / API callers,
+# actor from the payload) and workflow_dispatch (Actions-tab UI, actor is the
+# clicking user — github.actor, never spoofable via inputs).
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: workload-lifecycle
 on:
   repository_dispatch:
     types: [workload-lifecycle]
+  workflow_dispatch:
+    inputs:
+      workload:
+        description: "Workload slug"
+        required: true
+      action:
+        description: "Lifecycle transition"
+        type: choice
+        required: true
+        options: [activate, complete, cancel, defer, reactivate, archive]
+      reason:
+        description: "Reason (recorded in the event comment; required by gate for cancel/defer)"
+        required: false
+      revisit:
+        description: "Revisit date YYYY-MM-DD (defer only)"
+        required: false
 permissions:
   contents: read
   issues: write # workload:* labels + event comments — this workflow is their ONLY writer
   actions: write # cancel in-flight runs on workload cancel (SC-014)
 concurrency:
-  group: workload-lifecycle-${{ github.event.client_payload.workload }}
+  group: workload-lifecycle-${{ github.event.client_payload.workload || inputs.workload }}
+env:
+  WL_WORKLOAD: ${{ github.event.client_payload.workload || inputs.workload }}
+  WL_ACTION: ${{ github.event.client_payload.action || inputs.action }}
+  WL_ACTOR: ${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.client_payload.actor }}
+  WL_REASON: ${{ github.event.client_payload.reason || inputs.reason }}
+  WL_REVISIT: ${{ github.event.client_payload.revisit || inputs.revisit }}
 jobs:
   transition:
     runs-on: ubuntu-latest
@@ -29,19 +55,19 @@ jobs:
       - name: lifecycle-gate (refusal performs nothing)
         run: >-
           npx tsx scripts/gates/lifecycle-gate.ts
-          --workload ${{ github.event.client_payload.workload }}
-          --action ${{ github.event.client_payload.action }}
+          --workload "$WL_WORKLOAD"
+          --action "$WL_ACTION"
           --repo ${{ github.repository }} --json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: apply transition (label flip + event comment; close+lock on archive)
         run: >-
           npx tsx scripts/lifecycle-apply.ts
-          --workload ${{ github.event.client_payload.workload }}
-          --action ${{ github.event.client_payload.action }}
-          --actor ${{ github.event.client_payload.actor }}
-          --reason "${{ github.event.client_payload.reason }}"
-          --revisit "${{ github.event.client_payload.revisit }}"
+          --workload "$WL_WORKLOAD"
+          --action "$WL_ACTION"
+          --actor "$WL_ACTOR"
+          --reason "$WL_REASON"
+          --revisit "$WL_REVISIT"
           --repo ${{ github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

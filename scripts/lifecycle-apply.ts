@@ -1,6 +1,7 @@
 import { createClient } from '../dashboard/lib/github/client';
 import { applyLifecycleTransition } from '../dashboard/lib/github/workloads';
 import type { WorkloadAction } from '../dashboard/lib/github/markers';
+import { errorMessage } from '../dashboard/lib/github/errors';
 
 /**
  * Lifecycle apply CLI — invoked ONLY by the workload-lifecycle workflow after
@@ -51,6 +52,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error(error.message ?? error);
+  console.error(errorMessage(error));
   process.exit(1);
 });

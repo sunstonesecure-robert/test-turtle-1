@@ -28,12 +28,16 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    and derive a structured plan document conforming to `schemas/plan.schema.json`: steps with
    intent/acceptance/priority/evidence tags, verification targets (single pass/fail checks),
    and boundary cases.
-2. Commit the plan as `plan.json` on a new branch `plan/${{ inputs.workload }}/v<N>` where `<N>`
-   is max existing frozen version + 1.
-3. Upload the plan document as a workflow artifact (`upload-artifact` safe output) for the
-   dashboard to render as untrusted data.
+2. Compute `<N>` = max existing frozen version among `plan/${{ inputs.workload }}/v*` tags, plus
+   one. You are read-only on contents — you CANNOT push branches; do not try. Set the plan's
+   `andon_issue` field to the placeholder `1` (the publisher patches the real number in).
+3. Upload the plan document as a workflow artifact named `plan.json` (`upload-artifact` safe
+   output). After this run completes, the deterministic `plan-publish` workflow validates it
+   against the schema, locates your Andon break by its header, and creates the branch
+   `plan/${{ inputs.workload }}/v<N>` with `plan.json` committed on your behalf.
 4. Raise the Andon break via the `create-issue` safe output. The issue body MUST begin with the
    machine-readable header `<!-- andon:v1 run:<run_id> plan:plan/${{ inputs.workload }}/v<N> -->`
+   (the publisher matches your plan to this header — the plan ref MUST agree with step 2's `<N>`)
    followed by a `## Proposed plan` link section and a `## Judgments required` task list with one
    item per state transition and boundary case (`- [ ] \`bc-<id>\` — <description>`).
 

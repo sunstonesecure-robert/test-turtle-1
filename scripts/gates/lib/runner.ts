@@ -1,3 +1,5 @@
+import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors';
+
 /**
  * Gate-runner skeleton (T019, gate-checks-cli.md "Shared conventions").
  * Exit codes: 0 all green · 1 gate failure(s) · 2 usage/IO error · 3 GitHub API
@@ -84,14 +86,14 @@ export async function cliMain(fn: (args: Map<string, string>, flags: Set<string>
       console.error(`GitHub API unavailable: ${error.message} (fail closed, retryable)`);
       process.exit(3);
     }
-    console.error(String((error as Error).message ?? error));
+    console.error(errorMessage(error));
     process.exit(2);
   }
 }
 
 /** Wrap unexpected transport failures as exit-3 (fail closed) API errors. */
 export function asApiUnavailable(error: unknown): never {
-  const status = (error as { status?: number }).status;
+  const status = errorStatus(error);
   if (status !== undefined && status >= 400 && status < 500) throw error as Error;
-  throw new ApiUnavailableError(String((error as Error).message ?? error));
+  throw new ApiUnavailableError(errorMessage(error));
 }

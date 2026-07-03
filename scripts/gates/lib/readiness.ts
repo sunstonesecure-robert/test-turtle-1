@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { ALL_LABELS } from '../../../dashboard/lib/github/labels';
 import type { GateResult } from './runner';
+import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 
 /**
  * Readiness checks I1–I6 (gate-checks-cli.md §4) — a pure function of live repo
@@ -47,8 +48,8 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     const { data: rulesets } = await gh.request('GET /repos/{owner}/{repo}/rulesets', { ...repo });
     rulesetNames = new Set((rulesets as { name: string }[]).map((r) => r.name));
   } catch (error: unknown) {
-    if ((error as { status?: number }).status !== 403) throw error;
-    planLimitDetail = `rulesets unavailable on this plan (${(error as Error).message?.split(' - ')[0] ?? '403'}) — upgrade to GitHub Pro / a paid org plan or make the repository public`;
+    if (errorStatus(error) !== 403) throw error;
+    planLimitDetail = `rulesets unavailable on this plan (${apiMessage(error)}) — upgrade to GitHub Pro / a paid org plan or make the repository public`;
   }
   // Push rulesets (the CURRENT-pointer file-path rule) are org-only: on user-owned repos
   // that protection is waived — same waiver init applies when creation 422s.
@@ -90,7 +91,7 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     });
     hasEnv = true;
   } catch (error: unknown) {
-    const status = (error as { status?: number }).status;
+    const status = errorStatus(error);
     if (status === 403) {
       envDetail = `environments unavailable on this plan — upgrade to GitHub Pro / a paid org plan or make the repository public`;
     } else if (status !== 404) {
@@ -110,7 +111,7 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     try {
       await gh.repos.getContent({ ...repo, path: `.github/workflows/${file}` });
     } catch (error: unknown) {
-      if ((error as { status?: number }).status === 404) missingLocks.push(file);
+      if (errorStatus(error) === 404) missingLocks.push(file);
       else throw error;
     }
   }

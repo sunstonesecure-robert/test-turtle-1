@@ -4,6 +4,7 @@ import { createAndonIssue } from '../../dashboard/lib/github/andon';
 import { getWorkload, introduceWorkload, applyLifecycleTransition } from '../../dashboard/lib/github/workloads';
 import { planBranch } from '../../dashboard/lib/github/plans';
 import type { PlanDoc } from '../../schemas/plan';
+import { errorMessage } from '../../dashboard/lib/github/errors';
 
 /**
  * Demo seed (T047, quickstart §4): simulates the agent side of the tracer —
@@ -111,7 +112,7 @@ if (isMain) {
       console.log(`plan branch  ${r.planRef}`);
     })
     .catch((error) => {
-      console.error(error.message ?? error);
+      console.error(errorMessage(error));
       process.exit(1);
     });
 }

@@ -1,8 +1,10 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import type { PlanDoc } from '../../../schemas/plan';
+import { errorStatus } from './errors';
 import {
   parseAndonHeader,
+  parseCorrectionMarker,
   parseJudgmentItems,
   serializeAndonHeader,
   serializeJudgmentItem,
@@ -66,9 +68,25 @@ export async function getAndon(gh: Octokit, repo: RepoRef, issueNumber: number):
   };
 }
 
-/** Operator opens the break: andon:open → andon:under-review (FR-003). */
+/**
+ * Operator opens the break: andon:open → andon:under-review (FR-003).
+ * Idempotent — already under review is a no-op (double submit, stale inbox);
+ * a resolved break is refused rather than silently resurrected.
+ */
 export async function openAndon(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<void> {
-  await gh.issues.removeLabel({ ...repo, issue_number: issueNumber, name: 'andon:open' });
+  const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+  const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+  if (labels.includes('andon:under-review')) return;
+  if (!labels.includes('andon:open')) {
+    throw new Error(`Andon #${issueNumber} is not open for review (labels: ${labels.join(', ') || 'none'})`);
+  }
+  try {
+    await gh.issues.removeLabel({ ...repo, issue_number: issueNumber, name: 'andon:open' });
+  } catch (error: unknown) {
+    // TOCTOU: a concurrent open won the race and already removed the label —
+    // the same no-op as the under-review check above.
+    if (errorStatus(error) !== 404) throw error;
+  }
   await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: ['andon:under-review'] });
 }
 
@@ -80,8 +98,10 @@ export async function judgeItem(gh: Octokit, repo: RepoRef, issueNumber: number,
   await gh.issues.update({ ...repo, issue_number: issueNumber, body: updated });
 }
 
-/** Open corrections linked to this Andon (G7 input). */
+/** Open corrections linked to this Andon (G7 input) — matched via the machine-readable
+ *  correction:v1 marker, not substring (andon:12 must not match andon:123). */
 export async function openCorrectionCount(gh: Octokit, repo: RepoRef, andonIssue: number): Promise<number> {
-  const { data } = await gh.issues.listForRepo({ ...repo, labels: 'correction:open', state: 'open', per_page: 100 });
-  return data.filter((issue) => (issue.body ?? '').includes(`andon:${andonIssue}`)).length;
+  // Paginated: undercounting past page one would let plan-gate G7 pass with corrections open.
+  const data = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'correction:open', state: 'open', per_page: 100 });
+  return data.filter((issue) => parseCorrectionMarker(issue.body ?? '')?.andonIssue === andonIssue).length;
 }

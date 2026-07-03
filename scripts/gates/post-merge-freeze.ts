@@ -1,6 +1,7 @@
 import { createClient } from '../../dashboard/lib/github/client';
 import { getApprovalRecord } from '../../dashboard/lib/github/approval';
 import { freezeApprovedPlan, readPlanAtRef } from '../../dashboard/lib/github/plans';
+import { errorMessage } from '../../dashboard/lib/github/errors';
 
 /**
  * Post-merge freeze CLI — invoked ONLY by the plan-post-merge workflow (the
@@ -51,6 +52,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  console.error(error.message ?? error);
+  console.error(errorMessage(error));
   process.exit(1);
 });

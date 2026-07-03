@@ -1,0 +1,44 @@
+# plan-publish — deterministic writer for agent-proposed plans (plain Actions
+# YAML, no LLM — by design: the plan-propose agentic job is read-only and its
+# safe outputs cannot push branches). On plan-propose completion: downloads the
+# uploaded plan.json artifact, validates it against schemas/plan.schema.json,
+# locates the run's Andon break by its plan-ref header, patches the real
+# andon_issue number in, and creates plan/<slug>/v<N> with plan.json committed.
+# Idempotent on re-delivery (existing branch = no-op); an existing frozen TAG
+# for the version is a hard error (agent must bump). Substrate split: agent
+# proposes, deterministic single writer publishes.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: plan-publish
+on:
+  workflow_run:
+    workflows: [plan-propose]
+    types: [completed]
+permissions:
+  contents: write # plan/<slug>/v<N> branch + plan.json commit — the only writer of unfrozen plan branches
+  issues: read # locate the Andon break by header
+concurrency:
+  group: plan-publish-${{ github.event.workflow_run.id }}
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: download the proposed plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/plan-artifacts
+      - name: publish plan branch (validate, patch andon_issue, branch + commit)
+        run: >-
+          npx tsx scripts/plan-publish.ts
+          --dir "$RUNNER_TEMP/plan-artifacts"
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

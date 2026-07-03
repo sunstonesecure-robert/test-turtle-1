@@ -1,4 +1,5 @@
 import { Octokit } from '@octokit/rest';
+import { errorStatus } from './errors';
 
 /**
  * The Migration-Ready seam: every GitHub read/write in the dashboard AND the
@@ -32,6 +33,19 @@ export function createClient(opts: ClientOptions = {}): Octokit {
       retries: 2,
       retryAfter: 1,
     },
+    // A 304 is the ETag cache working — the hook below re-serves the cached body —
+    // but octokit's bundled request-log plugin runs inside that hook and logs every
+    // non-2xx via log.error before recovery. Drop only that message; real failures
+    // still log AND throw.
+    log: {
+      debug: () => {},
+      info: () => {},
+      warn: console.warn,
+      error: (...args: unknown[]) => {
+        if (typeof args[0] === 'string' && args[0].includes(' - 304 with id ')) return;
+        console.error(...args);
+      },
+    },
   });
 
   octokit.hook.wrap('request', async (request, options) => {
@@ -40,7 +54,7 @@ export function createClient(opts: ClientOptions = {}): Octokit {
     if (isGet) {
       const cached = etagCache.get(key);
       if (cached) {
-        (options.headers as Record<string, string>)['if-none-match'] = cached.etag;
+        options.headers = { ...options.headers, 'if-none-match': cached.etag };
       }
       try {
         const response = await request(options);
@@ -48,7 +62,7 @@ export function createClient(opts: ClientOptions = {}): Octokit {
         if (etag) etagCache.set(key, { etag, body: response.data, status: response.status });
         return response;
       } catch (error: unknown) {
-        const status = (error as { status?: number }).status;
+        const status = errorStatus(error);
         const cached = etagCache.get(key);
         if (status === 304 && cached) {
           return { data: cached.body, status: cached.status, headers: {}, url: options.url } as never;

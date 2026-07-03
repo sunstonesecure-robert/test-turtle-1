@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { PlanDoc } from '../../../schemas/plan';
+import { errorMessage, errorStatus } from './errors';
 
 /**
  * Plan module (T033 tracer surface): read plan.json from a ref, resolve the
@@ -38,7 +39,7 @@ export async function tryReadPlanAtRef(
     }
     return { plan: parsed.data, errors: [] };
   } catch (error: unknown) {
-    return { plan: null, errors: [String((error as Error).message ?? error)] };
+    return { plan: null, errors: [errorMessage(error)] };
   }
 }
 
@@ -49,7 +50,7 @@ export async function resolveCurrent(gh: Octokit, repo: RepoRef, slug: string): 
     if (Array.isArray(data) || !('content' in data)) return null;
     return Buffer.from(data.content, 'base64').toString('utf8').trim();
   } catch (error: unknown) {
-    if ((error as { status?: number }).status === 404) return null;
+    if (errorStatus(error) === 404) return null;
     throw error;
   }
 }
@@ -59,7 +60,7 @@ export async function tagExists(gh: Octokit, repo: RepoRef, tagRef: string): Pro
     await gh.git.getRef({ ...repo, ref: `tags/${tagRef}` });
     return true;
   } catch (error: unknown) {
-    if ((error as { status?: number }).status === 404) return false;
+    if (errorStatus(error) === 404) return false;
     throw error;
   }
 }
@@ -75,17 +76,34 @@ export async function maxFrozenVersion(gh: Octokit, repo: RepoRef, slug: string)
     }
     return max;
   } catch (error: unknown) {
-    if ((error as { status?: number }).status === 404) return 0;
+    if (errorStatus(error) === 404) return 0;
+    throw error;
+  }
+}
+
+/** Commit SHA a plan tag ultimately points at (dereferencing the annotated tag); null when absent. */
+async function tagTargetSha(gh: Octokit, repo: RepoRef, tagRef: string): Promise<string | null> {
+  try {
+    const { data } = await gh.git.getRef({ ...repo, ref: `tags/${tagRef}` });
+    if (data.object.type !== 'tag') return data.object.sha;
+    const { data: tag } = await gh.git.getTag({ ...repo, tag_sha: data.object.sha });
+    return tag.object.sha;
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
     throw error;
   }
 }
 
 /**
  * Post-merge freeze (single writer, FR-006/FR-007/FR-027):
- * 1. annotated tag plan/<slug>/vN at the merge SHA — create-ref fails if it exists
- *    (first writer wins: exactly one official version, SC-008)
+ * 1. annotated tag plan/<slug>/vN at the merge SHA — first writer wins: exactly
+ *    one official version (SC-008). A tag already at THIS merge SHA is our own
+ *    earlier partial freeze (e.g. the CURRENT write was blocked) and is resumed,
+ *    never raced against.
  * 2. plans/<slug>/CURRENT ← the tag ref
- * 3. andon:resolved on the Andon issue
+ * 3. andon:resolved on the Andon issue + close it (FR-006: closed, not locked —
+ *    the break stays a searchable record; closure is never deletion)
+ * Every step is idempotent, so a partially-applied freeze can always be re-run.
  */
 export async function freezeApprovedPlan(
   gh: Octokit,
@@ -94,35 +112,56 @@ export async function freezeApprovedPlan(
 ): Promise<{ tagRef: string }> {
   const tagRef = planBranch(input.slug, input.version);
 
-  const { data: tag } = await gh.git.createTag({
-    ...repo,
-    tag: tagRef,
-    message: `Frozen plan ${tagRef} approved by @${input.approver} at ${input.approvedAt}`,
-    object: input.mergeSha,
-    type: 'commit',
-  });
-  // Atomic: createRef 422s if refs/tags/<tagRef> already exists — no second official version.
-  await gh.git.createRef({ ...repo, ref: `refs/tags/${tagRef}`, sha: tag.sha });
+  const existingTarget = await tagTargetSha(gh, repo, tagRef);
+  if (existingTarget === null) {
+    const { data: tag } = await gh.git.createTag({
+      ...repo,
+      tag: tagRef,
+      message: `Frozen plan ${tagRef} approved by @${input.approver} at ${input.approvedAt}`,
+      object: input.mergeSha,
+      type: 'commit',
+    });
+    try {
+      // Atomic: createRef 422s if refs/tags/<tagRef> appeared since the check.
+      await gh.git.createRef({ ...repo, ref: `refs/tags/${tagRef}`, sha: tag.sha });
+    } catch (error: unknown) {
+      // Lost a live race — only the writer freezing this same merge may continue.
+      if (errorStatus(error) !== 422 || (await tagTargetSha(gh, repo, tagRef)) !== input.mergeSha) throw error;
+    }
+  } else if (existingTarget !== input.mergeSha) {
+    throw new Error(
+      `refusing to freeze ${tagRef}: tag already exists at ${existingTarget}, not merge ${input.mergeSha} — exactly one official version (SC-008)`,
+    );
+  }
 
   const path = `plans/${input.slug}/CURRENT`;
   let existingSha: string | undefined;
+  let existingContent: string | undefined;
   try {
     const { data } = await gh.repos.getContent({ ...repo, path });
-    if (!Array.isArray(data) && 'sha' in data) existingSha = data.sha;
+    if (!Array.isArray(data) && 'sha' in data) {
+      existingSha = data.sha;
+      if ('content' in data && typeof data.content === 'string') {
+        existingContent = Buffer.from(data.content, 'base64').toString('utf8').trim();
+      }
+    }
   } catch (error: unknown) {
-    if ((error as { status?: number }).status !== 404) throw error;
+    if (errorStatus(error) !== 404) throw error;
   }
-  await gh.repos.createOrUpdateFileContents({
-    ...repo,
-    path,
-    message: `plans: ${input.slug} CURRENT → ${tagRef}`,
-    content: Buffer.from(`${tagRef}\n`).toString('base64'),
-    ...(existingSha ? { sha: existingSha } : {}),
-  });
+  if (existingContent !== tagRef) {
+    await gh.repos.createOrUpdateFileContents({
+      ...repo,
+      path,
+      message: `plans: ${input.slug} CURRENT → ${tagRef}`,
+      content: Buffer.from(`${tagRef}\n`).toString('base64'),
+      ...(existingSha ? { sha: existingSha } : {}),
+    });
+  }
 
   await gh.issues.removeLabel({ ...repo, issue_number: input.andonIssue, name: 'andon:under-review' }).catch(() => {});
   await gh.issues.removeLabel({ ...repo, issue_number: input.andonIssue, name: 'andon:open' }).catch(() => {});
   await gh.issues.addLabels({ ...repo, issue_number: input.andonIssue, labels: ['andon:resolved'] });
+  await gh.issues.update({ ...repo, issue_number: input.andonIssue, state: 'closed' });
 
   return { tagRef };
 }

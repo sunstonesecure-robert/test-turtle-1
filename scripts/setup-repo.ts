@@ -4,6 +4,7 @@ import { ALL_LABELS } from '../dashboard/lib/github/labels';
 import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET } from './gates/lib/readiness';
 import { runGates, printReport } from './gates/lib/runner';
 import { installOversightFiles } from './install';
+import { apiMessage, errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 
 /**
  * Day-1 `init` (T017/T126, FR-028/FR-030): reconcile the repository to the
@@ -39,14 +40,14 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     throw new Error(
       'this repository plan does not support rulesets/environments on private repos — ' +
         'upgrade to GitHub Pro / a paid org plan or make the repository public, then re-run init ' +
-        `(${(error as Error).message?.split(' - ')[0] ?? '403'})`,
+        `(${apiMessage(error)})`,
     );
   };
   const { data: repoInfo } = await gh.repos.get({ ...repo });
   const isOrgRepo = repoInfo.owner?.type === 'Organization';
   const { data: rulesets } = await gh
     .request('GET /repos/{owner}/{repo}/rulesets', { ...repo })
-    .catch((error: unknown) => ((error as { status?: number }).status === 403 ? planLimited(error) : Promise.reject(error)));
+    .catch((error: unknown) => (errorStatus(error) === 403 ? planLimited(error) : Promise.reject(error)));
   const rulesetNames = new Set((rulesets as { name: string }[]).map((r) => r.name));
   const wanted: { name: string; payload: Record<string, unknown> }[] = [
     {
@@ -98,7 +99,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     throw new Error(
       'the credential cannot administer this repository — init needs a token with ' +
         '"Administration: Read and write" (quickstart §0: use a separate admin-scoped PAT for ' +
-        `init only). API said: ${(error as Error).message?.split(' - ')[0] ?? '403'}`,
+        `init only). API said: ${apiMessage(error)}`,
     );
   };
   for (const { name, payload } of wanted) {
@@ -107,11 +108,11 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         await gh.request('POST /repos/{owner}/{repo}/rulesets', { ...repo, ...payload } as never);
         changed.push(`ruleset ${name}`);
       } catch (error: unknown) {
-        const status = (error as { status?: number }).status;
+        const status = errorStatus(error);
         if (status === 403) missingAdminScope(error);
         // Push rulesets (file-path rules) are org-only; on personal repos the CURRENT
         // pointer protection is waived — readiness I2 documents the same waiver.
-        if (status === 422 && name === CURRENT_RULESET && /org-owned/i.test(String((error as Error).message))) {
+        if (status === 422 && name === CURRENT_RULESET && /org-owned/i.test(errorMessage(error))) {
           skipped.push(`ruleset ${name} (push rules are org-only; personal-repo waiver)`);
           continue;
         }
@@ -128,7 +129,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
       environment_name: 'agent-build',
     });
   } catch (error: unknown) {
-    const status = (error as { status?: number }).status;
+    const status = errorStatus(error);
     if (status === 404) hasEnv = false;
     else if (status === 403) planLimited(error);
     else throw error;
@@ -139,7 +140,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         ...repo,
         environment_name: 'agent-build',
       })
-      .catch((error: unknown) => ((error as { status?: number }).status === 403 ? missingAdminScope(error) : Promise.reject(error)));
+      .catch((error: unknown) => (errorStatus(error) === 403 ? missingAdminScope(error) : Promise.reject(error)));
     changed.push('environment agent-build');
   }
 
@@ -152,11 +153,16 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
       changed.push(`installed oversight files (${install.fileCount} files, ${install.commitSha})`);
     }
   } catch (error: unknown) {
-    const status = (error as { status?: number }).status;
+    const status = errorStatus(error);
     if (status === 403 || status === 422) {
+      // GitHub returns the same opaque 403 whether Contents or Workflows is missing —
+      // name the full required set, and the usual trap (a stale day-to-day token in the shell).
       throw new Error(
-        'installing oversight files into the target failed — the bootstrap credential needs ' +
-          `"Workflows: Read and write" in addition to Administration (quickstart §0). API said: ${(error as Error).message?.split(' - ')[0] ?? status}`,
+        'installing oversight files into the target failed — the install commit needs BOTH ' +
+          '"Contents: Read and write" AND "Workflows: Read and write" on the credential ' +
+          '(quickstart §0: the bootstrap PAT is Option A\'s permissions PLUS Administration + Workflows). ' +
+          'If you exported the day-to-day token earlier (e.g. via `source dashboard/.env.local`), it is ' +
+          `still in your shell — pass the bootstrap PAT inline: GITHUB_TOKEN=<bootstrap-pat> npm run init. API said: ${apiMessage(error)}`,
       );
     }
     throw error;
@@ -198,7 +204,7 @@ if (isMain) {
     else console.log(`initialized: ${result.changed.join(', ')}`);
     for (const s of result.skipped) console.log(`skipped: ${s}`);
   })().catch((error) => {
-    console.error(error.message ?? error);
+    console.error(errorMessage(error));
     process.exit(2);
   });
 }

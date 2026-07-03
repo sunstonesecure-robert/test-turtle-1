@@ -20,11 +20,15 @@ export interface Workload {
   state: WorkloadState | null; // null = contract violation (not exactly one workload:* label)
 }
 
-const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
+export const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 export async function listWorkloads(gh: Octokit, repo: RepoRef): Promise<Workload[]> {
-  const { data } = await gh.issues.listForRepo({ ...repo, labels: undefined, state: 'all', per_page: 100 });
+  // Paginated: workload issues are never deleted (FR-042), so this list only
+  // grows — a single page would silently drop older workloads (slug uniqueness,
+  // lifecycle gate L0, portfolio) once the repo passes 100 issues+PRs.
+  const data = await gh.paginate(gh.issues.listForRepo, { ...repo, state: 'all', per_page: 100 });
   return data
+    .filter((issue) => !issue.pull_request) // the issues API returns PRs too — never workloads
     .map((issue) => {
       const header = parseWorkloadHeader(issue.body ?? '');
       if (!header) return null;

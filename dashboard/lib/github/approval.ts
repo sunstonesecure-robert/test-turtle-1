@@ -13,11 +13,16 @@ export async function openApprovalPr(
   input: { slug: string; version: number; base?: string },
 ): Promise<{ number: number; url: string }> {
   const head = `plan/${input.slug}/v${input.version}`;
+  const base = input.base ?? 'main';
+  // Exactly one approval PR per plan version — a resubmit, or a PR left open by
+  // a prior session, is reused rather than surfacing GitHub's create-422.
+  const { data: existing } = await gh.pulls.list({ ...repo, state: 'open', head: `${repo.owner}:${head}`, base });
+  if (existing[0]) return { number: existing[0].number, url: existing[0].html_url };
   const { data: pr } = await gh.pulls.create({
     ...repo,
     title: `Approve plan ${head}`,
     head,
-    base: input.base ?? 'main',
+    base,
     body: `Approval PR for \`${head}\`. Merging this PR is the operator's go-ahead: it freezes the plan (FR-006).`,
   });
   return { number: pr.number, url: pr.html_url };
