@@ -17,6 +17,10 @@ concurrency:
   cancel-in-progress: true
 jobs:
   plan-gate:
+    # Only approval PRs from plan/** branches carry a plan.json to gate. Every other
+    # PR reports "skipped", which satisfies the required-check rule — a plain skip,
+    # never a fail, so ordinary development PRs are not blocked.
+    if: startsWith(github.event.pull_request.head.ref, 'plan/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
