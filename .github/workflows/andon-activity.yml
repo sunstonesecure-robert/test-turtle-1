@@ -1,0 +1,36 @@
+# andon-activity — deterministic normalizer for the GitHub-UI review flow
+# (plain Actions YAML, no LLM). FR-003's open → under-review transition had
+# only a dashboard trigger; operators judging via issue checkboxes left breaks
+# at andon:open through the whole review (recorded open → resolved). On issue
+# edits: the FIRST recorded judgment on an andon:open break flips it to
+# andon:under-review — the operator's first real engagement is the trigger.
+# Idempotent and state-aware (already under-review / resolved / superseded =
+# no-op); non-judgment edits are ignored.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: andon-activity
+on:
+  issues:
+    types: [edited]
+permissions:
+  contents: read
+  issues: write # the andon:open → andon:under-review label flip
+concurrency:
+  group: andon-activity-${{ github.event.issue.number }}
+jobs:
+  normalize:
+    if: contains(github.event.issue.labels.*.name, 'andon:open')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: flip to under-review on first judgment (state-aware no-op otherwise)
+        run: >-
+          npx tsx scripts/andon-activity.ts
+          --issue ${{ github.event.issue.number }}
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

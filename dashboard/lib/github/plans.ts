@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { PlanDoc } from '../../../schemas/plan';
 import { errorMessage, errorStatus } from './errors';
+import { createAndonIssue } from './andon';
 
 /**
  * Plan module (T033 tracer surface): read plan.json from a ref, resolve the
@@ -65,20 +66,32 @@ export async function tagExists(gh: Octokit, repo: RepoRef, tagRef: string): Pro
   }
 }
 
-/** Highest frozen version for a slug, from existing plan/<slug>/v* tags. */
-export async function maxFrozenVersion(gh: Octokit, repo: RepoRef, slug: string): Promise<number> {
-  try {
-    const { data } = await gh.git.listMatchingRefs({ ...repo, ref: `tags/plan/${slug}/` });
-    let max = 0;
-    for (const ref of data) {
-      const m = /refs\/tags\/plan\/[a-z0-9-]+\/v(\d+)$/.exec(ref.ref);
-      if (m) max = Math.max(max, Number(m[1]));
+/**
+ * Highest version a slug has ever used: frozen `plan/<slug>/v*` TAGS ∪ existing
+ * `plan/<slug>/v*` BRANCHES. Branches count because abandoned (published but
+ * never frozen) versions are never reused (FR-058). `excludeRef` lets callers
+ * gating a plan skip the plan's OWN branch — otherwise every proposal would
+ * fail its own monotonicity check the moment its branch exists.
+ */
+export async function maxPlanVersion(
+  gh: Octokit,
+  repo: RepoRef,
+  slug: string,
+  opts: { excludeRef?: string } = {},
+): Promise<number> {
+  let max = 0;
+  for (const kind of ['tags', 'heads'] as const) {
+    try {
+      const { data } = await gh.git.listMatchingRefs({ ...repo, ref: `${kind}/plan/${slug}/` });
+      for (const ref of data) {
+        const m = /refs\/(?:tags|heads)\/(plan\/[a-z0-9-]+\/v(\d+))$/.exec(ref.ref);
+        if (m && m[1] !== opts.excludeRef) max = Math.max(max, Number(m[2]));
+      }
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 404) throw error;
     }
-    return max;
-  } catch (error: unknown) {
-    if (errorStatus(error) === 404) return 0;
-    throw error;
   }
+  return max;
 }
 
 /** Commit SHA a plan tag ultimately points at (dereferencing the annotated tag); null when absent. */
@@ -164,4 +177,77 @@ export async function freezeApprovedPlan(
   await gh.issues.update({ ...repo, issue_number: input.andonIssue, state: 'closed' });
 
   return { tagRef };
+}
+
+export interface ReopenResult {
+  planRef: string;
+  andonIssue: number;
+  version: number;
+}
+
+/**
+ * Open re-open of a frozen plan (T046, FR-008): a new branch plan/<slug>/v<N+1>
+ * cut from CURRENT's tag, carrying the frozen plan as the revision seed with
+ * `supersedes` set — plus a fresh Andon break with every judgment reset. The
+ * prior tag is untouched and CURRENT still points at it: nothing supersedes the
+ * official version until the new one earns a fresh approval. In production the
+ * dashboard action dispatches the revision agent against this branch; the
+ * correction round-trip then drives the actual changes.
+ */
+export async function reopenPlan(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { slug: string; actor: string; at: string },
+): Promise<ReopenResult> {
+  const current = await resolveCurrent(gh, repo, input.slug);
+  if (!current) {
+    throw new Error(`nothing to re-open: no frozen plan for "${input.slug}" (plans/${input.slug}/CURRENT missing)`);
+  }
+  const m = /^plan\/[a-z0-9-]+\/v(\d+)$/.exec(current);
+  if (!m) throw new Error(`plans/${input.slug}/CURRENT is malformed: "${current}"`);
+  const currentVersion = Number(m[1]);
+
+  // One review at a time: a plan ref newer than CURRENT is an in-flight
+  // proposal — judge it or withdraw it; a second re-open would fork the review.
+  const maxExisting = await maxPlanVersion(gh, repo, input.slug);
+  if (maxExisting > currentVersion) {
+    throw new Error(`already re-opened: ${planBranch(input.slug, maxExisting)} is awaiting review — judge or withdraw it first`);
+  }
+  const version = maxExisting + 1;
+  const planRef = planBranch(input.slug, version);
+
+  const frozenSha = await tagTargetSha(gh, repo, current);
+  if (!frozenSha) throw new Error(`plans/${input.slug}/CURRENT names ${current} but that tag does not exist`);
+  const prior = await readPlanAtRef(gh, repo, current);
+
+  try {
+    await gh.git.createRef({ ...repo, ref: `refs/heads/${planRef}`, sha: frozenSha });
+  } catch (error: unknown) {
+    // TOCTOU with the in-flight check above: a concurrent re-open won.
+    if (errorStatus(error) !== 422) throw error;
+    throw new Error(`already re-opened: branch ${planRef} exists`);
+  }
+
+  const seed: PlanDoc = {
+    ...prior,
+    version,
+    supersedes: currentVersion,
+    run_id: `reopen-of-${input.slug}-v${currentVersion}`,
+  };
+  const andonIssue = await createAndonIssue(gh, repo, { slug: input.slug, plan: seed, planRef });
+  const plan: PlanDoc = { ...seed, andon_issue: andonIssue };
+
+  // The branch inherits the frozen plan.json from the tag — overwriting needs its blob sha.
+  const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref: planRef });
+  const inheritedSha = !Array.isArray(data) && 'sha' in data ? data.sha : undefined;
+  await gh.repos.createOrUpdateFileContents({
+    ...repo,
+    path: 'plan.json',
+    message: `plan: re-open ${current} as ${planRef} by @${input.actor} at ${input.at}`,
+    content: Buffer.from(JSON.stringify(plan, null, 2)).toString('base64'),
+    branch: planRef,
+    ...(inheritedSha ? { sha: inheritedSha } : {}),
+  });
+
+  return { planRef, andonIssue, version };
 }

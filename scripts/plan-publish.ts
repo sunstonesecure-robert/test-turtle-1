@@ -4,7 +4,7 @@ import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { PlanDoc } from '../schemas/plan';
 import { planBranch, tagExists } from '../dashboard/lib/github/plans';
-import { parseAndonHeader } from '../dashboard/lib/github/markers';
+import { parseAndonHeader, serializeAndonHeader } from '../dashboard/lib/github/markers';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 
 /**
@@ -30,7 +30,7 @@ export async function publishPlan(
   gh: Octokit,
   repo: RepoRef,
   planRaw: unknown,
-  opts: { base?: string } = {},
+  opts: { base?: string; runId?: string } = {},
 ): Promise<PublishResult> {
   // The agent cannot know the Andon number before the issue exists, so its
   // andon_issue is a placeholder — neutralize it for validation and patch the
@@ -46,29 +46,83 @@ export async function publishPlan(
     throw new Error(`refusing to publish ${planRef}: a frozen tag with that version already exists — the agent must propose v${parsed.data.version + 1}`);
   }
 
-  // The agent's Andon break carries the plan ref in its machine-readable header (paginated —
-  // parallel workloads can hold many breaks open at once).
+  // Locate the run's Andon break (paginated — parallel workloads can hold many open at once).
+  // Preferred key: the andon:v1 header. But gh-aw's safe-output sanitizer strips agent-supplied
+  // HTML comments (live-discovered), so a fresh break has NO header — fall back to the trusted
+  // gh-aw footer, which links the triggering run, then inject the canonical header ourselves:
+  // agent proposes, deterministic single writer normalizes.
   const openBreaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:open', state: 'open', per_page: 100 });
-  const andon = openBreaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
+  let andon = openBreaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
   if (!andon) {
-    throw new Error(`no andon:open break references ${planRef} — plan-propose must raise the Andon before publish`);
+    // No live break carries this plan ref — but if its BRANCH exists, this ref
+    // already held a proposal whose review ended unapproved (superseded /
+    // canceled). Abandoned versions are never reused (FR-058): refuse before
+    // the run-link fallback can bind a fresh break to a dead ref. (A live
+    // revision — the correction round-trip — matches the header above; a
+    // resumable partial publish does too, since header injection precedes
+    // branch creation.)
+    let branchExists = false;
+    try {
+      await gh.git.getRef({ ...repo, ref: `heads/${planRef}` });
+      branchExists = true;
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 404) throw error;
+    }
+    if (branchExists) {
+      throw new Error(
+        `refusing to publish ${planRef}: the branch exists but no open Andon break references it — ` +
+          `v${parsed.data.version} was abandoned and versions are never reused; propose ` +
+          `${planBranch(parsed.data.feature, parsed.data.version + 1)} instead (FR-058)`,
+      );
+    }
+  }
+  if (!andon && opts.runId) {
+    // Boundary-anchored: a bare .includes() would let run 123 claim the break
+    // for run 123456 when both are open concurrently.
+    const runLink = new RegExp(`/actions/runs/${opts.runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`);
+    andon = openBreaks.find((issue) => runLink.test(issue.body ?? ''));
+    if (andon) {
+      const header = serializeAndonHeader({ runId: parsed.data.run_id, planRef });
+      await gh.issues.update({ ...repo, issue_number: andon.number, body: `${header}\n${andon.body ?? ''}` });
+    }
+  }
+  if (!andon) {
+    throw new Error(`no andon:open break references ${planRef}${opts.runId ? ` or run ${opts.runId}` : ''} — plan-propose must raise the Andon before publish`);
   }
   const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
+  const desired = JSON.stringify(plan, null, 2);
 
+  // Branch + file writes are RESUMABLE: a workflow_run re-delivery or an earlier partial
+  // publish (branch created, file write failed) must complete, not skip.
   try {
     const { data: baseRef } = await gh.git.getRef({ ...repo, ref: `heads/${opts.base ?? 'main'}` });
     await gh.git.createRef({ ...repo, ref: `refs/heads/${planRef}`, sha: baseRef.object.sha });
   } catch (error: unknown) {
-    if (errorStatus(error) === 422) return { outcome: 'already_published', planRef }; // workflow_run re-delivery
-    throw error;
+    if (errorStatus(error) !== 422) throw error; // 422 = branch already exists — resume below
+  }
+
+  // The branch may already carry a plan.json (inherited from base — approval merges put the
+  // prior plan.json on main — or written by an earlier attempt): supply its sha, skip if equal.
+  let existingSha: string | undefined;
+  try {
+    const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref: planRef });
+    if (!Array.isArray(data) && 'content' in data && typeof data.content === 'string' && 'sha' in data) {
+      if (Buffer.from(data.content, 'base64').toString('utf8').trim() === desired.trim()) {
+        return { outcome: 'already_published', planRef };
+      }
+      existingSha = data.sha;
+    }
+  } catch (error: unknown) {
+    if (errorStatus(error) !== 404) throw error;
   }
 
   await gh.repos.createOrUpdateFileContents({
     ...repo,
     path: 'plan.json',
     message: `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${andon.number})`,
-    content: Buffer.from(JSON.stringify(plan, null, 2)).toString('base64'),
+    content: Buffer.from(desired).toString('base64'),
     branch: planRef,
+    ...(existingSha ? { sha: existingSha } : {}),
   });
   return { outcome: 'published', planRef, andonIssue: andon.number };
 }
@@ -99,7 +153,7 @@ if (isMain) {
   const repoArg = get('repo');
   const [owner, repoName] = (repoArg ?? '').split('/');
   if (!dir || !owner || !repoName) {
-    console.error('usage: plan-publish --dir <artifacts-dir> --repo <owner/repo> [--base <branch>]');
+    console.error('usage: plan-publish --dir <artifacts-dir> --repo <owner/repo> [--base <branch>] [--run-id <workflow_run id>]');
     process.exit(2);
   }
   const planFile = findPlanFile(dir);
@@ -107,7 +161,7 @@ if (isMain) {
     console.error(`no plan.json found under ${dir} — the plan-propose run uploaded no plan artifact`);
     process.exit(1);
   }
-  publishPlan(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(planFile, 'utf8')), { base: get('base') })
+  publishPlan(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(planFile, 'utf8')), { base: get('base'), runId: get('run-id') })
     .then((result) => {
       console.log(result.outcome === 'published' ? `published ${result.planRef} (Andon #${result.andonIssue})` : `already published: ${result.planRef}`);
     })

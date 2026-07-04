@@ -62,6 +62,21 @@ export function checkJudgmentItem(body: string, id: string): string | null {
   return found ? updated.join('\n') : null;
 }
 
+/** Flip one judgment item back to ✗ (re-flag path); returns null when the id is absent. */
+export function uncheckJudgmentItem(body: string, id: string): string | null {
+  const lines = body.split('\n');
+  let found = false;
+  const updated = lines.map((line) => {
+    const m = ITEM_RE.exec(line.trim());
+    if (m && m[2] === id) {
+      found = true;
+      return line.replace(/- \[(x|X)\]/, '- [ ]');
+    }
+    return line;
+  });
+  return found ? updated.join('\n') : null;
+}
+
 // ---------- Correction: <!-- correction:v1 andon:<issue#> item:bc-<id> ----------
 
 export interface CorrectionMarker {
@@ -120,19 +135,75 @@ export interface WorkloadEvent {
 const EVENT_RE =
   /<!--\s*workload-event:v1\s+action:(\w+)\s+by:@(\S+)\s+at:(\S+?)(?:\s+reason:"([^"]*)")?(?:\s+revisit:"([^"]*)")?\s*-->/;
 
+// reason/revisit are operator free text living inside a double-quote-delimited
+// field of an HTML comment: `"` would truncate the EVENT_RE match and `-->`
+// would terminate the comment itself, so both are entity-escaped on write and
+// reversed on read (lossless round-trip).
+function escapeMarkerValue(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/>/g, '&gt;');
+}
+
+function unescapeMarkerValue(value: string): string {
+  return value.replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+}
+
+// Blockquote continuation: without `> ` after each newline, only the first
+// line of a multi-line reason/revisit renders inside the quote on GitHub.
+function blockquote(value: string): string {
+  return value.replace(/\n/g, '\n> ');
+}
+
 export function serializeWorkloadEvent(e: WorkloadEvent): string {
-  let s = `<!-- workload-event:v1 action:${e.action} by:@${e.by} at:${e.at}`;
-  if (e.reason !== undefined) s += ` reason:"${e.reason}"`;
-  if (e.revisit !== undefined) s += ` revisit:"${e.revisit}"`;
-  return `${s} -->`;
+  let marker = `<!-- workload-event:v1 action:${e.action} by:@${e.by} at:${e.at}`;
+  if (e.reason !== undefined) marker += ` reason:"${escapeMarkerValue(e.reason)}"`;
+  if (e.revisit !== undefined) marker += ` revisit:"${escapeMarkerValue(e.revisit)}"`;
+  marker += ' -->';
+  // Human-visible line first: a marker-only body renders as an EMPTY comment in
+  // the GitHub UI, hiding the attributed event timeline from UI-driven operators.
+  let visible = `**Workload event**: \`${e.action}\` by @${e.by} at ${e.at}`;
+  if (e.reason !== undefined) visible += `\n> reason: ${blockquote(e.reason)}`;
+  if (e.revisit !== undefined) visible += `\n> revisit: ${blockquote(e.revisit)}`;
+  return `${visible}\n\n${marker}`;
 }
 
 export function parseWorkloadEvent(body: string): WorkloadEvent | null {
   const m = EVENT_RE.exec(body);
   if (!m) return null;
   const event: WorkloadEvent = { action: m[1] as WorkloadAction, by: m[2]!, at: m[3]! };
-  if (m[4] !== undefined) event.reason = m[4];
-  if (m[5] !== undefined) event.revisit = m[5];
+  if (m[4] !== undefined) event.reason = unescapeMarkerValue(m[4]);
+  if (m[5] !== undefined) event.revisit = unescapeMarkerValue(m[5]);
+  return event;
+}
+
+// ---------- Correction lifecycle event comment ----------
+
+export type CorrectionAction = 'addressed' | 'withdrawn';
+
+export interface CorrectionEvent {
+  action: CorrectionAction;
+  by: string; // @login or single-writer workflow name
+  at: string; // ISO8601
+  cause?: string; // required for withdrawn (data-model: causes recorded)
+}
+
+const CORRECTION_EVENT_RE =
+  /<!--\s*correction-event:v1\s+action:(\w+)\s+by:@(\S+)\s+at:(\S+?)(?:\s+cause:"([^"]*)")?\s*-->/;
+
+export function serializeCorrectionEvent(e: CorrectionEvent): string {
+  let marker = `<!-- correction-event:v1 action:${e.action} by:@${e.by} at:${e.at}`;
+  if (e.cause !== undefined) marker += ` cause:"${escapeMarkerValue(e.cause)}"`;
+  marker += ' -->';
+  // Same dual rendering as workload events: visible line first, marker after.
+  let visible = `**Correction event**: \`${e.action}\` by @${e.by} at ${e.at}`;
+  if (e.cause !== undefined) visible += `\n> cause: ${blockquote(e.cause)}`;
+  return `${visible}\n\n${marker}`;
+}
+
+export function parseCorrectionEvent(body: string): CorrectionEvent | null {
+  const m = CORRECTION_EVENT_RE.exec(body);
+  if (!m || (m[1] !== 'addressed' && m[1] !== 'withdrawn')) return null;
+  const event: CorrectionEvent = { action: m[1] as CorrectionAction, by: m[2]!, at: m[3]! };
+  if (m[4] !== undefined) event.cause = unescapeMarkerValue(m[4]);
   return event;
 }
 

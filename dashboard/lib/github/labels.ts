@@ -56,7 +56,10 @@ export function workloadState(labels: string[]): WorkloadState | null {
 export const WORKLOAD_TRANSITIONS: Record<string, { from: WorkloadState[]; to: WorkloadState }> = {
   activate: { from: ['proposed'], to: 'active' },
   complete: { from: ['active'], to: 'completed' },
-  cancel: { from: ['active'], to: 'canceled' },
+  // proposed/deferred included per the amended FR-038 (state-transition audit 2026-07-03):
+  // a workload that will never activate, or a dead deferral, must be cancelable — the only
+  // path to archival. Runs-to-stop exist only when canceling from active.
+  cancel: { from: ['proposed', 'active', 'deferred'], to: 'canceled' },
   defer: { from: ['active'], to: 'deferred' },
   reactivate: { from: ['deferred'], to: 'active' },
   archive: { from: ['completed', 'canceled'], to: 'archived' },

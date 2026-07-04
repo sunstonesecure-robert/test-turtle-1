@@ -12,6 +12,7 @@
     "gate:preflight": "tsx scripts/gates/build-preflight.ts",
     "gate:lifecycle": "tsx scripts/gates/lifecycle-gate.ts",
     "demo:propose-plan": "tsx scripts/demo/propose-plan.ts",
+    "demo:agent-revise": "tsx scripts/demo/agent-revise.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "npm run dev --workspace dashboard"

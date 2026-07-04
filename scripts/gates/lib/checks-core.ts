@@ -2,7 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { PlanDoc } from '../../../schemas/plan';
 import { getAndon, openCorrectionCount } from '../../../dashboard/lib/github/andon';
-import { maxFrozenVersion, tagExists, planBranch } from '../../../dashboard/lib/github/plans';
+import { maxPlanVersion, tagExists, planBranch } from '../../../dashboard/lib/github/plans';
 import type { GateResult } from './runner';
 
 /**
@@ -53,18 +53,21 @@ export async function checkG9VersionMonotonic(
   repo: RepoRef,
   plan: PlanDoc,
 ): Promise<GateResult> {
-  const max = await maxFrozenVersion(gh, repo, plan.feature);
+  // "Existing" counts frozen tags AND other plan branches — abandoned versions
+  // are never reused (FR-058) — but not this plan's own branch, which exists by
+  // the time the gate runs on its approval PR.
+  const own = planBranch(plan.feature, plan.version);
+  const max = await maxPlanVersion(gh, repo, plan.feature, { excludeRef: own });
   if (plan.version !== max + 1) {
     return {
       id: 'G9',
       status: 'fail',
       requirement: 'FR-027',
-      detail: `version ${plan.version} is not max existing (${max}) + 1`,
+      detail: `version ${plan.version} is not max existing (${max}, over frozen tags and plan branches) + 1`,
     };
   }
-  const tag = planBranch(plan.feature, plan.version);
-  if (await tagExists(gh, repo, tag)) {
-    return { id: 'G9', status: 'fail', requirement: 'FR-027', detail: `tag ${tag} already exists` };
+  if (await tagExists(gh, repo, own)) {
+    return { id: 'G9', status: 'fail', requirement: 'FR-027', detail: `tag ${own} already exists` };
   }
   return { id: 'G9', status: 'pass', requirement: 'FR-027' };
 }
