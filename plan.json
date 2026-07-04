@@ -32,7 +32,7 @@
   "boundary_cases": [
     {
       "id": "bc-empty-name",
-      "description": "When no operator name is configured, the greeting falls back to \"Hello, operator!\"",
+      "description": "When no operator name is configured, refuse the request with a setup hint instead of falling back.",
       "step_id": "step-hello"
     }
   ]
