@@ -1,9 +1,9 @@
 {
   "feature": "demo3",
-  "version": 1,
-  "supersedes": null,
-  "run_id": "demo-run-demo3",
-  "andon_issue": 10,
+  "version": 2,
+  "supersedes": 1,
+  "run_id": "reopen-of-demo3-v1",
+  "andon_issue": 13,
   "steps": [
     {
       "id": "step-hello",
