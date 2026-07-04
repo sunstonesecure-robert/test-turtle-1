@@ -1,5 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
+import { errorStatus } from './errors';
 import {
   parseWorkloadHeader,
   serializeWorkloadHeader,
@@ -49,6 +50,29 @@ export async function getWorkload(gh: Octokit, repo: RepoRef, slug: string): Pro
 }
 
 /**
+ * Read one workload by its issue number. The single-issue GET is read-after-write
+ * consistent, while the LIST endpoint is not: a just-created issue can be missing
+ * from `listForRepo` for a while (live-discovered in PB-003 — the seed introduced
+ * a workload and the immediate activate couldn't find it). Callers that already
+ * hold the issue number from a create MUST re-read through here, never via list.
+ */
+export async function getWorkloadByIssue(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<Workload | null> {
+  let issue;
+  try {
+    ({ data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber }));
+  } catch (error: unknown) {
+    // Same contract as getWorkload: absence is null, not a raw HTTP error.
+    if (errorStatus(error) === 404) return null;
+    throw error;
+  }
+  if (issue.pull_request) return null; // the issues API answers for PR numbers too — never workloads
+  const header = parseWorkloadHeader(issue.body ?? '');
+  if (!header) return null;
+  const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+  return { issueNumber, slug: header.id, title: issue.title, state: workloadState(labels) };
+}
+
+/**
  * Operator intake (dashboard only, after readiness passes — FR-029/FR-031).
  * Title-only is valid; the slug is the identity everything else keys on.
  */
@@ -90,10 +114,16 @@ export async function applyLifecycleTransition(
     at: string;
     reason?: string;
     revisit?: string;
+    /** Pass when the caller just created the workload: the list endpoint is not
+     *  read-after-write consistent, so a fresh issue must be re-read by number. */
+    issueNumber?: number;
   },
 ): Promise<Workload> {
-  const workload = await getWorkload(gh, repo, input.slug);
-  if (!workload) throw new Error(`workload not found: ${input.slug}`);
+  const workload =
+    input.issueNumber !== undefined
+      ? await getWorkloadByIssue(gh, repo, input.issueNumber)
+      : await getWorkload(gh, repo, input.slug);
+  if (!workload || workload.slug !== input.slug) throw new Error(`workload not found: ${input.slug}`);
   const transition = WORKLOAD_TRANSITIONS[normalizeAction(input.action)];
   if (!transition) throw new Error(`unknown lifecycle action: ${input.action}`);
 

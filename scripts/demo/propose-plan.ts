@@ -71,10 +71,22 @@ export async function proposeDemoPlan(
   const at = opts.at ?? new Date().toISOString();
 
   // Introduce + activate the workload when not present (quickstart §4 note).
+  // The activate re-reads by ISSUE NUMBER: GitHub's list endpoint is not
+  // read-after-write consistent, so the just-created issue can be invisible to
+  // a slug lookup (live PB-003 finding). A pre-existing proposed workload (e.g.
+  // a prior run that failed here) is activated too — the seed is resumable.
   let workload = await getWorkload(gh, repo, slug);
   if (!workload) {
     workload = await introduceWorkload(gh, repo, { slug, title: `Demo workload (${slug})`, actor, at });
-    workload = await applyLifecycleTransition(gh, repo, { slug, action: 'activated', actor, at });
+  }
+  if (workload.state === 'proposed') {
+    workload = await applyLifecycleTransition(gh, repo, {
+      slug,
+      action: 'activated',
+      actor,
+      at,
+      issueNumber: workload.issueNumber,
+    });
   }
 
   // Branch plan/<slug>/v1 from the default branch head, with plan.json committed.
