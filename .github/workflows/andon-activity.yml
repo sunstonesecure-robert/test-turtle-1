@@ -1,11 +1,14 @@
 # andon-activity — deterministic normalizer for the GitHub-UI review flow
-# (plain Actions YAML, no LLM). FR-003's open → under-review transition had
-# only a dashboard trigger; operators judging via issue checkboxes left breaks
-# at andon:open through the whole review (recorded open → resolved). On issue
-# edits: the FIRST recorded judgment on an andon:open break flips it to
-# andon:under-review — the operator's first real engagement is the trigger.
-# Idempotent and state-aware (already under-review / resolved / superseded =
-# no-op); non-judgment edits are ignored.
+# (plain Actions YAML, no LLM). Two jobs on issue edits:
+# 1. FR-003 (PB-002 finding D): the FIRST recorded judgment on an andon:open
+#    break flips it to andon:under-review — first real engagement is the trigger.
+# 2. FR-004 guard (PB-003 finding F): a checkbox ✓ recorded in the GitHub UI on
+#    an item whose correction is still OPEN is reverted with an explanatory
+#    comment — the item stays open until the revised plan addresses it or the
+#    correction is withdrawn. The dashboard's legitimate re-judge closes the
+#    correction BEFORE checking the item, so it is never reverted.
+# Idempotent and state-aware (resolved / superseded = no-op); non-judgment
+# edits are ignored.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: andon-activity
 on:
@@ -13,12 +16,12 @@ on:
     types: [edited]
 permissions:
   contents: read
-  issues: write # the andon:open → andon:under-review label flip
+  issues: write # label flip + judgment revert + explanatory comment
 concurrency:
   group: andon-activity-${{ github.event.issue.number }}
 jobs:
   normalize:
-    if: contains(github.event.issue.labels.*.name, 'andon:open')
+    if: contains(github.event.issue.labels.*.name, 'andon:open') || contains(github.event.issue.labels.*.name, 'andon:under-review')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -27,7 +30,7 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
-      - name: flip to under-review on first judgment (state-aware no-op otherwise)
+      - name: normalize (flip to under-review on first judgment; revert ✓ on open-corrected items)
         run: >-
           npx tsx scripts/andon-activity.ts
           --issue ${{ github.event.issue.number }}

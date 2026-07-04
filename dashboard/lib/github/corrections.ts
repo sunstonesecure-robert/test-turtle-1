@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { getAndon } from './andon';
+import { errorMessage } from './errors';
 import {
   parseCorrectionMarker,
   serializeCorrectionMarker,
@@ -60,7 +61,17 @@ export function instructionProblems(instruction: string): string[] {
 }
 
 export function renderCorrectionBody(andonIssue: number, itemId: string, instruction: string): string {
-  return [serializeCorrectionMarker({ andonIssue, itemId }), INSTRUCTION_HEADING, instruction.trim()].join('\n');
+  return [
+    serializeCorrectionMarker({ andonIssue, itemId }),
+    // Human-visible linkage (live PB-003 finding E): the marker renders
+    // invisibly and a "#N" in the TITLE never linkifies — a GHI operator saw no
+    // connection between break and correction. A #N mention in the BODY
+    // linkifies AND writes a "mentioned" backreference onto the break's timeline.
+    `**Correction** for judgment item \`${itemId}\` on Andon #${andonIssue}`,
+    '',
+    INSTRUCTION_HEADING,
+    instruction.trim(),
+  ].join('\n');
 }
 
 export function parseInstruction(body: string): string {
@@ -97,7 +108,9 @@ export async function getCorrection(gh: Octokit, repo: RepoRef, issueNumber: num
   return correction;
 }
 
-/** Every correction ever sent for this break — open, addressed, and withdrawn (records are permanent). */
+/** Every correction ever sent for this break — open, addressed, and withdrawn (records are permanent).
+ *  Three paginated calls by necessity; callers that only need OPEN corrections
+ *  (the dup check, re-judge, cascade, the activity guard) use listOpenCorrections. */
 export async function listCorrections(gh: Octokit, repo: RepoRef, andonIssue: number): Promise<Correction[]> {
   const corrections: Correction[] = [];
   for (const label of ['correction:open', 'correction:addressed', 'correction:withdrawn']) {
@@ -108,6 +121,15 @@ export async function listCorrections(gh: Octokit, repo: RepoRef, andonIssue: nu
     }
   }
   return corrections;
+}
+
+/** Only the OPEN corrections for this break — one filtered call (label + state),
+ *  the same idiom as openCorrectionCount / plan-gate G7. */
+export async function listOpenCorrections(gh: Octokit, repo: RepoRef, andonIssue: number): Promise<Correction[]> {
+  const issues = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'correction:open', state: 'open', per_page: 100 });
+  return issues
+    .map((issue) => toCorrection(issue))
+    .filter((c): c is Correction => c !== null && c.andonIssue === andonIssue);
 }
 
 /**
@@ -127,8 +149,7 @@ export async function sendCorrection(
   const item = andon.items.find((i) => i.id === input.itemId);
   if (!item) throw new Error(`judgment item ${input.itemId} not found on Andon #${input.andonIssue}`);
 
-  const existing = await listCorrections(gh, repo, input.andonIssue);
-  const open = existing.find((c) => c.itemId === input.itemId && c.state === 'open');
+  const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === input.itemId);
   if (open) {
     throw new Error(
       `item ${input.itemId} already has an open correction (#${open.issueNumber}) — revise or withdraw it before sending another`,
@@ -147,6 +168,22 @@ export async function sendCorrection(
     body: renderCorrectionBody(input.andonIssue, input.itemId, input.instruction),
     labels: ['correction:open'],
   });
+
+  // Native sub-issue attach (data-model: a correction IS a sub-issue of its
+  // break) so the GitHub UI shows the parent/child tree. Best-effort: the
+  // correction:v1 marker stays the authoritative machine linkage — it alone
+  // carries the item id, and the gates key on it — so an API/plan without
+  // sub-issues must not block the correction (FR-004); the body reference
+  // above still links the records for the operator.
+  try {
+    await gh.request('POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues', {
+      ...repo,
+      issue_number: input.andonIssue,
+      sub_issue_id: created.id,
+    });
+  } catch (error: unknown) {
+    console.warn(`sub-issue attach failed for correction #${created.number} → Andon #${input.andonIssue} (non-fatal): ${errorMessage(error)}`);
+  }
   return created.number;
 }
 
@@ -186,8 +223,7 @@ export async function rejudgeItem(
   repo: RepoRef,
   input: { andonIssue: number; itemId: string; by: string; at: string },
 ): Promise<void> {
-  const corrections = await listCorrections(gh, repo, input.andonIssue);
-  const open = corrections.find((c) => c.itemId === input.itemId && c.state === 'open');
+  const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === input.itemId);
   if (!open) {
     throw new Error(`no open correction for item ${input.itemId} on Andon #${input.andonIssue} — use the plain ✓ judgment`);
   }
@@ -237,8 +273,7 @@ export async function withdrawOpenCorrections(
   andonIssue: number,
   input: { by: string; at: string; cause: string },
 ): Promise<number> {
-  const corrections = await listCorrections(gh, repo, andonIssue);
-  const open = corrections.filter((c) => c.state === 'open');
+  const open = await listOpenCorrections(gh, repo, andonIssue);
   for (const correction of open) {
     await closeCorrection(gh, repo, correction.issueNumber, 'withdrawn', input);
   }

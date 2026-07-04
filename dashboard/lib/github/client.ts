@@ -70,7 +70,19 @@ export function createClient(opts: ClientOptions = {}): Octokit {
         throw error;
       }
     }
-    return request(options);
+    // Read-your-own-writes (live PB-003 finding: the Andon review page re-served
+    // its pre-click body right after the open→under-review write): GitHub can
+    // validate a conditional GET against a stale representation for a short
+    // window after a mutation, answering 304 to an ETag the write invalidated —
+    // and this hook would then re-serve the stale cached body. Any mutation
+    // through this client empties the cache, so the next read goes out
+    // unconditionally. Writes are rare relative to reads; the rate-limit cost
+    // is negligible.
+    try {
+      return await request(options);
+    } finally {
+      etagCache.clear();
+    }
   });
 
   return octokit;
