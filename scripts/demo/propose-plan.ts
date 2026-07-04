@@ -2,7 +2,9 @@ import { Octokit } from '@octokit/rest';
 import { createClient, repoFromEnv, type RepoRef } from '../../dashboard/lib/github/client';
 import { createAndonIssue } from '../../dashboard/lib/github/andon';
 import { getWorkload, introduceWorkload, applyLifecycleTransition } from '../../dashboard/lib/github/workloads';
+import { parseAndonHeader } from '../../dashboard/lib/github/markers';
 import { planBranch } from '../../dashboard/lib/github/plans';
+import { publishPlan } from '../plan-publish';
 import type { PlanDoc } from '../../schemas/plan';
 import { errorMessage } from '../../dashboard/lib/github/errors';
 
@@ -89,26 +91,23 @@ export async function proposeDemoPlan(
     });
   }
 
-  // Branch plan/<slug>/v1 from the default branch head, with plan.json committed.
-  const base = opts.base ?? 'main';
-  const { data: baseRef } = await gh.git.getRef({ ...repo, ref: `heads/${base}` });
   const branch = planBranch(slug, 1);
-  await gh.git.createRef({ ...repo, ref: `refs/heads/${branch}`, sha: baseRef.object.sha });
-
   const plan = demoPlan(runId);
   plan.feature = slug;
 
-  // Raise the Andon break first so plan.json can carry its issue number.
-  const andonIssue = await createAndonIssue(gh, repo, { slug, plan, planRef: branch });
+  // Find-or-create the Andon break, then land the branch through publishPlan —
+  // the SAME deterministic writer the production flow uses. That inherits its
+  // resumability (branch-exists, inherited plan.json sha — live PB-003 finding
+  // C: approval merges put a plan.json on main, and a sha-less write 422s) and
+  // avoids a second copy of the write logic. The fresh Andon's number is passed
+  // as a hint: lists lag creates (finding B), only single GETs are consistent.
+  const openBreaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:open', state: 'open', per_page: 100 });
+  let andonIssue = openBreaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === branch)?.number;
+  if (andonIssue === undefined) {
+    andonIssue = await createAndonIssue(gh, repo, { slug, plan, planRef: branch });
+  }
   plan.andon_issue = andonIssue;
-
-  await gh.repos.createOrUpdateFileContents({
-    ...repo,
-    path: 'plan.json',
-    message: `plan: propose ${branch}`,
-    content: Buffer.from(JSON.stringify(plan, null, 2)).toString('base64'),
-    branch,
-  });
+  await publishPlan(gh, repo, plan, { base: opts.base, andonIssue });
 
   return { workloadIssue: workload.issueNumber, andonIssue, planRef: branch };
 }

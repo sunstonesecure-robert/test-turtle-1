@@ -30,7 +30,7 @@ export async function publishPlan(
   gh: Octokit,
   repo: RepoRef,
   planRaw: unknown,
-  opts: { base?: string; runId?: string } = {},
+  opts: { base?: string; runId?: string; andonIssue?: number } = {},
 ): Promise<PublishResult> {
   // The agent cannot know the Andon number before the issue exists, so its
   // andon_issue is a placeholder — neutralize it for validation and patch the
@@ -51,8 +51,27 @@ export async function publishPlan(
   // HTML comments (live-discovered), so a fresh break has NO header — fall back to the trusted
   // gh-aw footer, which links the triggering run, then inject the canonical header ourselves:
   // agent proposes, deterministic single writer normalizes.
+  let andon: { number: number; body?: string | null } | undefined;
+  if (opts.andonIssue !== undefined) {
+    // Create-then-publish callers (the demo seed) pass the break's number: the
+    // LIST endpoint is not read-after-write consistent, so a just-created Andon
+    // can be invisible to the search below (PB-003 finding B applies here too).
+    let issue;
+    try {
+      ({ data: issue } = await gh.issues.get({ ...repo, issue_number: opts.andonIssue }));
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 404) throw error;
+      throw new Error(`Andon #${opts.andonIssue} does not exist — refusing to publish against it`);
+    }
+    if (issue.state !== 'open' || parseAndonHeader(issue.body ?? '')?.planRef !== planRef) {
+      throw new Error(`Andon #${opts.andonIssue} is closed or does not reference ${planRef} — refusing to publish against it`);
+    }
+    andon = issue;
+    const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
+    return writePlanBranch(gh, repo, plan, planRef, opts.base);
+  }
   const openBreaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:open', state: 'open', per_page: 100 });
-  let andon = openBreaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
+  andon = openBreaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
   if (!andon) {
     // No live break carries this plan ref — but if its BRANCH exists, this ref
     // already held a proposal whose review ended unapproved (superseded /
@@ -90,12 +109,23 @@ export async function publishPlan(
     throw new Error(`no andon:open break references ${planRef}${opts.runId ? ` or run ${opts.runId}` : ''} — plan-propose must raise the Andon before publish`);
   }
   const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
+  return writePlanBranch(gh, repo, plan, planRef, opts.base);
+}
+
+/** The deterministic branch write both publish paths share. RESUMABLE: a
+ *  workflow_run re-delivery or an earlier partial publish (branch created,
+ *  file write failed) must complete, not skip. */
+async function writePlanBranch(
+  gh: Octokit,
+  repo: RepoRef,
+  plan: PlanDoc,
+  planRef: string,
+  base = 'main',
+): Promise<PublishResult> {
   const desired = JSON.stringify(plan, null, 2);
 
-  // Branch + file writes are RESUMABLE: a workflow_run re-delivery or an earlier partial
-  // publish (branch created, file write failed) must complete, not skip.
   try {
-    const { data: baseRef } = await gh.git.getRef({ ...repo, ref: `heads/${opts.base ?? 'main'}` });
+    const { data: baseRef } = await gh.git.getRef({ ...repo, ref: `heads/${base}` });
     await gh.git.createRef({ ...repo, ref: `refs/heads/${planRef}`, sha: baseRef.object.sha });
   } catch (error: unknown) {
     if (errorStatus(error) !== 422) throw error; // 422 = branch already exists — resume below
@@ -119,12 +149,12 @@ export async function publishPlan(
   await gh.repos.createOrUpdateFileContents({
     ...repo,
     path: 'plan.json',
-    message: `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${andon.number})`,
+    message: `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${plan.andon_issue})`,
     content: Buffer.from(desired).toString('base64'),
     branch: planRef,
     ...(existingSha ? { sha: existingSha } : {}),
   });
-  return { outcome: 'published', planRef, andonIssue: andon.number };
+  return { outcome: 'published', planRef, andonIssue: plan.andon_issue };
 }
 
 /** Locate plan.json anywhere under the downloaded-artifacts directory. */
