@@ -103,9 +103,22 @@ export async function proposeDemoPlan(
 
 const isMain = process.argv[1]?.endsWith('propose-plan.ts');
 if (isMain) {
+  // A live target accumulates plan/<slug>/v* refs run over run (PB-001 used
+  // `demo`, PB-002 `demo2`), and this seed always proposes v1 — so the operator
+  // must be able to pick a fresh slug (PB-003 precondition).
+  // Accept --slug <value> and --slug=<value>: this arg is optional with a
+  // default, so an unrecognized spelling would otherwise fall through SILENTLY
+  // to `demo` — wrong slug on a fresh target, confusing ref-exists 422 here.
+  const argv = process.argv.slice(2);
+  const i = argv.findIndex((a) => a === '--slug' || a.startsWith('--slug='));
+  const slug = i < 0 ? undefined : argv[i]!.startsWith('--slug=') ? argv[i]!.slice('--slug='.length) : argv[i + 1];
+  if (i >= 0 && (!slug || !/^[a-z0-9][a-z0-9-]*$/.test(slug))) {
+    console.error('usage: propose-plan [--slug <kebab-case-slug>]  (default: demo)');
+    process.exit(2);
+  }
   const gh = createClient();
   const repo = repoFromEnv();
-  proposeDemoPlan(gh, repo)
+  proposeDemoPlan(gh, repo, slug ? { slug } : {})
     .then((r) => {
       console.log(`workload issue #${r.workloadIssue}`);
       console.log(`Andon break  #${r.andonIssue} (andon:open)`);
