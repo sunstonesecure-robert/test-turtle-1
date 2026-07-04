@@ -1,15 +1,15 @@
 {
-  "feature": "demo2",
+  "feature": "demo3",
   "version": 1,
   "supersedes": null,
-  "run_id": "plan-propose-28673914517",
-  "andon_issue": 7,
+  "run_id": "demo-run-demo3",
+  "andon_issue": 10,
   "steps": [
     {
-      "id": "step-script",
-      "title": "Author the hello-world + current-time Python script",
-      "intent": "Create a single self-contained Python script that prints a hello-world greeting followed by the current date and time.",
-      "acceptance": "Running the script with python3 exits 0 and prints a greeting line containing \"Hello, World!\" and a separate line carrying the current date/time.",
+      "id": "step-hello",
+      "title": "Render the demo greeting",
+      "intent": "Show the operator-facing hello-world greeting on the demo page",
+      "acceptance": "GET /demo returns HTTP 200 and the body contains the exact greeting string",
       "priority": "MUST",
       "evidence_tag": "verified",
       "stand_in": null,
@@ -17,105 +17,23 @@
       "authority": null,
       "depends_on": [],
       "tracking_issue": null
-    },
-    {
-      "id": "step-time-format",
-      "title": "Render the current time in a human-readable, timezone-qualified format",
-      "intent": "Format the current timestamp so a reviewer can read it unambiguously, including a timezone indication.",
-      "acceptance": "The timestamp line matches an ISO-8601-like YYYY-MM-DD HH:MM:SS form with a timezone offset or name.",
-      "priority": "SHOULD",
-      "evidence_tag": "assumption",
-      "stand_in": "Python datetime.now().astimezone().isoformat() default local-timezone rendering",
-      "high_stakes": false,
-      "authority": null,
-      "depends_on": [
-        "step-script"
-      ],
-      "tracking_issue": null
-    },
-    {
-      "id": "step-run",
-      "title": "Run the script once and capture its stdout",
-      "intent": "Execute the script a single time and capture the exact stdout so the real greeting-and-time output is available for review.",
-      "acceptance": "The captured run records exit status 0 and stdout containing the greeting and a parseable current timestamp.",
-      "priority": "MUST",
-      "evidence_tag": "verified",
-      "stand_in": null,
-      "high_stakes": false,
-      "authority": null,
-      "depends_on": [
-        "step-script"
-      ],
-      "tracking_issue": null
-    },
-    {
-      "id": "step-report",
-      "title": "Send the captured output back for review",
-      "intent": "Surface the captured script output back to the operator for review, which is the workload's explicit deliverable.",
-      "acceptance": "The run's stdout is presented verbatim for operator review alongside the proposed plan.",
-      "priority": "MUST",
-      "evidence_tag": "verified",
-      "stand_in": null,
-      "high_stakes": false,
-      "authority": null,
-      "depends_on": [
-        "step-run"
-      ],
-      "tracking_issue": null
     }
   ],
   "verification_targets": [
     {
-      "id": "vt-greeting",
-      "kind": "expected-output",
-      "check": "stdout of the script contains the substring \"Hello, World!\"",
-      "maps_to": [
-        "step-script"
-      ]
-    },
-    {
-      "id": "vt-timestamp",
-      "kind": "expected-output",
-      "check": "stdout contains a line matching ^\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}:\\d{2}",
-      "maps_to": [
-        "step-script",
-        "step-time-format"
-      ]
-    },
-    {
-      "id": "vt-exit-zero",
-      "kind": "boundary-behavior",
-      "check": "python3 <script> exits with status code 0",
-      "maps_to": [
-        "step-script",
-        "step-run"
-      ]
-    },
-    {
-      "id": "vt-output-captured",
+      "id": "vt-hello-copy",
       "kind": "exact-copy",
-      "check": "the review artifact contains the script's stdout verbatim",
+      "check": "Response body of GET /demo equals \"Hello, operator!\"",
       "maps_to": [
-        "step-run",
-        "step-report"
+        "step-hello"
       ]
     }
   ],
   "boundary_cases": [
     {
-      "id": "bc-no-python3",
-      "description": "When the python3 interpreter is unavailable, the run fails fast with a clear error instead of producing partial or silent output.",
-      "step_id": "step-run"
-    },
-    {
-      "id": "bc-tz-unset",
-      "description": "When the host timezone is not configured, the timestamp falls back to a deterministic value (UTC or naive local) without crashing.",
-      "step_id": "step-time-format"
-    },
-    {
-      "id": "bc-empty-output",
-      "description": "When the script produces no stdout (e.g. output stream closed/redirected), the review surfaces an explicit \"no output captured\" rather than a silent pass.",
-      "step_id": "step-report"
+      "id": "bc-empty-name",
+      "description": "When no operator name is configured, refuse the request with a setup hint instead of falling back.",
+      "step_id": "step-hello"
     }
   ]
 }
