@@ -98,6 +98,19 @@ export async function judgeItem(gh: Octokit, repo: RepoRef, issueNumber: number,
   await gh.issues.update({ ...repo, issue_number: issueNumber, body: updated });
 }
 
+/** The LIVE Andon break (open or under-review — both are in-flight reviews;
+ *  a review the operator has picked up must still be findable) whose header
+ *  references this plan ref; null when none. The labels param is AND-semantic,
+ *  so the two states need two queries. */
+export async function findOpenAndonByPlanRef(gh: Octokit, repo: RepoRef, planRef: string): Promise<number | null> {
+  for (const label of ['andon:open', 'andon:under-review']) {
+    const breaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'open', per_page: 100 });
+    const match = breaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
+    if (match) return match.number;
+  }
+  return null;
+}
+
 /** Open corrections linked to this Andon (G7 input) — matched via the machine-readable
  *  correction:v1 marker, not substring (andon:12 must not match andon:123). */
 export async function openCorrectionCount(gh: Octokit, repo: RepoRef, andonIssue: number): Promise<number> {

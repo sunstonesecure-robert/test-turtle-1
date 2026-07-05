@@ -14,10 +14,12 @@
     "demo:propose-plan": "tsx scripts/demo/propose-plan.ts",
     "demo:agent-revise": "tsx scripts/demo/agent-revise.ts",
     "test": "vitest run",
+    "test:bdd": "NODE_OPTIONS=\"--import tsx\" cucumber-js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "npm run dev --workspace dashboard"
   },
   "devDependencies": {
+    "@cucumber/cucumber": "^13.0.0",
     "@types/node": "^22.10.0",
     "msw": "^2.7.0",
     "tsx": "^4.19.0",

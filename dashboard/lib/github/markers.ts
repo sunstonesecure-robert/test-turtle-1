@@ -27,12 +27,12 @@ export function parseAndonHeader(body: string): AndonHeader | null {
 // ---------- Judgment task-list items: - [ ] `bc-<id>` — description ----------
 
 export interface JudgmentItem {
-  id: string; // bc-* or st-*
+  id: string; // bc-* or st-* or q-*
   description: string;
   judged: boolean; // checked = ✓
 }
 
-const ITEM_RE = /^- \[( |x|X)\] `((?:bc|st)-[a-z0-9-]+)`\s+—\s+(.*)$/;
+const ITEM_RE = /^- \[( |x|X)\] `((?:bc|st|q)-[a-z0-9-]+)`\s+—\s+(.*)$/;
 
 export function serializeJudgmentItem(item: JudgmentItem): string {
   return `- [${item.judged ? 'x' : ' '}] \`${item.id}\` — ${item.description}`;
@@ -84,7 +84,8 @@ export interface CorrectionMarker {
   itemId: string;
 }
 
-const CORRECTION_RE = /<!--\s*correction:v1\s+andon:(\d+)\s+item:((?:bc|st)-[a-z0-9-]+)\s*-->/;
+// A ✗ correction MAY attach to a q- item (operator decision 2026-07-04).
+const CORRECTION_RE = /<!--\s*correction:v1\s+andon:(\d+)\s+item:((?:bc|st|q)-[a-z0-9-]+)\s*-->/;
 
 export function serializeCorrectionMarker(c: CorrectionMarker): string {
   return `<!-- correction:v1 andon:${c.andonIssue} item:${c.itemId} -->`;
@@ -205,6 +206,43 @@ export function parseCorrectionEvent(body: string): CorrectionEvent | null {
   const event: CorrectionEvent = { action: m[1] as CorrectionAction, by: m[2]!, at: m[3]! };
   if (m[4] !== undefined) event.cause = unescapeMarkerValue(m[4]);
   return event;
+}
+
+// ---------- Answer: <!-- answer:v1 andon:<issue#> item:q-<id> by:@<login> at:<ISO8601> ----------
+
+export interface AnswerMarker {
+  andonIssue: number;
+  itemId: string; // q-* only (FR-055/FR-056)
+  by: string; // @login
+  at: string; // ISO8601
+}
+
+const ANSWER_RE = /<!--\s*answer:v1\s+andon:(\d+)\s+item:(q-[a-z0-9-]+)\s+by:@(\S+)\s+at:(\S+?)\s*-->/;
+
+export function serializeAnswer(a: AnswerMarker, text: string): string {
+  const marker = `<!-- answer:v1 andon:${a.andonIssue} item:${a.itemId} by:@${a.by} at:${a.at} -->`;
+  // Same dual rendering as workload/correction events: visible line first,
+  // answer text as a blockquote, marker after. The marker carries no free
+  // text, so nothing needs entity-escaping.
+  const visible = `**Answer** to \`${a.itemId}\` by @${a.by} at ${a.at}\n> ${blockquote(text)}`;
+  return `${visible}\n\n${marker}`;
+}
+
+export function parseAnswer(body: string): AnswerMarker | null {
+  const m = ANSWER_RE.exec(body);
+  return m ? { andonIssue: Number(m[1]), itemId: m[2]!, by: m[3]!, at: m[4]! } : null;
+}
+
+/** Visible answer text of a serialized answer comment (un-blockquoted), or '' when absent.
+ *  Splits CRLF-tolerantly: browser form submissions canonicalize textarea content to \r\n,
+ *  and a stray \r defeats both `.` and `$` in the line regex (\r is a JS line terminator). */
+export function parseAnswerText(body: string): string {
+  const lines: string[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    const m = /^> ?(.*)$/.exec(line);
+    if (m) lines.push(m[1]!);
+  }
+  return lines.join('\n');
 }
 
 // ---------- Revision commit trailer: addresses: correction #N ----------

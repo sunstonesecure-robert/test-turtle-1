@@ -5,6 +5,7 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { PlanDoc } from '../schemas/plan';
 import { planBranch, tagExists } from '../dashboard/lib/github/plans';
 import { parseAndonHeader, serializeAndonHeader } from '../dashboard/lib/github/markers';
+import { findOpenAndonByPlanRef } from '../dashboard/lib/github/andon';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 
 /**
@@ -70,8 +71,13 @@ export async function publishPlan(
     const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
     return writePlanBranch(gh, repo, plan, planRef, opts.base);
   }
-  const openBreaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:open', state: 'open', per_page: 100 });
-  andon = openBreaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
+  // LIVE = open OR under-review: a revision can land after the operator has
+  // picked the review up (label flipped) — matching only andon:open here made
+  // the FR-058 guard below mis-refuse a live revision as an abandoned version
+  // (PR #25 review finding). The run-link fallback stays on andon:open: a
+  // fresh sanitized break is always still open.
+  const liveBreak = await findOpenAndonByPlanRef(gh, repo, planRef);
+  if (liveBreak !== null) andon = { number: liveBreak };
   if (!andon) {
     // No live break carries this plan ref — but if its BRANCH exists, this ref
     // already held a proposal whose review ended unapproved (superseded /
@@ -99,6 +105,7 @@ export async function publishPlan(
     // Boundary-anchored: a bare .includes() would let run 123 claim the break
     // for run 123456 when both are open concurrently.
     const runLink = new RegExp(`/actions/runs/${opts.runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`);
+    const openBreaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:open', state: 'open', per_page: 100 });
     andon = openBreaks.find((issue) => runLink.test(issue.body ?? ''));
     if (andon) {
       const header = serializeAndonHeader({ runId: parsed.data.run_id, planRef });
@@ -106,7 +113,7 @@ export async function publishPlan(
     }
   }
   if (!andon) {
-    throw new Error(`no andon:open break references ${planRef}${opts.runId ? ` or run ${opts.runId}` : ''} — plan-propose must raise the Andon before publish`);
+    throw new Error(`no live Andon break references ${planRef}${opts.runId ? ` or run ${opts.runId}` : ''} — plan-propose must raise the Andon before publish`);
   }
   const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
   return writePlanBranch(gh, repo, plan, planRef, opts.base);

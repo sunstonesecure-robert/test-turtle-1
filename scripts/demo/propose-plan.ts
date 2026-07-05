@@ -69,7 +69,26 @@ export async function proposeDemoPlan(
 ): Promise<ProposeResult> {
   const slug = opts.slug ?? 'demo';
   const runId = opts.runId ?? `demo-run-${slug}`;
-  const actor = opts.actor ?? 'operator';
+  // Attribution is a success criterion, not decoration (live PB-003 finding G:
+  // seeded events read `by:@operator`, a placeholder no audit can resolve).
+  // Default to the AUTHENTICATED user, the same identity the real workflows
+  // record via github.actor.
+  let actor = opts.actor;
+  if (!actor) {
+    try {
+      actor = (await gh.users.getAuthenticated()).data.login;
+    } catch {
+      // /user is user-to-server only — an installation token (e.g. the Actions
+      // GITHUB_TOKEN) 401/403s here; the runner exports the triggering identity.
+      actor = process.env.GITHUB_ACTOR;
+    }
+    if (!actor) {
+      // NO placeholder fallback: an unattributable event is finding G itself.
+      throw new Error(
+        'cannot resolve an attributable operator identity: this token cannot call /user and GITHUB_ACTOR is unset — pass an explicit actor',
+      );
+    }
+  }
   const at = opts.at ?? new Date().toISOString();
 
   // Introduce + activate the workload when not present (quickstart §4 note).

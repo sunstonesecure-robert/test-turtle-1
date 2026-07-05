@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs';
+import { join, posix } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import {
@@ -23,6 +25,13 @@ import { errorMessage } from '../dashboard/lib/github/errors';
  * repo where init installed it (readiness I5), so intake-before-init is
  * structurally impossible on this path; the Actions token also cannot read
  * rulesets. Dashboard intake keeps its explicit readiness refusal.
+ *
+ * Agent context selection (FR-053): an optional `### Context` section lists
+ * one repo path per line the planning agent must read; every path must
+ * normalize to inside a special context folder (`runbooks/`, `useful-context/`,
+ * `inputs/` — no `../` escapes, absolute paths, or backslash tricks) and exist
+ * in the repository checkout. Any violation is a refusal naming every bad
+ * path. No section, or an empty one, is valid (index-files-only mode).
  */
 
 export type IntakeResult =
@@ -31,8 +40,38 @@ export type IntakeResult =
   | { outcome: 'refused'; reason: string };
 
 const SLUG_SECTION_RE = /###\s*Workload slug\s*\n+\s*([^\n]+)/;
+const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
+const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs'];
 
-export async function normalizeIntake(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<IntakeResult> {
+/** FR-053: paths from the `### Context` section that don't normalize to inside a special folder or don't exist. */
+export function invalidContextPaths(body: string, rootDir: string): string[] {
+  const section = CONTEXT_SECTION_RE.exec(body)?.[1] ?? '';
+  const lines = section
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && line !== '_No response_');
+  return lines.filter((line) => {
+    // Repo paths are forward-slash canonical: backslash tricks and `..`
+    // traversal are rejected outright, even when they would re-enter a
+    // special folder after normalization.
+    if (line.includes('\\') || line.includes('\0')) return true;
+    if (line.split('/').includes('..')) return true;
+    // Normalize BEFORE the prefix check (collapses `./` and `//`); absolute
+    // paths, drive letters, and any first segment that isn't a special
+    // folder are invalid.
+    const normalized = posix.normalize(line);
+    if (posix.isAbsolute(normalized) || /^[a-zA-Z]:/.test(normalized)) return true;
+    if (!CONTEXT_FOLDERS.includes(normalized.split('/')[0] ?? '')) return true;
+    return !existsSync(join(rootDir, normalized));
+  });
+}
+
+export async function normalizeIntake(
+  gh: Octokit,
+  repo: RepoRef,
+  issueNumber: number,
+  opts: { rootDir?: string } = {},
+): Promise<IntakeResult> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const body = issue.body ?? '';
 
@@ -61,6 +100,13 @@ export async function normalizeIntake(gh: Octokit, repo: RepoRef, issueNumber: n
   const dup = await getWorkload(gh, repo, slug);
   if (dup && dup.issueNumber !== issueNumber) {
     return refuse(`workload slug \`${slug}\` already exists (issue #${dup.issueNumber}, FR-031)`);
+  }
+
+  const badPaths = invalidContextPaths(body, opts.rootDir ?? process.cwd());
+  if (badPaths.length > 0) {
+    return refuse(
+      `context path(s) invalid: ${badPaths.map((p) => `\`${p}\``).join(', ')} — every \`### Context\` line must be a repo-relative path inside \`runbooks/\`, \`useful-context/\`, or \`inputs/\` that exists in the repository (FR-053)`,
+    );
   }
 
   await gh.issues.update({ ...repo, issue_number: issueNumber, body: `${serializeWorkloadHeader({ id: slug })}\n${body}` });
