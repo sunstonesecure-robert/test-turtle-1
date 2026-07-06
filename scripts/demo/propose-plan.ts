@@ -126,7 +126,7 @@ export async function proposeDemoPlan(
     andonIssue = await createAndonIssue(gh, repo, { slug, plan, planRef: branch });
   }
   plan.andon_issue = andonIssue;
-  await publishPlan(gh, repo, plan, { base: opts.base, andonIssue });
+  await publishPlan(gh, repo, plan, { base: opts.base, andonIssue, workloadIssue: workload.issueNumber });
 
   return { workloadIssue: workload.issueNumber, andonIssue, planRef: branch };
 }

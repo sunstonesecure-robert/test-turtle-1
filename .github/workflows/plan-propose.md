@@ -33,7 +33,10 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    instructions.
 3. Derive a structured plan document conforming to `schemas/plan.schema.json`: steps with
    intent/acceptance/priority/evidence tags, verification targets (single pass/fail checks),
-   and boundary cases.
+   and boundary cases. The plan's `feature` field MUST be exactly `${{ inputs.workload }}` —
+   never invent a feature name (no spec-kit-style `NNN-` prefixes): the publisher refuses any
+   plan whose `feature` does not name an existing workload (PB-004 finding D), and every
+   `plan/<slug>/v<N>` reference in your Andon body MUST use that same slug.
 4. Compute `<N>` = one more than the highest version among BOTH the frozen
    `plan/${{ inputs.workload }}/v*` tags AND the existing `plan/${{ inputs.workload }}/v*`
    branches. Branches count because an abandoned proposal (published, then withdrawn without

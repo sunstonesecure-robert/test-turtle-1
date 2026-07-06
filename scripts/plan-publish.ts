@@ -5,6 +5,7 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { PlanDoc } from '../schemas/plan';
 import { planBranch, tagExists } from '../dashboard/lib/github/plans';
 import { parseAndonHeader, serializeAndonHeader } from '../dashboard/lib/github/markers';
+import { getWorkload, getWorkloadByIssue } from '../dashboard/lib/github/workloads';
 import { findOpenAndonByPlanRef } from '../dashboard/lib/github/andon';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 
@@ -31,7 +32,7 @@ export async function publishPlan(
   gh: Octokit,
   repo: RepoRef,
   planRaw: unknown,
-  opts: { base?: string; runId?: string; andonIssue?: number } = {},
+  opts: { base?: string; runId?: string; andonIssue?: number; workloadIssue?: number } = {},
 ): Promise<PublishResult> {
   // The agent cannot know the Andon number before the issue exists, so its
   // andon_issue is a placeholder — neutralize it for validation and patch the
@@ -42,6 +43,37 @@ export async function publishPlan(
     throw new Error(`plan.json failed schema validation: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   }
   const planRef = planBranch(parsed.data.feature, parsed.data.version);
+
+  // The agent authors plan.json, and a schema-legal invented `feature` silently
+  // disconnects the plan from its workload: the branch, CURRENT pointer, and
+  // every slug-keyed flow would never link back to the workload issue (live
+  // PB-004 finding D — the agent wrote feature "053-fibonacci-sequence" for
+  // workload demo4). The publisher is the deterministic gate: the feature MUST
+  // name a real workload. Create-then-publish callers pass the workload's issue
+  // number because the LIST endpoint is not read-after-write consistent
+  // (PB-003 finding B); the workflow_run path lists — intake ran long before.
+  const workload =
+    opts.workloadIssue !== undefined
+      ? await getWorkloadByIssue(gh, repo, opts.workloadIssue)
+      : await getWorkload(gh, repo, parsed.data.feature);
+  if (!workload) {
+    // Distinct messages: a dead HINT is the caller's bug, an unknown FEATURE is
+    // the agent's (PR #35 review) — conflating them sends debugging the wrong way.
+    throw new Error(
+      opts.workloadIssue !== undefined
+        ? `refusing to publish ${planRef}: workload issue #${opts.workloadIssue} does not exist or is not a workload`
+        : `refusing to publish ${planRef}: plan.feature "${parsed.data.feature}" does not name an existing workload — ` +
+            `the plan's feature field must equal the workload slug exactly (PB-004 finding D)`,
+    );
+  }
+  if (workload.slug !== parsed.data.feature) {
+    // Only reachable via the hint (the slug lookup matches by construction).
+    throw new Error(
+      `refusing to publish ${planRef}: plan.feature "${parsed.data.feature}" does not match workload slug ` +
+        `"${workload.slug}" (issue #${workload.issueNumber}) — the plan's feature field must equal the workload ` +
+        `slug exactly (PB-004 finding D)`,
+    );
+  }
 
   if (await tagExists(gh, repo, planRef)) {
     throw new Error(`refusing to publish ${planRef}: a frozen tag with that version already exists — the agent must propose v${parsed.data.version + 1}`);
