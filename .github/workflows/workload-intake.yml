@@ -37,3 +37,5 @@ jobs:
           --repo ${{ github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Per-file context-size ceiling (MB); unset → the script's 5 MB default (PB-004 hang guard).
+          CONTEXT_MAX_FILE_MB: ${{ vars.CONTEXT_MAX_FILE_MB }}

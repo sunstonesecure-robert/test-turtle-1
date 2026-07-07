@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
@@ -43,14 +43,72 @@ const SLUG_SECTION_RE = /###\s*Workload slug\s*\n+\s*([^\n]+)/;
 const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
 const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs'];
 
-/** FR-053: paths from the `### Context` section that don't normalize to inside a special folder or don't exist. */
-export function invalidContextPaths(body: string, rootDir: string): string[] {
+// Per-file ceiling for designated context items (PB-004: a 6.5 MB PDF designated
+// as context hung a planning-agent run for ~6h — an oversized binary blob is a
+// pathological token load). Configurable via CONTEXT_MAX_FILE_MB; a folder
+// designation is checked file-by-file. Pre-extraction/RAG for large sources is
+// the longer-term path (tracked separately) — this is the cheap intake guard.
+const DEFAULT_CONTEXT_MAX_FILE_MB = 5;
+
+/** Effective per-file context limit in bytes, from CONTEXT_MAX_FILE_MB (default 5), or the passed override. */
+export function contextMaxFileBytes(override?: number): number {
+  if (override !== undefined) return override;
+  const mb = Number(process.env.CONTEXT_MAX_FILE_MB);
+  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_CONTEXT_MAX_FILE_MB) * 1024 * 1024;
+}
+
+/** Context lines from the `### Context` section, trimmed, minus blanks and the issue-form placeholder. */
+function contextLines(body: string): string[] {
   const section = CONTEXT_SECTION_RE.exec(body)?.[1] ?? '';
-  const lines = section
+  return section
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line && line !== '_No response_');
-  return lines.filter((line) => {
+}
+
+/**
+ * Designated context files exceeding the per-file limit (PB-004 hang guard).
+ * Only meaningful for paths already known valid + existing (run after
+ * invalidContextPaths clears). A folder designation is walked recursively and
+ * each offending file is reported as its own `folder/sub/file` path.
+ *
+ * Walk safety (untrusted input — context paths are operator-supplied): lstat
+ * does NOT follow symlinks, and symlinks are skipped outright. That kills two
+ * failure modes at once — a symlink cycle (e.g. `dir/loop -> dir`) can't drive
+ * infinite recursion / stack overflow, and a symlink can't escape the walk to
+ * a huge or out-of-tree target. readdir is wrapped so an unreadable directory
+ * (permissions / a delete race) fails soft, not by crashing the intake job.
+ */
+export function oversizedContextPaths(body: string, rootDir: string, maxBytes = contextMaxFileBytes()): { path: string; bytes: number }[] {
+  const offenders: { path: string; bytes: number }[] = [];
+  const check = (relPath: string): void => {
+    const abs = join(rootDir, relPath);
+    let stat;
+    try {
+      stat = lstatSync(abs);
+    } catch {
+      return; // existence is invalidContextPaths' job; a race here is not a size failure
+    }
+    if (stat.isSymbolicLink()) return; // context must be real committed files, never symlinks
+    if (stat.isDirectory()) {
+      let entries: string[];
+      try {
+        entries = readdirSync(abs);
+      } catch {
+        return; // unreadable directory (perms / delete race) → not a size failure; fail soft
+      }
+      for (const entry of entries) check(posix.join(relPath, entry));
+    } else if (stat.size > maxBytes) {
+      offenders.push({ path: relPath, bytes: stat.size });
+    }
+  };
+  for (const line of contextLines(body)) check(posix.normalize(line));
+  return offenders;
+}
+
+/** FR-053: paths from the `### Context` section that don't normalize to inside a special folder or don't exist. */
+export function invalidContextPaths(body: string, rootDir: string): string[] {
+  return contextLines(body).filter((line) => {
     // Repo paths are forward-slash canonical: backslash tricks and `..`
     // traversal are rejected outright, even when they would re-enter a
     // special folder after normalization.
@@ -70,7 +128,7 @@ export async function normalizeIntake(
   gh: Octokit,
   repo: RepoRef,
   issueNumber: number,
-  opts: { rootDir?: string } = {},
+  opts: { rootDir?: string; maxContextFileBytes?: number } = {},
 ): Promise<IntakeResult> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const body = issue.body ?? '';
@@ -102,10 +160,23 @@ export async function normalizeIntake(
     return refuse(`workload slug \`${slug}\` already exists (issue #${dup.issueNumber}, FR-031)`);
   }
 
-  const badPaths = invalidContextPaths(body, opts.rootDir ?? process.cwd());
+  const rootDir = opts.rootDir ?? process.cwd();
+  const badPaths = invalidContextPaths(body, rootDir);
   if (badPaths.length > 0) {
     return refuse(
       `context path(s) invalid: ${badPaths.map((p) => `\`${p}\``).join(', ')} — every \`### Context\` line must be a repo-relative path inside \`runbooks/\`, \`useful-context/\`, or \`inputs/\` that exists in the repository (FR-053)`,
+    );
+  }
+
+  // Size guard (PB-004): only reachable once every path is valid + existing.
+  const maxBytes = contextMaxFileBytes(opts.maxContextFileBytes);
+  const oversized = oversizedContextPaths(body, rootDir, maxBytes);
+  if (oversized.length > 0) {
+    const limitMb = (maxBytes / (1024 * 1024)).toFixed(0);
+    return refuse(
+      `context file(s) too large (limit ${limitMb} MB, set CONTEXT_MAX_FILE_MB to change): ${oversized
+        .map((o) => `\`${o.path}\` (${(o.bytes / (1024 * 1024)).toFixed(1)} MB)`)
+        .join(', ')} — large sources must be pre-extracted to text before use as agent context (FR-053)`,
     );
   }
 
