@@ -1,15 +1,15 @@
 {
-  "feature": "demo3",
-  "version": 2,
-  "supersedes": 1,
-  "run_id": "reopen-of-demo3-v1",
-  "andon_issue": 13,
+  "feature": "demo4",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "plan-propose-28873472312",
+  "andon_issue": 22,
   "steps": [
     {
-      "id": "step-hello",
-      "title": "Render the demo greeting",
-      "intent": "Show the operator-facing hello-world greeting on the demo page",
-      "acceptance": "GET /demo returns HTTP 200 and the body contains the exact greeting string",
+      "id": "step-parse-arg",
+      "title": "Parse and validate the count argument N",
+      "intent": "Read N as the sole command-line argument to the Rust program and validate it is a non-negative integer before any computation begins.",
+      "acceptance": "Invoking the binary with a valid non-negative integer exits 0; invoking it with a missing, negative, or non-integer argument exits non-zero and prints a usage message to stderr.",
       "priority": "MUST",
       "evidence_tag": "verified",
       "stand_in": null,
@@ -17,23 +17,130 @@
       "authority": null,
       "depends_on": [],
       "tracking_issue": null
+    },
+    {
+      "id": "step-fib-compute",
+      "title": "Compute the first N terms of the Fibonacci sequence",
+      "intent": "Generate the first N numbers of the Fibonacci sequence beginning 0, 1, 1, 2, 3, ... The workload phrase \"first N digits\" is read here as \"first N terms\" (see bc-digits-vs-terms); this reading is the single assumption most in need of operator confirmation before any build.",
+      "acceptance": "For N=10 the produced sequence equals exactly 0, 1, 1, 2, 3, 5, 8, 13, 21, 34.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "Workload issue #15 phrasing \"first N digits of the Fibonacci sequence\" interpreted as the first N sequence terms seeded 0, 1",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-parse-arg"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-bignum",
+      "title": "Use arbitrary-precision arithmetic for large terms",
+      "intent": "Represent Fibonacci values with big-integer arithmetic so terms beyond the u64/u128 range stay exact rather than overflowing or wrapping silently.",
+      "acceptance": "For N=100 the 100th term is printed exactly as 218922995834555169026 with no overflow or panic.",
+      "priority": "SHOULD",
+      "evidence_tag": "assumption",
+      "stand_in": "num-bigint crate as the representative arbitrary-precision integer source (vs. a std-only hand-rolled bignum or capping N at the u128 limit)",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-fib-compute"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-output",
+      "title": "Emit the sequence to stdout",
+      "intent": "Print each computed Fibonacci term in order, one decimal integer per line, to stdout.",
+      "acceptance": "For a run of N terms, stdout contains exactly N lines, each a decimal integer, in ascending sequence order.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-fib-compute"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-build-verify",
+      "title": "Build and self-check the program",
+      "intent": "Compile the program with cargo and run it on a sample input to confirm it builds and executes cleanly before handing off.",
+      "acceptance": "`cargo build --release` exits 0 and a sample run with N=10 prints the expected ten terms.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-parse-arg",
+        "step-fib-compute",
+        "step-output"
+      ],
+      "tracking_issue": null
     }
   ],
   "verification_targets": [
     {
-      "id": "vt-hello-copy",
-      "kind": "exact-copy",
-      "check": "Response body of GET /demo equals \"Hello, operator!\"",
+      "id": "vt-fib-ten",
+      "kind": "expected-output",
+      "check": "Running the binary with N=10 prints the ten lines 0, 1, 1, 2, 3, 5, 8, 13, 21, 34 in order.",
       "maps_to": [
-        "step-hello"
+        "step-fib-compute",
+        "step-output"
+      ]
+    },
+    {
+      "id": "vt-bignum-exact",
+      "kind": "boundary-behavior",
+      "check": "Running the binary with N=100 prints 218922995834555169026 as the final line without panic or overflow.",
+      "maps_to": [
+        "step-bignum"
+      ]
+    },
+    {
+      "id": "vt-arg-missing",
+      "kind": "boundary-behavior",
+      "check": "Running the binary with no argument exits non-zero and prints a usage message to stderr.",
+      "maps_to": [
+        "step-parse-arg"
+      ]
+    },
+    {
+      "id": "vt-build",
+      "kind": "expected-output",
+      "check": "`cargo build --release` completes with exit code 0.",
+      "maps_to": [
+        "step-build-verify"
       ]
     }
   ],
   "boundary_cases": [
     {
-      "id": "bc-empty-name",
-      "description": "When no operator name is configured, refuse the request with a setup hint instead of falling back.",
-      "step_id": "step-hello"
+      "id": "bc-digits-vs-terms",
+      "description": "The workload says \"first N digits\" but the Fibonacci sequence is a series of terms; this plan assumes N means the first N terms. If the operator instead means the first N decimal digits of a single (large) Fibonacci number, both the computation and the output shape differ and the plan must be re-scoped before any build.",
+      "step_id": "step-fib-compute"
+    },
+    {
+      "id": "bc-n-zero",
+      "description": "N=0 produces an empty sequence: print nothing and exit 0 rather than treating it as an error.",
+      "step_id": "step-fib-compute"
+    },
+    {
+      "id": "bc-n-one",
+      "description": "N=1 prints only the single first term, 0.",
+      "step_id": "step-fib-compute"
+    },
+    {
+      "id": "bc-invalid-arg",
+      "description": "A negative, non-integer, or missing N is rejected with a usage message and a non-zero exit code instead of computing anything.",
+      "step_id": "step-parse-arg"
+    },
+    {
+      "id": "bc-large-n-overflow",
+      "description": "For N large enough that a naive u64/u128 term would overflow (roughly N>93 for u64), values must remain exact via arbitrary-precision arithmetic rather than wrapping.",
+      "step_id": "step-bignum"
     }
   ]
 }
