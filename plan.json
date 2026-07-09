@@ -1,39 +1,88 @@
 {
-  "feature": "demo3",
-  "version": 2,
-  "supersedes": 1,
-  "run_id": "reopen-of-demo3-v1",
-  "andon_issue": 13,
+  "feature": "demo5",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "29028857915",
+  "andon_issue": 25,
   "steps": [
     {
-      "id": "step-hello",
-      "title": "Render the demo greeting",
-      "intent": "Show the operator-facing hello-world greeting on the demo page",
-      "acceptance": "GET /demo returns HTTP 200 and the body contains the exact greeting string",
+      "id": "step-resolve-timezone",
+      "title": "Resolve the operator's local timezone",
+      "intent": "Determine the timezone in which the clock is rendered so that \"local time\" is meaningful for the operator.",
+      "acceptance": "The rendered wall-clock time equals the current time in the resolved timezone within 1 second of the request instant.",
       "priority": "MUST",
-      "evidence_tag": "verified",
-      "stand_in": null,
+      "evidence_tag": "assumption",
+      "stand_in": "System/process local timezone (TZ) as a stand-in for an unspecified operator timezone source; the workload does not state where the timezone comes from.",
       "high_stakes": false,
       "authority": null,
       "depends_on": [],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-format-clock",
+      "title": "Format the current time as a clock",
+      "intent": "Produce a human-readable clock string from the current time in the resolved timezone.",
+      "acceptance": "The formatted clock string matches /^[0-2][0-9]:[0-5][0-9]$/ (24-hour HH:MM) for the resolved timezone.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "24-hour HH:MM format as a stand-in for an unspecified clock format (12h/24h, seconds, AM/PM not specified by the workload).",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-resolve-timezone"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-render-greeting",
+      "title": "Render the operator greeting with the clock",
+      "intent": "Combine a salutation with the formatted local clock into the operator-facing greeting.",
+      "acceptance": "The greeting response contains a salutation immediately followed by the formatted clock string produced by step-format-clock.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "The \"Hello, operator!\" salutation from the frozen demo3 plan as a stand-in for unspecified greeting copy.",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-format-clock"
+      ],
       "tracking_issue": null
     }
   ],
   "verification_targets": [
     {
-      "id": "vt-hello-copy",
-      "kind": "exact-copy",
-      "check": "Response body of GET /demo equals \"Hello, operator!\"",
+      "id": "vt-clock-local",
+      "kind": "boundary-behavior",
+      "check": "The rendered clock reflects the resolved local timezone, not UTC, when the two differ.",
       "maps_to": [
-        "step-hello"
+        "step-resolve-timezone",
+        "step-format-clock"
+      ]
+    },
+    {
+      "id": "vt-greeting-output",
+      "kind": "expected-output",
+      "check": "The greeting response contains both a salutation and an HH:MM clock string.",
+      "maps_to": [
+        "step-render-greeting"
       ]
     }
   ],
   "boundary_cases": [
     {
-      "id": "bc-empty-name",
-      "description": "When no operator name is configured, refuse the request with a setup hint instead of falling back.",
-      "step_id": "step-hello"
+      "id": "bc-missing-tz",
+      "description": "When no operator timezone can be resolved, refuse with a setup hint instead of silently defaulting to UTC.",
+      "step_id": "step-resolve-timezone"
+    },
+    {
+      "id": "bc-midnight-rollover",
+      "description": "At 00:00 local time the clock renders \"00:00\" (never \"24:00\" or empty) and the greeting still reads naturally.",
+      "step_id": "step-format-clock"
+    },
+    {
+      "id": "bc-dst-transition",
+      "description": "During a DST spring-forward or fall-back, the rendered local time reflects the UTC offset in effect at that instant.",
+      "step_id": "step-resolve-timezone"
     }
   ]
 }
