@@ -41,7 +41,7 @@ export type IntakeResult =
 
 const SLUG_SECTION_RE = /###\s*Workload slug\s*\n+\s*([^\n]+)/;
 const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
-const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs'];
+export const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs'];
 
 // Per-file ceiling for designated context items (PB-004: a 6.5 MB PDF designated
 // as context hung a planning-agent run for ~6h — an oversized binary blob is a
@@ -106,22 +106,30 @@ export function oversizedContextPaths(body: string, rootDir: string, maxBytes = 
   return offenders;
 }
 
+/**
+ * FR-053 shape rules, filesystem-free: does the path fail to normalize to
+ * inside a special context folder? Shared by intake (fs existence) and the
+ * answer composer (API existence, FR-056) so the two surfaces cannot drift.
+ */
+export function violatesSpecialFolderRules(line: string): boolean {
+  // Repo paths are forward-slash canonical: backslash tricks and `..`
+  // traversal are rejected outright, even when they would re-enter a
+  // special folder after normalization.
+  if (line.includes('\\') || line.includes('\0')) return true;
+  if (line.split('/').includes('..')) return true;
+  // Normalize BEFORE the prefix check (collapses `./` and `//`); absolute
+  // paths, drive letters, and any first segment that isn't a special
+  // folder are invalid.
+  const normalized = posix.normalize(line);
+  if (posix.isAbsolute(normalized) || /^[a-zA-Z]:/.test(normalized)) return true;
+  return !CONTEXT_FOLDERS.includes(normalized.split('/')[0] ?? '');
+}
+
 /** FR-053: paths from the `### Context` section that don't normalize to inside a special folder or don't exist. */
 export function invalidContextPaths(body: string, rootDir: string): string[] {
-  return contextLines(body).filter((line) => {
-    // Repo paths are forward-slash canonical: backslash tricks and `..`
-    // traversal are rejected outright, even when they would re-enter a
-    // special folder after normalization.
-    if (line.includes('\\') || line.includes('\0')) return true;
-    if (line.split('/').includes('..')) return true;
-    // Normalize BEFORE the prefix check (collapses `./` and `//`); absolute
-    // paths, drive letters, and any first segment that isn't a special
-    // folder are invalid.
-    const normalized = posix.normalize(line);
-    if (posix.isAbsolute(normalized) || /^[a-zA-Z]:/.test(normalized)) return true;
-    if (!CONTEXT_FOLDERS.includes(normalized.split('/')[0] ?? '')) return true;
-    return !existsSync(join(rootDir, normalized));
-  });
+  return contextLines(body).filter(
+    (line) => violatesSpecialFolderRules(line) || !existsSync(join(rootDir, posix.normalize(line))),
+  );
 }
 
 export async function normalizeIntake(
@@ -137,11 +145,17 @@ export async function normalizeIntake(
   if (existing) return { outcome: 'already_normalized', slug: existing.id };
 
   const refuse = async (reason: string): Promise<IntakeResult> => {
-    await gh.issues.createComment({
-      ...repo,
-      issue_number: issueNumber,
-      body: `**Workload intake refused** — ${reason}\n\nFix the form values in the issue body, then re-add the \`workload:proposed\` label to retry.`,
-    });
+    const comment = `**Workload intake refused** — ${reason}\n\nFix the form values in the issue body, then re-add the \`workload:proposed\` label to retry.`;
+    // Idempotent across the form's dual opened+labeled trigger (#30): both queued
+    // runs evaluate the same failure and would each comment. Post the refusal
+    // once — skip when an identical one already exists (same reason ⇒ same body),
+    // mirroring the success path's already_normalized convergence. The delabel is
+    // idempotent, so a re-label retry with the same unfixed problem still delabels
+    // (the signal) without stacking duplicate comments.
+    const existingComments = await gh.paginate(gh.issues.listComments, { ...repo, issue_number: issueNumber, per_page: 100 });
+    if (!existingComments.some((c) => c.body === comment)) {
+      await gh.issues.createComment({ ...repo, issue_number: issueNumber, body: comment });
+    }
     await gh.issues.removeLabel({ ...repo, issue_number: issueNumber, name: 'workload:proposed' }).catch(() => {});
     return { outcome: 'refused', reason };
   };

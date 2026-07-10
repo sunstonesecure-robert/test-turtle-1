@@ -12,6 +12,10 @@ permissions:
 engine: claude
 timeout-minutes: 15
 # cost ceiling: $5 per run (constitution: Cost & Observability; enforced via timeout-minutes + engine limits)
+# timeout-minutes compiles to a STEP-level cap only (gh-aw v0.81.6 has no job-level knob for the
+# agent/detection jobs) — a hung sandboxed CLI outlives it and runs to GitHub's 360-min job default
+# (#39, PB-004: ~6h). After EVERY compile run scripts/enforce-job-timeouts.ts to inject the
+# job-level backstop into the .lock.yml; tests/unit/workflow-timeouts.test.ts guards it.
 safe-outputs:
   create-issue:
     title-prefix: "Andon break: "
@@ -53,7 +57,15 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    machine-readable `andon:v1` header afterwards (it locates your issue via this run's footer
    link). The body MUST contain a `## Proposed plan` link section and a `## Judgments required`
    task list with one item per state transition and boundary case
-   (`- [ ] \`st-<id>\` — <transition>` / `- [ ] \`bc-<id>\` — <description>`). The plan ref in
+   (`- [ ] \`st-<id>\` — <transition>` / `- [ ] \`bc-<id>\` — <description>`). Pose every
+   GENUINE question — information only the operator has (authoritative sources, business
+   rules, timezone/format choices) — as a first-class item in the same list
+   (`- [ ] \`q-<id>\` — <question>`), never buried in an assumption: a live run flagged its
+   timezone assumption as "most needs operator confirmation" — a question in disguise
+   (PB-002). Assumptions are ONLY for defaulted guesses you proceeded on, each stating the
+   stand-in value you used. The operator answers each `q-` item with an attributed
+   `answer:v1` comment on the Andon issue, and approval is blocked (gate G11) until every
+   question is answered — so ask real questions, never manufactured ones. The plan ref in
    your body text MUST agree with step 4's `<N>`.
 
 An isolated **Threat Detection judge job** (separate container, no shared credentials) scans the

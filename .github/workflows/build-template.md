@@ -16,6 +16,10 @@ permissions:
 engine: claude
 timeout-minutes: 30
 # cost ceiling: $10 per run (constitution: Cost & Observability; enforced via timeout-minutes + engine limits)
+# timeout-minutes compiles to a STEP-level cap only (gh-aw v0.81.6 has no job-level knob for the
+# agent/detection jobs) — a hung sandboxed CLI outlives it and runs to GitHub's 360-min job default
+# (#39, PB-004: ~6h). After EVERY compile run scripts/enforce-job-timeouts.ts to inject the
+# job-level backstop into the .lock.yml; tests/unit/workflow-timeouts.test.ts guards it.
 environment: agent-build # platform-level backstop behind the preflight
 safe-outputs:
   create-issue:

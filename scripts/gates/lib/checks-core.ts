@@ -2,11 +2,12 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { PlanDoc } from '../../../schemas/plan';
 import { getAndon, openCorrectionCount } from '../../../dashboard/lib/github/andon';
+import { listAnswers } from '../../../dashboard/lib/github/answers';
 import { maxPlanVersion, tagExists, planBranch } from '../../../dashboard/lib/github/plans';
 import type { GateResult } from './runner';
 
 /**
- * Core plan-gate checks G1, G7–G10 (gate-checks-cli.md §1).
+ * Core plan-gate checks G1, G7–G11 (gate-checks-cli.md §1).
  * G2–G6 arrive with US2/US5/US6 — the tracer's plan-gate runs this set.
  */
 
@@ -108,4 +109,29 @@ export function checkG10Acyclic(plan: PlanDoc): GateResult {
     }
   }
   return { id: 'G10', status: 'pass', requirement: 'data integrity' };
+}
+
+export async function checkG11QuestionsAnswered(
+  gh: Octokit,
+  repo: RepoRef,
+  plan: PlanDoc,
+): Promise<GateResult> {
+  // A q- item is satisfied ONLY by both halves: the recorded answer:v1 comment
+  // AND the ✓ (gate-checks-cli.md §G11). A hand-checked box without an answer
+  // does not count, and an answer whose item is held ✗ by an open correction
+  // still blocks — the checkbox belongs to the correction round-trip
+  // (issue-tracker-contract.md §Andon Break). Zero q- items = pass, the same
+  // vacuous-truth stance as G8.
+  const andon = await getAndon(gh, repo, plan.andon_issue);
+  const questions = andon.items.filter((i) => i.id.startsWith('q-'));
+  if (questions.length === 0) return { id: 'G11', status: 'pass', requirement: 'FR-056' };
+  const answered = new Set((await listAnswers(gh, repo, plan.andon_issue)).map((a) => a.itemId));
+  // Body order = deterministic report order; the question TEXT ships in the
+  // detail so the operator sees what is being asked without opening the break.
+  const blocking = questions
+    .filter((q) => !q.judged || !answered.has(q.id))
+    .map((q) => `${q.id} ${answered.has(q.id) ? 'answered but not ✓' : 'unanswered'} — ${q.description}`);
+  return blocking.length === 0
+    ? { id: 'G11', status: 'pass', requirement: 'FR-056' }
+    : { id: 'G11', status: 'fail', requirement: 'FR-056', detail: `blocking questions: ${blocking.join('; ')}` };
 }

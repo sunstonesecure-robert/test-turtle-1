@@ -2,13 +2,13 @@ import { readFile } from 'node:fs/promises';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { cliMain, runGates, UsageError, type GateReport } from './lib/runner';
-import { checkG1Schema, checkG7NoOpenCorrections, checkG8AllJudged, checkG9VersionMonotonic, checkG10Acyclic } from './lib/checks-core';
+import { checkG1Schema, checkG7NoOpenCorrections, checkG8AllJudged, checkG9VersionMonotonic, checkG10Acyclic, checkG11QuestionsAnswered } from './lib/checks-core';
 
 /**
  * plan-gate (T035) — required status check on every approval PR.
  * Tracer set: G1 schema, G7 no open corrections, G8 all boundary cases judged,
- * G9 version monotonic + tag absent, G10 acyclic deps.
- * G2–G6 are wired in by US2/US5/US6.
+ * G9 version monotonic + tag absent, G10 acyclic deps, G11 every question
+ * answered. G2–G6 are wired in by US2/US5/US6.
  */
 
 export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, planLabel: string): Promise<GateReport> {
@@ -23,6 +23,7 @@ export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, pla
     () => checkG8AllJudged(gh, repo, plan),
     () => checkG9VersionMonotonic(gh, repo, plan),
     () => checkG10Acyclic(plan),
+    () => checkG11QuestionsAnswered(gh, repo, plan),
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };
 }

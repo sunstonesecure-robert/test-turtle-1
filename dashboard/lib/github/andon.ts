@@ -90,8 +90,15 @@ export async function openAndon(gh: Octokit, repo: RepoRef, issueNumber: number)
   await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: ['andon:under-review'] });
 }
 
-/** Operator judges one item ✓ (task-list PATCH). */
+/** Operator judges one item ✓ (task-list PATCH). Questions are refused: a
+ *  q- item's ✓ comes ONLY through a recorded answer:v1 (recordAnswer) — the
+ *  dashboard hides the plain ✓ for questions, and this guard stops a replayed
+ *  form POST from checking one without an answer (it would pass the UI's
+ *  allJudged and open an approval PR that plan-gate G11 then fails). */
 export async function judgeItem(gh: Octokit, repo: RepoRef, issueNumber: number, itemId: string): Promise<void> {
+  if (itemId.startsWith('q-')) {
+    throw new Error(`question item ${itemId} is answered, not judged ✓ — record an answer instead (FR-055)`);
+  }
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const updated = checkJudgmentItem(issue.body ?? '', itemId);
   if (updated === null) throw new Error(`judgment item ${itemId} not found on Andon #${issueNumber}`);
