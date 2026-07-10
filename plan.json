@@ -1,39 +1,80 @@
 {
-  "feature": "demo3",
-  "version": 2,
-  "supersedes": 1,
-  "run_id": "reopen-of-demo3-v1",
-  "andon_issue": 13,
+  "feature": "demo6",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "29105017211",
+  "andon_issue": 27,
   "steps": [
     {
-      "id": "step-hello",
-      "title": "Render the demo greeting",
-      "intent": "Show the operator-facing hello-world greeting on the demo page",
-      "acceptance": "GET /demo returns HTTP 200 and the body contains the exact greeting string",
+      "id": "step-greeting",
+      "title": "Render the operator greeting",
+      "intent": "Display a greeting line addressed to the operator when the view loads.",
+      "acceptance": "The rendered view contains the approved greeting string addressed to the operator.",
       "priority": "MUST",
-      "evidence_tag": "verified",
-      "stand_in": null,
+      "evidence_tag": "assumption",
+      "stand_in": "Greeting text \"Hello, operator!\" (carried over from the demo3 precedent plan) pending q-greeting-text.",
       "high_stakes": false,
       "authority": null,
       "depends_on": [],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-clock",
+      "title": "Display a live local-time clock",
+      "intent": "Show the current wall-clock time in the operator's local timezone alongside the greeting, refreshing so it stays current.",
+      "acceptance": "The rendered view shows the current time in the chosen local timezone and the displayed value advances within 2 seconds.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "Browser-local timezone via Intl.DateTimeFormat().resolvedOptions().timeZone, 24-hour HH:MM:SS format, refreshing every second — pending q-timezone and q-clock-format.",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-greeting"
+      ],
       "tracking_issue": null
     }
   ],
   "verification_targets": [
     {
-      "id": "vt-hello-copy",
+      "id": "vt-greeting-copy",
       "kind": "exact-copy",
-      "check": "Response body of GET /demo equals \"Hello, operator!\"",
+      "check": "The rendered greeting string equals the operator-approved greeting text exactly.",
       "maps_to": [
-        "step-hello"
+        "step-greeting"
+      ]
+    },
+    {
+      "id": "vt-clock-timezone",
+      "kind": "expected-output",
+      "check": "The displayed time equals the current time in the approved timezone, within a 60-second tolerance.",
+      "maps_to": [
+        "step-clock"
+      ]
+    },
+    {
+      "id": "vt-clock-tick",
+      "kind": "boundary-behavior",
+      "check": "The displayed clock value changes at least once within any 2-second observation window.",
+      "maps_to": [
+        "step-clock"
       ]
     }
   ],
   "boundary_cases": [
     {
-      "id": "bc-empty-name",
-      "description": "When no operator name is configured, refuse the request with a setup hint instead of falling back.",
-      "step_id": "step-hello"
+      "id": "bc-midnight-rollover",
+      "description": "At the day boundary the clock rolls over correctly (23:59:59 advances to 00:00:00) in the chosen timezone.",
+      "step_id": "step-clock"
+    },
+    {
+      "id": "bc-timezone-unresolved",
+      "description": "When the local timezone cannot be resolved (Intl unavailable or no configured zone), the view refuses with a setup hint rather than silently falling back to UTC.",
+      "step_id": "step-clock"
+    },
+    {
+      "id": "bc-dst-transition",
+      "description": "Across a daylight-saving transition in the chosen timezone the displayed wall-clock time stays correct (no duplicated or skipped hour on screen).",
+      "step_id": "step-clock"
     }
   ]
 }
