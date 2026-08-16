@@ -38,7 +38,7 @@
       "title": "Use arbitrary-precision arithmetic for large terms",
       "intent": "Represent Fibonacci values with big-integer arithmetic so terms beyond the u64/u128 range stay exact rather than overflowing or wrapping silently.",
       "acceptance": "For N=100 the 100th term is printed exactly as 218922995834555169026 with no overflow or panic.",
-      "priority": "SHOULD",
+      "priority": "COULD",
       "evidence_tag": "assumption",
       "stand_in": "num-bigint crate as the representative arbitrary-precision integer source (vs. a std-only hand-rolled bignum or capping N at the u128 limit)",
       "high_stakes": false,
