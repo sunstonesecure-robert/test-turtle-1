@@ -23,7 +23,7 @@
       "title": "Compute the first N terms of the Fibonacci sequence",
       "intent": "Generate the first N numbers of the Fibonacci sequence beginning 0, 1, 1, 2, 3, ... The workload phrase \"first N digits\" is read here as \"first N terms\" (see bc-digits-vs-terms); this reading is the single assumption most in need of operator confirmation before any build.",
       "acceptance": "For N=10 the produced sequence equals exactly 0, 1, 1, 2, 3, 5, 8, 13, 21, 34.",
-      "priority": "MUST",
+      "priority": "SHOULD",
       "evidence_tag": "assumption",
       "stand_in": "Workload issue #15 phrasing \"first N digits of the Fibonacci sequence\" interpreted as the first N sequence terms seeded 0, 1",
       "high_stakes": false,
