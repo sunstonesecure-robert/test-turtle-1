@@ -64,6 +64,22 @@
       "tracking_issue": null
     },
     {
+      "id": "step-timezone",
+      "title": "Display the timezone only when N is even",
+      "intent": "After emitting the sequence, display the timezone only when N is an even number; when N is odd, display no timezone. Which timezone to display is not yet fixed by the operator (see q-timezone); the correction fixed only the even-N condition.",
+      "acceptance": "For an even N a timezone label is displayed after the sequence output; for an odd N no timezone label is displayed.",
+      "priority": "SHOULD",
+      "evidence_tag": "assumption",
+      "stand_in": "system local timezone as the displayed zone (vs. UTC or an operator-named zone); the correction fixed the even-N condition but not which timezone to show",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-parse-arg",
+        "step-output"
+      ],
+      "tracking_issue": null
+    },
+    {
       "id": "step-build-verify",
       "title": "Build and self-check the program",
       "intent": "Compile the program with cargo and run it on a sample input to confirm it builds and executes cleanly before handing off.",
@@ -108,6 +124,14 @@
       ]
     },
     {
+      "id": "vt-timezone-parity",
+      "kind": "boundary-behavior",
+      "check": "Running the binary with an even N displays a timezone after the output, and running it with an odd N displays no timezone.",
+      "maps_to": [
+        "step-timezone"
+      ]
+    },
+    {
       "id": "vt-build",
       "kind": "expected-output",
       "check": "`cargo build --release` completes with exit code 0.",
@@ -124,8 +148,8 @@
     },
     {
       "id": "bc-n-zero",
-      "description": "N=0 produces an empty sequence: print nothing and exit 0 rather than treating it as an error.",
-      "step_id": "step-fib-compute"
+      "description": "N=0 is treated as invalid input: the program rejects it with a usage message and a non-zero exit code rather than producing an empty sequence.",
+      "step_id": "step-parse-arg"
     },
     {
       "id": "bc-n-one",
@@ -141,6 +165,11 @@
       "id": "bc-large-n-overflow",
       "description": "For N large enough that a naive u64/u128 term would overflow (roughly N>93 for u64), values must remain exact via arbitrary-precision arithmetic rather than wrapping.",
       "step_id": "step-bignum"
+    },
+    {
+      "id": "bc-timezone-parity",
+      "description": "The timezone is displayed only when N is an even number; for an odd N no timezone is shown.",
+      "step_id": "step-timezone"
     }
   ]
 }
