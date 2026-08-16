@@ -16,7 +16,12 @@ on:
   workflow_run:
     # MUST match the compiled workflow's `name:` exactly (workflow_run keys on the name,
     # not the file/workflow id) — drift is caught by tests/unit/workflow-linkage.test.ts.
-    workflows: ["plan-propose — agent proposes a plan and raises an Andon break"]
+    workflows:
+      - "plan-propose — agent proposes a plan and raises an Andon break"
+      # A REVISION lands on the same live branch through the same publisher; the
+      # addresses.json artifact adds `addresses: correction #N` commit trailers
+      # so the operator's re-judge ✓ unlocks (FR-004).
+      - "plan-revise — agent revises a live plan to carry out the operator's corrections"
     types: [completed]
 permissions:
   contents: write # plan/<slug>/v<N> branch + plan.json commit — the only writer of unfrozen plan branches

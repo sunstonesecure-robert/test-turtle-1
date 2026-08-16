@@ -422,8 +422,16 @@ export function parseIntentConfirmed(body: string): IntentConfirmed | null {
 // ---------- Revision commit trailer: addresses: correction #N ----------
 
 const ADDRESSES_RE = /addresses:\s*correction\s+#(\d+)/i;
+const ADDRESSES_RE_ALL = /addresses:\s*correction\s+#(\d+)/gi;
 
 export function parseAddressesTrailer(commitMessage: string): number | null {
   const m = ADDRESSES_RE.exec(commitMessage);
   return m ? Number(m[1]) : null;
+}
+
+/** EVERY correction a commit cites — one revision commit may carry out several
+ *  corrections at once (the plan-revise agent addresses all open ones in one
+ *  pass), and crediting only the first would strand the rest un-✓-able. */
+export function parseAddressesTrailers(commitMessage: string): number[] {
+  return [...commitMessage.matchAll(ADDRESSES_RE_ALL)].map((m) => Number(m[1]));
 }

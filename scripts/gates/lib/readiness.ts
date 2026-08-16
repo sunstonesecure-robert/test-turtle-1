@@ -11,7 +11,7 @@ import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
  */
 
 /** Agentic workflows: gh-aw markdown compiled to pinned .lock.yml. */
-export const AGENTIC_WORKFLOWS = ['plan-propose', 'build-template'] as const;
+export const AGENTIC_WORKFLOWS = ['plan-propose', 'plan-revise', 'build-template'] as const;
 /** Deterministic single-writers/gates: plain Actions YAML — gh-aw has no non-LLM
  *  engine and its strict mode (rightly) forbids the direct writes these need. */
 // vt-report is required, not optional: it is the ONLY writer of the `vt-*` check

@@ -32,7 +32,7 @@ export async function publishPlan(
   gh: Octokit,
   repo: RepoRef,
   planRaw: unknown,
-  opts: { base?: string; runId?: string; andonIssue?: number; workloadIssue?: number } = {},
+  opts: { base?: string; runId?: string; andonIssue?: number; workloadIssue?: number; addresses?: number[] } = {},
 ): Promise<PublishResult> {
   // The agent cannot know the Andon number before the issue exists, so its
   // andon_issue is a placeholder — neutralize it for validation and patch the
@@ -115,7 +115,7 @@ export async function publishPlan(
     }
     andon = issue;
     const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
-    return writePlanBranch(gh, repo, plan, planRef, opts.base);
+    return writePlanBranch(gh, repo, plan, planRef, opts.base, opts.addresses);
   }
   // LIVE = open OR under-review: a revision can land after the operator has
   // picked the review up (label flipped) — matching only andon:open here made
@@ -162,7 +162,7 @@ export async function publishPlan(
     throw new Error(`no live Andon break references ${planRef}${opts.runId ? ` or run ${opts.runId}` : ''} — plan-propose must raise the Andon before publish`);
   }
   const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
-  return writePlanBranch(gh, repo, plan, planRef, opts.base);
+  return writePlanBranch(gh, repo, plan, planRef, opts.base, opts.addresses);
 }
 
 /** The deterministic branch write both publish paths share. RESUMABLE: a
@@ -174,6 +174,7 @@ async function writePlanBranch(
   plan: PlanDoc,
   planRef: string,
   base = 'main',
+  addresses: number[] = [],
 ): Promise<PublishResult> {
   const desired = JSON.stringify(plan, null, 2);
 
@@ -199,15 +200,50 @@ async function writePlanBranch(
     if (errorStatus(error) !== 404) throw error;
   }
 
+  // A REVISION cites every correction it carries out — the `addresses:` commit
+  // trailers are exactly what revisionCites() reads to permit the operator's
+  // re-judge ✓ (FR-004); one commit may address several corrections.
+  const trailers = addresses.map((n) => `addresses: correction #${n}`).join('\n');
   await gh.repos.createOrUpdateFileContents({
     ...repo,
     path: 'plan.json',
-    message: `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${plan.andon_issue})`,
+    message:
+      addresses.length > 0
+        ? `plan: revise ${planRef} (run ${plan.run_id}, Andon #${plan.andon_issue})\n\n${trailers}`
+        : `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${plan.andon_issue})`,
     content: Buffer.from(desired).toString('base64'),
     branch: planRef,
     ...(existingSha ? { sha: existingSha } : {}),
   });
   return { outcome: 'published', planRef, andonIssue: plan.andon_issue };
+}
+
+/** Locate a named file anywhere under the downloaded-artifacts directory. */
+function findArtifactFile(dir: string, name: string): string | null {
+  if (!existsSync(dir)) return null;
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      const nested = findArtifactFile(full, name);
+      if (nested) return nested;
+    } else if (entry === name) {
+      return full;
+    }
+  }
+  return null;
+}
+
+/** Every correction number the revision declares it addresses (addresses.json,
+ *  uploaded by plan-revise); empty for a fresh proposal. Malformed content is
+ *  refused loudly — a silent [] would land a revision that unlocks nothing. */
+export function readAddressesFile(dir: string): number[] {
+  const file = findArtifactFile(dir, 'addresses.json');
+  if (!file) return [];
+  const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  if (!Array.isArray(parsed) || parsed.some((n) => !Number.isInteger(n) || n <= 0)) {
+    throw new Error(`addresses.json must be a JSON array of correction issue numbers — got: ${JSON.stringify(parsed).slice(0, 120)}`);
+  }
+  return parsed as number[];
 }
 
 /** Locate plan.json anywhere under the downloaded-artifacts directory. */
@@ -244,7 +280,7 @@ if (isMain) {
     console.error(`no plan.json found under ${dir} — the plan-propose run uploaded no plan artifact`);
     process.exit(1);
   }
-  publishPlan(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(planFile, 'utf8')), { base: get('base'), runId: get('run-id') })
+  publishPlan(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(planFile, 'utf8')), { base: get('base'), runId: get('run-id'), addresses: readAddressesFile(dir) })
     .then((result) => {
       console.log(result.outcome === 'published' ? `published ${result.planRef} (Andon #${result.andonIssue})` : `already published: ${result.planRef}`);
     })

@@ -29,8 +29,28 @@ export interface RunArtifact {
 
 /** List a run's artifacts (GET /actions/runs/{run_id}/artifacts). Paginated. */
 export async function listRunArtifacts(gh: Octokit, repo: RepoRef, runId: number): Promise<RunArtifact[]> {
+  // A malformed id would silently build /actions/runs//artifacts — a request
+  // that can only 404 while looking like a real read (seen live, PB run
+  // 2026-08-16, after a crashed render left a caller with corrupted state).
+  if (!Number.isInteger(runId) || runId <= 0) throw new Error(`listRunArtifacts: invalid run id ${String(runId)}`);
   const data = await gh.paginate(gh.actions.listWorkflowRunArtifacts, { ...repo, run_id: runId, per_page: 100 });
   return data.map((a) => ({ id: a.id, name: a.name, sizeInBytes: a.size_in_bytes, expired: a.expired }));
+}
+
+/**
+ * Is this artifact a candidate carrier of the safe-output signal? gh-aw's
+ * collected safe outputs land in artifacts named `safe-outputs-*` (observed
+ * live: safe-outputs-items at ~575 BYTES) — while the same runs also carry
+ * multi-hundred-KB binary bundles (`agent`, `activation`) that can never hold
+ * the signal. Scanning those wasted ~4 MB of downloads per cold poll (the 7 s
+ * first paint) and fed megabytes of decoded binary garbage into the render
+ * path (live /runs 500, PB run 2026-08-16). Name-match plus a generous size
+ * cap: a signal file is KBs; anything bigger is a bundle, whatever its name.
+ */
+export const MAX_SIGNAL_ARTIFACT_BYTES = 256 * 1024;
+
+export function isSafeOutputArtifact(artifact: Pick<RunArtifact, 'name' | 'sizeInBytes'>): boolean {
+  return /^safe[-_]?outputs?\b/i.test(artifact.name) && artifact.sizeInBytes <= MAX_SIGNAL_ARTIFACT_BYTES;
 }
 
 /** Download one artifact's archive bytes (GET /actions/artifacts/{id}/zip). */

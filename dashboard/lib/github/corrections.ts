@@ -8,7 +8,7 @@ import {
   serializeCorrectionEvent,
   uncheckJudgmentItem,
   checkJudgmentItem,
-  parseAddressesTrailer,
+  parseAddressesTrailers,
 } from './markers';
 
 /**
@@ -212,7 +212,9 @@ export async function sendCorrection(
  *  history back to root. A citation beyond 100 commits fails CLOSED (re-judge refused). */
 export async function revisionCites(gh: Octokit, repo: RepoRef, planRef: string, correctionIssue: number): Promise<boolean> {
   const { data: commits } = await gh.repos.listCommits({ ...repo, sha: planRef, per_page: 100 });
-  return commits.some((c) => parseAddressesTrailer(c.commit.message ?? '') === correctionIssue);
+  // ALL trailers per commit: one plan-revise commit may carry out several
+  // corrections, and matching only the first would strand the rest (2026-08-16).
+  return commits.some((c) => parseAddressesTrailers(c.commit.message ?? '').includes(correctionIssue));
 }
 
 async function closeCorrection(
@@ -291,6 +293,47 @@ export async function withdrawCorrection(
     throw new Error(`correction #${issueNumber} is already addressed — the round-trip is closed; it cannot be withdrawn`);
   }
   await closeCorrection(gh, repo, issueNumber, 'withdrawn', input);
+}
+
+/**
+ * Revise an open ITEM correction's instruction (live operator finding, PB run
+ * 2026-08-16: a terse instruction could not be improved — one open correction
+ * per item, and no path to replace its text, so the better wording had nowhere
+ * to land). One act, two records: the old correction closes as withdrawn with
+ * a "superseded by revised instruction" cause, and a fresh correction carries
+ * the new text — the audit keeps both, the agent sees only the live one.
+ * The NEW instruction is validated FIRST, so a bad revision refuses before
+ * anything is withdrawn and the old correction keeps blocking (fail-safe).
+ * Break-level requests are deliberately excluded: they are authored by the
+ * scope-edit route and revising them here would fork that record.
+ */
+export async function reviseCorrection(
+  gh: Octokit,
+  repo: RepoRef,
+  correctionIssue: number,
+  input: { andonIssue: number; itemId: string; instruction: string; by: string; at: string },
+): Promise<number> {
+  const problems = instructionProblems(input.instruction);
+  if (problems.length > 0) {
+    throw new Error(`revision refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
+  }
+  const correction = await getCorrection(gh, repo, correctionIssue);
+  if (correction.state !== 'open') {
+    throw new Error(`correction #${correctionIssue} is ${correction.state} — only an open correction can be revised`);
+  }
+  if (correction.itemId !== input.itemId) {
+    throw new Error(`correction #${correctionIssue} belongs to ${correction.itemId ?? 'the whole proposal'}, not ${input.itemId}`);
+  }
+  await withdrawCorrection(gh, repo, correctionIssue, {
+    by: input.by,
+    at: input.at,
+    cause: 'superseded by a revised instruction (re-sent with new text)',
+  });
+  return sendCorrection(gh, repo, {
+    andonIssue: input.andonIssue,
+    itemId: input.itemId,
+    instruction: input.instruction,
+  });
 }
 
 /**
