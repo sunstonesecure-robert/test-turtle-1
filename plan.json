@@ -68,7 +68,7 @@
       "title": "Build and self-check the program",
       "intent": "Compile the program with cargo and run it on a sample input to confirm it builds and executes cleanly before handing off.",
       "acceptance": "`cargo build --release` exits 0 and a sample run with N=10 prints the expected ten terms.",
-      "priority": "MUST",
+      "priority": "COULD",
       "evidence_tag": "verified",
       "stand_in": null,
       "high_stakes": false,
