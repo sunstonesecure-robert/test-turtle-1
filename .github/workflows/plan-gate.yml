@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
-      - name: plan-gate (G1, G7–G10; G2–G6 join as US2/US5/US6 land)
+      - name: plan-gate (G1, G2–G4, G7–G11)
         run: npx tsx scripts/gates/plan-gate.ts --plan plan.json --repo ${{ github.repository }} --json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

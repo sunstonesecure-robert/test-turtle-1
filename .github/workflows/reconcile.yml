@@ -1,0 +1,38 @@
+# reconcile — wrong-assumption propagation (deterministic, no LLM — plain
+# Actions YAML by design, substrate split). Dispatched by the dashboard after
+# the OPERATOR marks which steps a batch contradicts (the judgment stays
+# human); everything downstream is deterministic: dependency closure over
+# depends_on edges → flagged:wrong-assumption on every tracked issue →
+# structured record on the batch issue → plan re-opened as v<N+1> (data wins,
+# FR-022, SC-005).
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: reconcile
+on:
+  repository_dispatch:
+    types: [reconcile]
+permissions:
+  contents: write # plan re-open cuts the v<N+1> branch
+  issues: write # flags + the batch-issue record + the fresh Andon break
+concurrency:
+  group: reconcile-${{ github.event.client_payload.workload }}
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: propagate contradiction (closure flags + re-open — FR-022)
+        run: >-
+          npx tsx scripts/reconcile.ts
+          --workload ${{ github.event.client_payload.workload }}
+          --plan-ref ${{ github.event.client_payload.plan_ref }}
+          --steps "${{ github.event.client_payload.contradicted_step_ids }}"
+          --batch ${{ github.event.client_payload.batch_issue }}
+          --actor ${{ github.event.client_payload.actor }}
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

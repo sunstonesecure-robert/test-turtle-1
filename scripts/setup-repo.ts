@@ -33,7 +33,9 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     }
   }
 
-  // Protection rulesets: plan/** branches, plans/**/CURRENT pointer, plan-gate required on main.
+  // Protection rulesets: plan/** branches, plan-gate required on main. (The
+  // plans/**/CURRENT push ruleset is GONE — the official version is derived
+  // from frozen tags since 2026-07-11, GHI #44; a stale one is deleted below.)
   // 403 here = plan limitation (rulesets/environments need GitHub Pro or a paid org plan on
   // private repos) — refuse with the remedy instead of a raw API error.
   const planLimited = (error: unknown): never => {
@@ -43,12 +45,20 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         `(${apiMessage(error)})`,
     );
   };
-  const { data: repoInfo } = await gh.repos.get({ ...repo });
-  const isOrgRepo = repoInfo.owner?.type === 'Organization';
   const { data: rulesets } = await gh
     .request('GET /repos/{owner}/{repo}/rulesets', { ...repo })
     .catch((error: unknown) => (errorStatus(error) === 403 ? planLimited(error) : Promise.reject(error)));
-  const rulesetNames = new Set((rulesets as { name: string }[]).map((r) => r.name));
+  const rulesetList = rulesets as { id: number; name: string }[];
+  const rulesetNames = new Set(rulesetList.map((r) => r.name));
+  // Reconcile away the pre-2026-07-11 CURRENT push ruleset where it exists
+  // (org repos only — user-owned repos never could create it): the file it
+  // protected no longer exists, and a stale push rule would block nothing real
+  // while confusing the readiness report.
+  const staleCurrent = rulesetList.find((r) => r.name === CURRENT_RULESET);
+  if (staleCurrent) {
+    await gh.request('DELETE /repos/{owner}/{repo}/rulesets/{ruleset_id}', { ...repo, ruleset_id: staleCurrent.id });
+    changed.push(`ruleset ${CURRENT_RULESET} deleted (obsolete: CURRENT derived from tags, GHI #44)`);
+  }
   const wanted: { name: string; payload: Record<string, unknown> }[] = [
     {
       name: PLAN_RULESET,
@@ -61,31 +71,18 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
       },
     },
     {
-      name: CURRENT_RULESET,
-      payload: {
-        name: CURRENT_RULESET,
-        target: 'push',
-        enforcement: 'active',
-        rules: [{ type: 'file_path_restriction', parameters: { restricted_file_paths: ['plans/**/CURRENT'] } }],
-      },
-    },
-    {
       name: MAIN_RULESET,
       payload: {
         name: MAIN_RULESET,
         target: 'branch',
         enforcement: 'active',
         conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
-        // Required checks gate ALL pushes to main, not just PR merges — without these
-        // bypasses the post-merge single writer could never update plans/**/CURRENT
-        // and admins could never bootstrap. 5 = repository admin role; 15368 = the
-        // github-actions integration (the workflows' GITHUB_TOKEN identity — org repos
-        // only; personal repos reject Integration bypass actors, so there the CURRENT
-        // update runs under an admin credential instead).
-        bypass_actors: [
-          { actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' },
-          ...(isOrgRepo ? [{ actor_id: 15368, actor_type: 'Integration', bypass_mode: 'always' }] : []),
-        ],
+        // Required checks gate ALL pushes to main, not just PR merges. The
+        // ONLY bypass is the repo-admin role (bootstrap/ops): since the
+        // official version is derived from frozen tags (2026-07-11, GHI #44)
+        // the post-merge writer never pushes to main, so no machine credential
+        // carries a bypass on any repo type. 5 = repository admin role.
+        bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }],
         rules: [
           {
             type: 'required_status_checks',
@@ -108,14 +105,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         await gh.request('POST /repos/{owner}/{repo}/rulesets', { ...repo, ...payload } as never);
         changed.push(`ruleset ${name}`);
       } catch (error: unknown) {
-        const status = errorStatus(error);
-        if (status === 403) missingAdminScope(error);
-        // Push rulesets (file-path rules) are org-only; on personal repos the CURRENT
-        // pointer protection is waived — readiness I2 documents the same waiver.
-        if (status === 422 && name === CURRENT_RULESET && /org-owned/i.test(errorMessage(error))) {
-          skipped.push(`ruleset ${name} (push rules are org-only; personal-repo waiver)`);
-          continue;
-        }
+        if (errorStatus(error) === 403) missingAdminScope(error);
         throw error;
       }
     }

@@ -65,7 +65,7 @@ export interface ProposeResult {
 export async function proposeDemoPlan(
   gh: Octokit,
   repo: RepoRef,
-  opts: { slug?: string; runId?: string; actor?: string; at?: string; base?: string } = {},
+  opts: { slug?: string; runId?: string; actor?: string; at?: string; base?: string; trackingIssue?: number } = {},
 ): Promise<ProposeResult> {
   const slug = opts.slug ?? 'demo';
   const runId = opts.runId ?? `demo-run-${slug}`;
@@ -113,6 +113,9 @@ export async function proposeDemoPlan(
   const branch = planBranch(slug, 1);
   const plan = demoPlan(runId);
   plan.feature = slug;
+  // Bind the step to its chunk when the caller has one — preflight B3 requires
+  // the build's chunk to be a tracking issue of the frozen plan.
+  if (opts.trackingIssue !== undefined) plan.steps[0]!.tracking_issue = opts.trackingIssue;
 
   // Find-or-create the Andon break, then land the branch through publishPlan —
   // the SAME deterministic writer the production flow uses. That inherits its

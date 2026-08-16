@@ -43,6 +43,19 @@ export async function agentRevise(
   if (!Array.isArray(plan.boundary_cases)) {
     throw new Error(`plan.json at ${planRef} has no boundary_cases array — not a published plan document`);
   }
+  // A BREAK-LEVEL correction (itemId null — a US11 scope request, GHI #73 A1) names
+  // no boundary case, so this demo revisor has nothing mechanical to rewrite: the
+  // request is prose about the proposal as a whole, and turning prose into a plan
+  // change is a judgment call this script deliberately does not make. Refused by
+  // name so the operator routes it through the real revision path (or edits the plan
+  // themselves on the live branch via the scope editor).
+  if (correction.itemId === null) {
+    throw new Error(
+      `correction #${input.correctionIssue} is break-level (a scope/intent request about the whole proposal), ` +
+        `not a boundary-case correction — this demo revisor only rewrites a flagged boundary case. Address it on ` +
+        `the plan branch directly (the review page's scope editor) or with a real revision agent.`,
+    );
+  }
   const flagged = plan.boundary_cases.find((bc) => bc.id === correction.itemId);
   if (!flagged) {
     throw new Error(`correction #${input.correctionIssue} targets ${correction.itemId}, which is not a boundary case in ${planRef}`);

@@ -14,7 +14,11 @@ import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 export const AGENTIC_WORKFLOWS = ['plan-propose', 'build-template'] as const;
 /** Deterministic single-writers/gates: plain Actions YAML — gh-aw has no non-LLM
  *  engine and its strict mode (rightly) forbids the direct writes these need. */
-export const DETERMINISTIC_WORKFLOWS = ['plan-gate', 'plan-post-merge', 'workload-lifecycle'] as const;
+// vt-report is required, not optional: it is the ONLY writer of the `vt-*` check
+// runs lifecycle-gate L3 reads, so a target missing it can never complete a
+// workload (FR-034) — and readiness reporting green while completion is
+// structurally impossible is exactly the false "ready" I5 exists to prevent.
+export const DETERMINISTIC_WORKFLOWS = ['plan-gate', 'plan-post-merge', 'workload-lifecycle', 'vt-report'] as const;
 /** All oversight workflows with the file each must exist as (I5). */
 export const OVERSIGHT_WORKFLOW_FILES: readonly string[] = [
   ...AGENTIC_WORKFLOWS.map((w) => `${w}.lock.yml`),
@@ -22,6 +26,9 @@ export const OVERSIGHT_WORKFLOW_FILES: readonly string[] = [
 ];
 
 export const PLAN_RULESET = 'oversight: protect plan branches';
+/** LEGACY (pre-2026-07-11, GHI #44): the CURRENT pointer file is gone — the
+ *  official version is derived from frozen tags. The name survives only so
+ *  init can DELETE a stale instance on reconcile; nothing requires it. */
 export const CURRENT_RULESET = 'oversight: protect CURRENT pointers';
 export const MAIN_RULESET = 'oversight: require plan-gate on main';
 
@@ -39,9 +46,12 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     ...(missingLabels.length ? { detail: `missing labels: ${missingLabels.join(', ')}` } : {}),
   });
 
-  // I2/I3 — protection rulesets on plan/**, CURRENT paths, and required plan-gate check on main.
-  // Rulesets 403 on private repos below GitHub Pro / paid org plans — that is an unmet
-  // readiness item to report, not a crash.
+  // I2/I3 — plan/** protection and the required plan-gate check on main. (The
+  // CURRENT push ruleset and its personal-repo waiver are GONE — the official
+  // version is derived from frozen tags, 2026-07-11 GHI #44; org and user
+  // repos now have identical requirements.) Rulesets 403 on private repos
+  // below GitHub Pro / paid org plans — that is an unmet readiness item to
+  // report, not a crash.
   let rulesetNames: Set<string> | null = null;
   let planLimitDetail: string | null = null;
   try {
@@ -51,24 +61,15 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     if (errorStatus(error) !== 403) throw error;
     planLimitDetail = `rulesets unavailable on this plan (${apiMessage(error)}) — upgrade to GitHub Pro / a paid org plan or make the repository public`;
   }
-  // Push rulesets (the CURRENT-pointer file-path rule) are org-only: on user-owned repos
-  // that protection is waived — same waiver init applies when creation 422s.
-  const { data: repoInfo } = await gh.repos.get({ ...repo });
-  const isOrgRepo = repoInfo.owner?.type === 'Organization';
-  const requiredProtection = isOrgRepo ? [PLAN_RULESET, CURRENT_RULESET] : [PLAN_RULESET];
-  const missingProtection = requiredProtection.filter((n) => !(rulesetNames?.has(n) ?? false));
-  const currentWaived = !isOrgRepo && !(rulesetNames?.has(CURRENT_RULESET) ?? false);
   results.push({
     id: 'I2',
-    status: rulesetNames && missingProtection.length === 0 ? 'pass' : 'fail',
+    status: rulesetNames?.has(PLAN_RULESET) ? 'pass' : 'fail',
     requirement: 'FR-028',
     ...(planLimitDetail
       ? { detail: planLimitDetail }
-      : missingProtection.length
-        ? { detail: `missing rulesets: ${missingProtection.join(', ')}` }
-        : currentWaived
-          ? { detail: `${CURRENT_RULESET} waived: push rules are org-only; CURRENT single-writer enforcement rests on plan-gate + the post-merge workflow` }
-          : {}),
+      : rulesetNames?.has(PLAN_RULESET)
+        ? {}
+        : { detail: `missing ruleset: ${PLAN_RULESET}` }),
   });
   results.push({
     id: 'I3',

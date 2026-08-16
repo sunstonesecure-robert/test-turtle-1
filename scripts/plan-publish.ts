@@ -74,6 +74,20 @@ export async function publishPlan(
         `slug exactly (PB-004 finding D)`,
     );
   }
+  if (workload.state !== 'active') {
+    // Serialization guard (GHI #43): workload-lifecycle and plan-propose are
+    // NOT serialized, and run cancellation alone is racy — a cancel can land
+    // between the propose run's success and this publish. The publisher is the
+    // chokepoint: whatever the dispatch interleaving, no plan branch or Andon
+    // break is ever minted for a workload that is not active (not-yet-activated,
+    // deferred, canceled, completed, archived — agent eligibility begins at
+    // explicit operator activation, FR-033).
+    throw new Error(
+      `refusing to publish ${planRef}: workload "${workload.slug}" (issue #${workload.issueNumber}) is ` +
+        `${workload.state ? `workload:${workload.state}` : 'in an invalid label state (SC-011)'}, not workload:active — ` +
+        `agent planning requires an active workload (GHI #43)`,
+    );
+  }
 
   if (await tagExists(gh, repo, planRef)) {
     throw new Error(`refusing to publish ${planRef}: a frozen tag with that version already exists — the agent must propose v${parsed.data.version + 1}`);

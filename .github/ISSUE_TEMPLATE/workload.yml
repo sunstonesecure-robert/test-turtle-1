@@ -7,7 +7,7 @@ body:
     id: slug
     attributes:
       label: Workload slug
-      description: Kebab-case identity everything keys on (plan branches, CURRENT pointer, chunks, runs). Must be unique.
+      description: Kebab-case identity everything keys on (plan branches, frozen plan tags, chunks, runs). Must be unique.
       placeholder: demo
     validations:
       required: true

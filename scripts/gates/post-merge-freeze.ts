@@ -6,7 +6,8 @@ import { errorMessage } from '../../dashboard/lib/github/errors';
 /**
  * Post-merge freeze CLI — invoked ONLY by the plan-post-merge workflow (the
  * single writer). Reads the merged approval PR, derives slug/version from the
- * head branch, and performs tag + CURRENT + andon:resolved atomically.
+ * head branch, and performs tag + andon:resolved — the tag IS the official
+ * version (derived, 2026-07-11 GHI #44); nothing is pushed to main.
  */
 
 async function main(): Promise<void> {

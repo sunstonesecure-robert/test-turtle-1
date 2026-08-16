@@ -1,0 +1,26 @@
+name: Chunk promotion
+description: Promote a title-only backlog chunk to a full, testable requirement (FR-017). Title-only chunks stay valid without this (FR-016) — prefer the dashboard's Backlog page, which validates completeness and flips the label atomically.
+title: "[chunk] "
+labels: ["chunk:ready"]
+body:
+  - type: textarea
+    id: intent
+    attributes:
+      label: Intent
+      description: What outcome this chunk exists to produce, in business terms.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome-metric
+    attributes:
+      label: Empirically testable outcome metric
+      description: The measurable signal that will show the intent was achieved (FR-017 — a requirement without this is not ready for an agent).
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance
+      description: The pass/fail conditions the delivered work must meet.
+    validations:
+      required: true

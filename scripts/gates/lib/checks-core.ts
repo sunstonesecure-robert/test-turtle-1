@@ -8,7 +8,7 @@ import type { GateResult } from './runner';
 
 /**
  * Core plan-gate checks G1, G7–G11 (gate-checks-cli.md §1).
- * G2–G6 arrive with US2/US5/US6 — the tracer's plan-gate runs this set.
+ * Scope checks G2–G4 live in checks-scope.ts (US2); G5–G6 arrive with US5/US6.
  */
 
 export function checkG1Schema(rawPlan: unknown): { result: GateResult; plan: PlanDoc | null } {

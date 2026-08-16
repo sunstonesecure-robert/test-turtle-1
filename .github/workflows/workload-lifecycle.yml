@@ -1,9 +1,17 @@
 # workload-lifecycle — gated single writer for workload state (deterministic, no
 # LLM — plain Actions YAML, not gh-aw, by design; it NEEDS direct issues/actions
 # writes for label flips, run cancellation, close+lock).
-# Step 1 runs lifecycle-gate (tracer: L0/L1; L2–L9 join with US10–US13); a red gate
-# reports unmet items and performs nothing. Step 2 flips the workload:* label,
-# appends the workload-event:v1 comment, and close+locks on archive. There is no
+# Step 1 runs lifecycle-gate — every gate-checks-cli.md §3 row is implemented now:
+# L0/L1, US10's L2/L3 (complete: active, and every MUST-mapped verification
+# target's latest vt-* check run on the frozen plan SHA concluded success),
+# US12's L4–L8, and US13's L9 (archive: completed/canceled only). A red gate
+# reports unmet items and performs nothing. Step 2 applies
+# the transition: flips the workload:* label, appends the workload-event:v1
+# comment, close+locks on archive — and for cancel also cancels the workload's
+# in-flight runs (REST cancel endpoint, SC-014) and closes its live Andon breaks
+# as andon:superseded with open corrections withdrawn, causes recorded (FR-038);
+# for a reactivate whose gate report says requires_review it re-opens the plan
+# (FR-008 path) so the workload returns to review first (FR-040). There is no
 # delete action anywhere — unknown actions exit 2 (FR-042), and `delete` is not
 # offered in the dispatch choices.
 # Two entry points, one writer: repository_dispatch (dashboard / API callers,
@@ -34,6 +42,10 @@ permissions:
   contents: read
   issues: write # workload:* labels + event comments — this workflow is their ONLY writer
   actions: write # cancel in-flight runs on workload cancel (SC-014)
+  checks: read # L3 reads the frozen plan SHA's vt-* check runs (FR-034). Specifying
+  #   ANY permissions block sets every unlisted scope to none, so without this row the
+  #   complete transition fails with "Resource not accessible by integration" instead
+  #   of returning an L3 verdict — read-only, and only the reporter ever writes them.
 concurrency:
   group: workload-lifecycle-${{ github.event.client_payload.workload || inputs.workload }}
 env:
@@ -53,14 +65,20 @@ jobs:
           node-version: 20
       - run: npm ci
       - name: lifecycle-gate (refusal performs nothing)
+        # Explicit bash => pipefail: a red gate must fail this step even though
+        # tee (which preserves the report for the apply step AND the log) exits 0.
+        shell: bash
         run: >-
           npx tsx scripts/gates/lifecycle-gate.ts
           --workload "$WL_WORKLOAD"
           --action "$WL_ACTION"
+          --reason "$WL_REASON"
+          --revisit "$WL_REVISIT"
           --repo ${{ github.repository }} --json
+          | tee "$RUNNER_TEMP/lifecycle-gate.json"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: apply transition (label flip + event comment; close+lock on archive)
+      - name: apply transition (cancel/reactivate effects + label flip + event comment; close+lock on archive)
         run: >-
           npx tsx scripts/lifecycle-apply.ts
           --workload "$WL_WORKLOAD"
@@ -68,6 +86,7 @@ jobs:
           --actor "$WL_ACTOR"
           --reason "$WL_REASON"
           --revisit "$WL_REVISIT"
+          --gate-report "$RUNNER_TEMP/lifecycle-gate.json"
           --repo ${{ github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

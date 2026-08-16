@@ -4,7 +4,10 @@
  * flag out-of-contract transitions as tampering.
  */
 
-export const ANDON_LABELS = ['andon:open', 'andon:under-review', 'andon:resolved'] as const;
+// andon:superseded is the withdrawn-proposal terminal state (T198, FR-057/FR-058):
+// a review ended without approval — distinct from andon:resolved, which is
+// approval-only. Both are terminal and mutually exclusive with the live states.
+export const ANDON_LABELS = ['andon:open', 'andon:under-review', 'andon:resolved', 'andon:superseded'] as const;
 export const CORRECTION_LABELS = ['correction:open', 'correction:addressed', 'correction:withdrawn'] as const;
 export const CHUNK_LABELS = ['chunk:title-only', 'chunk:ready'] as const;
 export const WORKLOAD_LABELS = [
@@ -17,7 +20,13 @@ export const WORKLOAD_LABELS = [
 ] as const;
 export const HIGH_STAKES_LABELS = ['high-stakes:customer', 'high-stakes:clinical', 'high-stakes:legal'] as const;
 export const CONFIRMED_LABELS = ['confirmed:customer', 'confirmed:clinical', 'confirmed:legal'] as const;
-export const STANDALONE_LABELS = ['intent:confirmed', 'evidence:batch', 'flagged:wrong-assumption', 'conflict:open'] as const;
+// The cross-workload conflict flag (FR-047). Named on its own — not just spelled inside
+// the taxonomy array — because xlinks.ts PROPAGATES it and portfolio.ts READS IT BACK to
+// tell the operator a conflict is unresolved. Those two must never disagree with the
+// taxonomy (or each other) about the string: a one-character drift would silently mean
+// "no conflicts anywhere" on a view whose whole job is to surface them.
+export const CONFLICT_LABEL = 'conflict:open';
+export const STANDALONE_LABELS = ['intent:confirmed', 'evidence:batch', 'flagged:wrong-assumption', CONFLICT_LABEL] as const;
 
 export const ALL_LABELS: readonly string[] = [
   ...ANDON_LABELS,

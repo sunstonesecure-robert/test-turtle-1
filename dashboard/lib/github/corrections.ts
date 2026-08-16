@@ -31,7 +31,8 @@ export type CorrectionState = 'open' | 'addressed' | 'withdrawn';
 export interface Correction {
   issueNumber: number;
   andonIssue: number;
-  itemId: string;
+  /** null = BREAK-LEVEL: about the proposal as a whole, not one item (GHI #73 A1). */
+  itemId: string | null;
   state: CorrectionState;
   instruction: string;
 }
@@ -60,14 +61,16 @@ export function instructionProblems(instruction: string): string[] {
   return problems;
 }
 
-export function renderCorrectionBody(andonIssue: number, itemId: string, instruction: string): string {
+export function renderCorrectionBody(andonIssue: number, itemId: string | null, instruction: string): string {
   return [
     serializeCorrectionMarker({ andonIssue, itemId }),
     // Human-visible linkage (live PB-003 finding E): the marker renders
     // invisibly and a "#N" in the TITLE never linkifies — a GHI operator saw no
     // connection between break and correction. A #N mention in the BODY
     // linkifies AND writes a "mentioned" backreference onto the break's timeline.
-    `**Correction** for judgment item \`${itemId}\` on Andon #${andonIssue}`,
+    itemId === null
+      ? `**Correction** for the proposal as a whole on Andon #${andonIssue} (no single item — a scope/intent request, FR-036)`
+      : `**Correction** for judgment item \`${itemId}\` on Andon #${andonIssue}`,
     '',
     INSTRUCTION_HEADING,
     instruction.trim(),
@@ -140,32 +143,48 @@ export async function listOpenCorrections(gh: Octokit, repo: RepoRef, andonIssue
 export async function sendCorrection(
   gh: Octokit,
   repo: RepoRef,
-  input: { andonIssue: number; itemId: string; instruction: string },
+  input: { andonIssue: number; itemId?: string; instruction: string },
 ): Promise<number> {
   const problems = instructionProblems(input.instruction);
   if (problems.length > 0) throw new Error(`correction refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
 
+  // An absent itemId is a BREAK-LEVEL correction: the request is about the proposal
+  // as a whole, not one of its judgment items (US11 scope requests — GHI #73 option
+  // A1). It still blocks approval, because G7 counts corrections linked to the
+  // break and never reads an item.
+  const itemId = input.itemId ?? null;
   const andon = await getAndon(gh, repo, input.andonIssue);
-  const item = andon.items.find((i) => i.id === input.itemId);
-  if (!item) throw new Error(`judgment item ${input.itemId} not found on Andon #${input.andonIssue}`);
+  if (itemId !== null && !andon.items.some((i) => i.id === itemId)) {
+    throw new Error(`judgment item ${itemId} not found on Andon #${input.andonIssue}`);
+  }
+  const item = itemId === null ? undefined : andon.items.find((i) => i.id === itemId);
 
-  const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === input.itemId);
+  // One open correction per subject: per item as before, and at most one
+  // break-level one — otherwise a retried scope edit would stack duplicates that
+  // each need withdrawing before approval can proceed.
+  const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === itemId);
   if (open) {
     throw new Error(
-      `item ${input.itemId} already has an open correction (#${open.issueNumber}) — revise or withdraw it before sending another`,
+      itemId === null
+        ? `Andon #${input.andonIssue} already has an open break-level correction (#${open.issueNumber}) — revise or withdraw it before sending another`
+        : `item ${itemId} already has an open correction (#${open.issueNumber}) — revise or withdraw it before sending another`,
     );
   }
 
-  if (item.judged) {
+  // Only an item-scoped correction unchecks anything: a break-level one flags no
+  // checkbox, so there is none to clear (and G8's per-item judgment is untouched).
+  if (item?.judged) {
     const { data: issue } = await gh.issues.get({ ...repo, issue_number: input.andonIssue });
-    const unchecked = uncheckJudgmentItem(issue.body ?? '', input.itemId);
+    const unchecked = uncheckJudgmentItem(issue.body ?? '', item.id);
     if (unchecked !== null) await gh.issues.update({ ...repo, issue_number: input.andonIssue, body: unchecked });
   }
 
   const { data: created } = await gh.issues.create({
     ...repo,
-    title: `Correction: ${input.itemId} (Andon #${input.andonIssue})`,
-    body: renderCorrectionBody(input.andonIssue, input.itemId, input.instruction),
+    title: itemId === null
+      ? `Correction: proposal scope (Andon #${input.andonIssue})`
+      : `Correction: ${itemId} (Andon #${input.andonIssue})`,
+    body: renderCorrectionBody(input.andonIssue, itemId, input.instruction),
     labels: ['correction:open'],
   });
 
@@ -221,11 +240,19 @@ async function closeCorrection(
 export async function rejudgeItem(
   gh: Octokit,
   repo: RepoRef,
-  input: { andonIssue: number; itemId: string; by: string; at: string },
+  /** itemId absent = re-judge the BREAK-LEVEL request (GHI #73 A1) — the scope/intent
+   *  correction that has no item. Same contract either way: refused until a revision
+   *  cites it, so a ✓ can never silently drop the instruction. */
+  input: { andonIssue: number; itemId?: string; by: string; at: string },
 ): Promise<void> {
-  const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === input.itemId);
+  const itemId = input.itemId ?? null;
+  const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === itemId);
   if (!open) {
-    throw new Error(`no open correction for item ${input.itemId} on Andon #${input.andonIssue} — use the plain ✓ judgment`);
+    throw new Error(
+      itemId === null
+        ? `no open break-level correction on Andon #${input.andonIssue} — nothing to re-judge`
+        : `no open correction for item ${itemId} on Andon #${input.andonIssue} — use the plain ✓ judgment`,
+    );
   }
 
   const andon = await getAndon(gh, repo, input.andonIssue);
@@ -237,9 +264,13 @@ export async function rejudgeItem(
   }
 
   await closeCorrection(gh, repo, open.issueNumber, 'addressed', { by: input.by, at: input.at });
-  const { data: issue } = await gh.issues.get({ ...repo, issue_number: input.andonIssue });
-  const checked = checkJudgmentItem(issue.body ?? '', input.itemId);
-  if (checked !== null) await gh.issues.update({ ...repo, issue_number: input.andonIssue, body: checked });
+  // A break-level request flags no checkbox, so there is none to tick — its
+  // resolution IS the correction closing, which is what releases G7.
+  if (itemId !== null) {
+    const { data: issue } = await gh.issues.get({ ...repo, issue_number: input.andonIssue });
+    const checked = checkJudgmentItem(issue.body ?? '', itemId);
+    if (checked !== null) await gh.issues.update({ ...repo, issue_number: input.andonIssue, body: checked });
+  }
 }
 
 /**

@@ -11,11 +11,12 @@
     "gate:plan": "tsx scripts/gates/plan-gate.ts",
     "gate:preflight": "tsx scripts/gates/build-preflight.ts",
     "gate:lifecycle": "tsx scripts/gates/lifecycle-gate.ts",
+    "vt:report": "tsx scripts/vt-report.ts",
     "demo:propose-plan": "tsx scripts/demo/propose-plan.ts",
     "demo:agent-revise": "tsx scripts/demo/agent-revise.ts",
     "test": "vitest run",
     "test:bdd": "NODE_OPTIONS=\"--import tsx\" cucumber-js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p dashboard/tsconfig.json --noEmit",
     "dev": "npm run dev --workspace dashboard"
   },
   "devDependencies": {

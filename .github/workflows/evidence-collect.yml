@@ -1,0 +1,43 @@
+# evidence-collect — scheduled dated evidence batches (deterministic, no LLM —
+# plain Actions YAML by design, substrate split). Opens the dated
+# `evidence:batch` issue and commits `evidence/<date>.json` (FR-021). The
+# operator reviews batches on the dashboard's Evidence page and marks
+# contradictions there — judgment stays human (constitution:
+# Deterministic-First); this workflow only records.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: evidence-collect
+on:
+  schedule:
+    - cron: '0 6 * * 1' # weekly, Monday 06:00 UTC — operator-configurable interval
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Where this batch's observations come from (e.g. support-inbox, analytics)"
+        required: true
+      kind:
+        description: "feedback | analytics | test-results"
+        required: true
+        default: feedback
+permissions:
+  contents: write # evidence/<date>.json — dated, append-only records
+  issues: write # the evidence:batch issue
+concurrency:
+  group: evidence-collect
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: record dated evidence batch (FR-021)
+        run: >-
+          npx tsx scripts/evidence-collect.ts
+          --source "${{ inputs.source || 'scheduled' }}"
+          --kind "${{ inputs.kind || 'feedback' }}"
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

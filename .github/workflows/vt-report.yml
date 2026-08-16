@@ -1,0 +1,82 @@
+# vt-report — deterministic reporter that turns the build agent's
+# verification-target results into `vt-*` check runs on the frozen plan SHA
+# (plain Actions YAML, no LLM — the work is a pure function of the artifact).
+# On build-template completion: downloads the build run's vt-results.json,
+# validates it as UNTRUSTED agent-authored input, and creates one check run per
+# reported target, named with the target id verbatim, on the commit the frozen
+# plan tag points at. Those check runs are what lifecycle-gate row L3 reads when
+# the operator declares a workload complete (FR-034, contracts/gate-checks-cli.md
+# §3) — nothing else writes them.
+#
+# WHY THIS IS SEPARATE FROM THE AGENT JOB (substrate split): T154's wording puts
+# the reporter step inside build-template.md, but the build-template agent job is
+# read-only by design (gh-aw strict mode; `permissions:` contents/issues/checks:
+# READ). Emitting check runs there would require granting the agent
+# `checks: write` — precisely the write capability the substrate split exists to
+# withhold, which T154's own parenthetical ("agent job stays read-only —
+# substrate split") demands. So this follows the established
+# plan-propose.lock.yml → plan-publish.yml precedent: read-only agent uploads an
+# artifact, a deterministic workflow_run workflow performs the privileged write.
+#
+# WHAT IT REFUSES (and therefore never writes): an artifact whose plan_ref does
+# not dereference to the TRIGGERING BUILD'S OWN COMMIT
+# (`workflow_run.head_sha`) — the provenance binding, GHI #72 option A: builds
+# are dispatched ON the frozen tag (preflight B8 refuses anything else), so
+# head_sha is the one signal in this pipeline the agent cannot author, and
+# without this check a build for workload A could report against workload B's
+# plan and complete B without ever building it; a plan_ref that is not the
+# derived official version for its slug (results for a superseded version could
+# never satisfy L3, and stamping them would make a stale green look current); a
+# target id the frozen plan does not define (a check run no plan can explain);
+# any conclusion outside GitHub's accepted set. Validation completes before the
+# first write, so a bad artifact produces no partial report.
+#
+# RE-RUNNABLE, NEVER DESTRUCTIVE: a later report creates a NEW check run with the
+# same name on the same SHA; L3 reads the latest run per name, so it supersedes
+# without deleting or overwriting the earlier attempt (FR-042 — no delete exists).
+#
+# Fails closed: the job only runs on a successful build, and a build whose
+# results never land leaves its targets without check runs — which is exactly
+# what L3 refuses completion on.
+#
+# NOTE: workflow_run only fires from the copy of this file on the default branch,
+# and it keys on the target workflow's compiled `name:`, never its file id (live
+# PB-002) — tests/unit/workflow-linkage.test.ts guards the name below.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: vt-report
+on:
+  workflow_run:
+    # MUST match build-template.lock.yml's compiled `name:` exactly.
+    workflows: ["build-template — dispatched agent build, gated by preflight"]
+    types: [completed]
+permissions:
+  checks: write # the vt-<id> check runs on the frozen plan SHA — this workflow is their ONLY writer
+  contents: read # dereference the frozen plan tag + read plan.json at it to validate the reported ids
+  actions: read # download the build run's vt-results.json artifact (cross-run artifact read)
+concurrency:
+  group: vt-report-${{ github.event.workflow_run.id }}
+jobs:
+  report:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: download the build run's verification results artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/vt-artifacts
+      - name: report vt-<id> check runs on the frozen plan SHA
+        run: >-
+          npx tsx scripts/vt-report.ts
+          --dir "$RUNNER_TEMP/vt-artifacts"
+          --expect-sha ${{ github.event.workflow_run.head_sha }}
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

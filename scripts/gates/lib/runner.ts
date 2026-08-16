@@ -18,6 +18,10 @@ export interface GateReport {
   plan?: string;
   subject?: string;
   result: 'pass' | 'fail';
+  /** lifecycle-gate L8 (reactivate only): contradicting evidence arrived during
+   *  the deferral — the transition still passes, but the workflow re-opens the
+   *  plan so the workload returns to review first (FR-040). */
+  requires_review?: boolean;
   gates: GateResult[];
 }
 
@@ -52,6 +56,9 @@ export function printReport(report: GateReport, json: boolean): void {
   for (const gate of report.gates) {
     const mark = gate.status === 'pass' ? '✓' : '✗';
     console.log(`${mark} ${gate.id} (${gate.requirement})${gate.detail ? ` — ${gate.detail}` : ''}`);
+  }
+  if (report.requires_review) {
+    console.log('requires_review — contradicting evidence arrived during deferral; the plan re-opens for review (FR-040)');
   }
   console.log(report.result === 'pass' ? 'ALL GATES GREEN' : 'GATE FAILURES — see above');
 }
