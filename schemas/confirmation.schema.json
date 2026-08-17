@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-turtles/schemas/confirmation.schema.json",
+  "title": "Agentic Turtles High-Stakes Confirmation Record",
+  "description": "Attributable external sign-off for one high-stakes plan step, committed at confirmations/<step-id>.json on the default branch. Its existence is what unblocks the build, even on an approved, frozen plan (FR-023, FR-024, SC-006).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["step_id", "authority", "confirmer", "confirmed_at", "scope"],
+  "properties": {
+    "step_id": {
+      "type": "string",
+      "pattern": "^step-[a-z0-9-]+$",
+      "description": "The plan step this confirms; must equal the <step-id> in the filename (the record is looked up by it)"
+    },
+    "authority": {
+      "enum": ["customer", "clinical", "legal"],
+      "description": "Must equal the step's authority (FR-023 names the route, FR-024 makes it binding). Extensible in future schema versions."
+    },
+    "confirmer": { "$ref": "#/$defs/Confirmer" },
+    "confirmed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 / RFC 3339 instant, zone included — either a Z suffix or a numeric offset. The confirmation is expected AFTER the plan is frozen (FR-024), so the moment is part of the record."
+    },
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "The guardrails actually confirmed, in the authority's terms. Must carry non-whitespace text: a blank scope confirms nothing while still unblocking the build."
+    }
+  },
+  "$defs": {
+    "Confirmer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "contact"],
+      "description": "Named person/org + contact context — both halves are what make the record attributable",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "contact": { "type": "string", "minLength": 1, "pattern": "\\S" }
+      }
+    }
+  }
+}

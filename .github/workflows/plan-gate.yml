@@ -17,9 +17,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   plan-gate:
-    # Only approval PRs from plan/** branches carry a plan.json to gate. Every other
-    # PR reports "skipped", which satisfies the required-check rule — a plain skip,
-    # never a fail, so ordinary development PRs are not blocked.
+    # Only approval PRs from plan/** branches carry a plan document to gate. Every
+    # other PR reports "skipped", which satisfies the required-check rule — a plain
+    # skip, never a fail, so ordinary development PRs are not blocked.
     if: startsWith(github.event.pull_request.head.ref, 'plan/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -29,7 +29,24 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
+      # Resolve the document the same way every other reader does (plans.ts
+      # readPlanFileAtRef): canonical per-workload path first, pre-#79 repo root as
+      # the fallback for branches published before it. The head ref reaches this
+      # step as an env var and its slug is extracted with an anchored pattern — a
+      # branch name is attacker-influenced text and must never be interpolated into
+      # a shell command.
+      - name: Locate the plan document
+        id: plan
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          slug="$(printf '%s' "$HEAD_REF" | sed -n 's#^plan/\([a-z0-9][a-z0-9-]*\)/v[0-9][0-9]*$#\1#p')"
+          path="plan.json"
+          if [ -n "$slug" ] && [ -f "plans/$slug/plan.json" ]; then path="plans/$slug/plan.json"; fi
+          echo "path=$path" >> "$GITHUB_OUTPUT"
       - name: plan-gate (G1, G2–G4, G7–G11)
-        run: npx tsx scripts/gates/plan-gate.ts --plan plan.json --repo ${{ github.repository }} --json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN_PATH: ${{ steps.plan.outputs.path }}
+        run: npx tsx scripts/gates/plan-gate.ts --plan "$PLAN_PATH" --repo ${{ github.repository }} --json

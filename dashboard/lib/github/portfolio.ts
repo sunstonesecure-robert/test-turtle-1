@@ -53,6 +53,21 @@ export interface PortfolioRow {
   /** human-readable, actionable text; this IS what renders, so "open Andon break #12"
    *  rather than "andon". Empty exactly when actionRequired is false. */
   reasons: string[];
+  /**
+   * WHERE the operator acts on this row — the most specific in-app destination,
+   * null when no single one exists.
+   *
+   * Structured rather than parsed back out of `reasons`: the reason text names
+   * a record ("open Andon break #12") and the view was left to render that as
+   * prose, so an action-required portfolio told the operator what needed them
+   * and gave them nothing to click (live finding, 2026-08-16). Deriving the
+   * href here — where the issue numbers are already in hand — keeps the view
+   * from re-parsing English to rebuild a number the rollup threw away.
+   *
+   * Most specific wins: a live plan review is a place to judge, a run is only a
+   * place to watch, so the review is preferred when both apply.
+   */
+  actionHref: string | null;
 }
 
 /**
@@ -138,7 +153,8 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
           `workload issue #${w.issueNumber} does not carry exactly one workload:* label — its lifecycle state is unreadable until the labels are fixed`,
         );
       }
-      for (const andon of forSlug(input.andons, w.slug)) {
+      const liveBreaks = forSlug(input.andons, w.slug);
+      for (const andon of liveBreaks) {
         reasons.push(`open Andon break #${andon.issueNumber} — a proposed plan is waiting on your judgment`);
       }
       for (const correction of forSlug(input.corrections, w.slug)) {
@@ -156,12 +172,30 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
             : `${CONFLICT_LABEL} on affected item #${conflict.issueNumber} — an unresolved cross-workload conflict`,
         );
       }
+      let runNeedsOperator = false;
       for (const row of runsForSlug(input.runs, w.slug)) {
         const reason = runReason(row);
-        if (reason !== null) reasons.push(reason);
+        if (reason !== null) {
+          reasons.push(reason);
+          runNeedsOperator = true;
+        }
       }
 
-      return { slug: w.slug, title: w.title, state: w.state, actionRequired: reasons.length > 0, reasons };
+      // The review beats the run monitor: /andon/<n> is where a judgment is MADE,
+      // /runs is only where a run is watched. A row with neither has no single
+      // destination — the view falls back to the workload's own card rather than
+      // inventing one (a link that lands nowhere useful is worse than no link).
+      const actionHref =
+        liveBreaks.length > 0 ? `/andon/${liveBreaks[0]!.issueNumber}` : runNeedsOperator ? '/runs' : null;
+
+      return {
+        slug: w.slug,
+        title: w.title,
+        state: w.state,
+        actionRequired: reasons.length > 0,
+        reasons,
+        actionHref,
+      };
     });
 
   // Severity first (snapshot.ts's rowRank precedent — what needs the operator floats to

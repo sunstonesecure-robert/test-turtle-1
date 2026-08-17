@@ -6,6 +6,7 @@ import {
   checkB2PlanRevalidates,
   checkB3ChunkReady,
   checkB4IntentConfirmed,
+  checkB5ConfirmationRecorded,
   checkB6NotFlagged,
   checkB7WorkloadActive,
   checkB8DispatchedOnFrozenRef,
@@ -13,9 +14,10 @@ import {
 import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
 
 /**
- * build-preflight (T040 + T140) — step 1 of every dispatched build workflow.
+ * build-preflight (T040 + T140 + T107) — step 1 of every dispatched build workflow.
  * A non-zero exit fails the run before any agent step executes.
- * Tracer set: B1, B2, B7, B8. B3–B6 arrive with US4/US5/US6.
+ * Set: B1, B2, B5, B7, B8 always; B3/B6 when the build names a chunk, B4 when it is
+ * also unattended.
  *
  * The plan-ref → slug parse lives in plans.ts beside `planBranch` that builds it: this
  * gate and the portfolio view must agree on which workload a ref names.
@@ -24,7 +26,15 @@ import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
 export async function buildPreflight(
   gh: Octokit,
   repo: RepoRef,
-  input: { planRef: string; workload: string; chunk?: number; unattended?: boolean; githubRef?: string },
+  input: {
+    planRef: string;
+    workload: string;
+    chunk?: number;
+    unattended?: boolean;
+    githubRef?: string;
+    /** the step ids this build covers (`--step`, repeatable); omitted means the whole plan */
+    steps?: string[];
+  },
 ): Promise<GateReport> {
   // B3/B6 run only when the build names a chunk; B4 only for unattended runs on
   // that chunk. A chunkless build (the US1 tracer's whole-plan demo build) is
@@ -40,9 +50,12 @@ export async function buildPreflight(
       ? [
           () => checkB3ChunkReady(gh, repo, input.chunk!, input.planRef),
           ...(input.unattended ? [() => checkB4IntentConfirmed(gh, repo, input.chunk!)] : []),
-          () => checkB6NotFlagged(gh, repo, input.chunk!),
         ]
       : []),
+    // B5 runs on every build, chunked or not: a high-stakes step is gated by the
+    // plan that flagged it, not by whether this build happens to name a chunk.
+    () => checkB5ConfirmationRecorded(gh, repo, input.planRef, input.steps),
+    ...(input.chunk !== undefined ? [() => checkB6NotFlagged(gh, repo, input.chunk!)] : []),
     () => checkB7WorkloadActive(gh, repo, input.workload),
     // B8 is pure and reads no API, so it runs last and costs nothing — but its
     // failure is the most structural of the set: the run is building the wrong
@@ -54,12 +67,15 @@ export async function buildPreflight(
 
 const isMain = process.argv[1]?.endsWith('build-preflight.ts');
 if (isMain) {
-  void cliMain(async (args, flags) => {
+  void cliMain(async (args, flags, repeated) => {
     const planRef = args.get('plan-ref');
     const repoArg = args.get('repo');
     if (!planRef || !repoArg) {
-      throw new UsageError('build-preflight --plan-ref <tag> --workload <slug> --repo <owner/repo> [--chunk <issue#>] [--unattended] [--json]');
+      throw new UsageError('build-preflight --plan-ref <tag> --workload <slug> --repo <owner/repo> [--chunk <issue#>] [--unattended] [--step <step-id>]... [--json]');
     }
+    // Repeatable: one --step per step this build covers. Passing none is not a
+    // selection — B5 then gates every high-stakes step in the plan (FR-024).
+    const steps = repeated.get('step') ?? [];
     const chunkArg = args.get('chunk');
     const chunk = chunkArg !== undefined ? Number(chunkArg) : undefined;
     if (chunkArg !== undefined && !Number.isInteger(chunk)) {
@@ -77,6 +93,7 @@ if (isMain) {
       planRef,
       workload,
       ...(chunk !== undefined ? { chunk } : {}),
+      ...(steps.length > 0 ? { steps } : {}),
       ...(flags.has('unattended') ? { unattended: true } : {}),
       ...(githubRef !== undefined ? { githubRef } : {}),
     });

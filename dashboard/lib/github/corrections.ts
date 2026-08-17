@@ -113,8 +113,29 @@ export async function getCorrection(gh: Octokit, repo: RepoRef, issueNumber: num
 
 /** Every correction ever sent for this break — open, addressed, and withdrawn (records are permanent).
  *  Three paginated calls by necessity; callers that only need OPEN corrections
- *  (the dup check, re-judge, cascade, the activity guard) use listOpenCorrections. */
-export async function listCorrections(gh: Octokit, repo: RepoRef, andonIssue: number): Promise<Correction[]> {
+ *  (the dup check, re-judge, cascade, the activity guard) use listOpenCorrections.
+ *
+ *  `recheck` names corrections the caller KNOWS the current state of because it
+ *  just wrote them, and whose state therefore comes from the single-issue GET
+ *  instead of the LIST. GitHub's LIST endpoints are not read-after-write
+ *  consistent (PB-003 finding B — the same lag `sendCorrection`'s supersedes
+ *  path already guards against), so a render immediately after a write can miss
+ *  a correction that was just created or still show the pre-write labels on one
+ *  that was just changed. Either way the operator sees the page they had BEFORE
+ *  their click and concludes the action did nothing — hit live 2026-08-16 on a
+ *  ✗ against `st-unresolved-tz`, where the correction (#32) was created
+ *  correctly and the re-render showed no sign of it until a later write pushed
+ *  a second render past the lag.
+ *
+ *  Unknown, foreign, or already-deleted numbers are ignored rather than trusted:
+ *  the caller is a URL parameter away from the browser, so this must not be a
+ *  way to inject a record into somebody else's review. */
+export async function listCorrections(
+  gh: Octokit,
+  repo: RepoRef,
+  andonIssue: number,
+  opts: { recheck?: number[] } = {},
+): Promise<Correction[]> {
   const corrections: Correction[] = [];
   for (const label of ['correction:open', 'correction:addressed', 'correction:withdrawn']) {
     const issues = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'all', per_page: 100 });
@@ -122,6 +143,23 @@ export async function listCorrections(gh: Octokit, repo: RepoRef, andonIssue: nu
       const correction = toCorrection(issue);
       if (correction?.andonIssue === andonIssue) corrections.push(correction);
     }
+  }
+
+  for (const issueNumber of new Set(opts.recheck ?? [])) {
+    let live: Correction;
+    try {
+      live = await getCorrection(gh, repo, issueNumber);
+    } catch {
+      continue; // not a correction, or gone — the list is the only truth we have
+    }
+    if (live.andonIssue !== andonIssue) continue; // belongs to another review
+    const at = corrections.findIndex((c) => c.issueNumber === issueNumber);
+    // Replace in place when the list already carried it (a STALE row: the write
+    // changed labels the list has not caught up with), append when it did not
+    // (a MISSING row: the write created it). Position is preserved so a re-render
+    // never reshuffles the corrections under the operator's cursor.
+    if (at >= 0) corrections[at] = live;
+    else corrections.push(live);
   }
   return corrections;
 }
@@ -282,7 +320,8 @@ export async function rejudgeItem(
    *  correction that has no item. Same contract either way: refused until a revision
    *  cites it, so a ✓ can never silently drop the instruction. */
   input: { andonIssue: number; itemId?: string; by: string; at: string },
-): Promise<void> {
+  /** the correction this ✓ addressed — the caller re-reads it past the list lag */
+): Promise<number> {
   const itemId = input.itemId ?? null;
   const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === itemId);
   if (!open) {
@@ -309,6 +348,7 @@ export async function rejudgeItem(
     const checked = checkJudgmentItem(issue.body ?? '', itemId);
     if (checked !== null) await gh.issues.update({ ...repo, issue_number: input.andonIssue, body: checked });
   }
+  return open.issueNumber;
 }
 
 /**
@@ -386,10 +426,12 @@ export async function withdrawOpenCorrections(
   repo: RepoRef,
   andonIssue: number,
   input: { by: string; at: string; cause: string },
-): Promise<number> {
+  /** the corrections withdrawn, by number — callers that re-render need them to
+   *  read past the list lag; `.length` is the count this used to return. */
+): Promise<number[]> {
   const open = await listOpenCorrections(gh, repo, andonIssue);
   for (const correction of open) {
     await closeCorrection(gh, repo, correction.issueNumber, 'withdrawn', input);
   }
-  return open.length;
+  return open.map((c) => c.issueNumber);
 }

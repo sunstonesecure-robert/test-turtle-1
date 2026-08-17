@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import { createClient, repoFromEnv, type RepoRef } from '../../dashboard/lib/github/client';
 import { getAndon } from '../../dashboard/lib/github/andon';
 import { getCorrection } from '../../dashboard/lib/github/corrections';
+import { readPlanFileAtRef } from '../../dashboard/lib/github/plans';
 import { errorMessage } from '../../dashboard/lib/github/errors';
 
 /**
@@ -31,17 +32,16 @@ export async function agentRevise(
   const andon = await getAndon(gh, repo, correction.andonIssue);
   const planRef = andon.planRef;
 
-  const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref: planRef });
-  if (Array.isArray(data) || !('content' in data) || typeof data.content !== 'string') {
-    throw new Error(`plan.json is not a file at ${planRef}`);
-  }
-  const plan = JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')) as {
+  // Resolved, not hard-coded: the document lives at plans/<slug>/plan.json, with the
+  // pre-#79 repo root as a guarded fallback for branches published before that.
+  const file = await readPlanFileAtRef(gh, repo, planRef);
+  const plan = JSON.parse(file.raw) as {
     boundary_cases?: { id: string; description: string }[];
   };
-  // The publisher/re-open writers always land a schema-valid plan.json, but this CLI
+  // The publisher/re-open writers always land a schema-valid document, but this CLI
   // reads whatever is on the branch — parse it as untrusted (constitution).
   if (!Array.isArray(plan.boundary_cases)) {
-    throw new Error(`plan.json at ${planRef} has no boundary_cases array — not a published plan document`);
+    throw new Error(`${file.path} at ${planRef} has no boundary_cases array — not a published plan document`);
   }
   // A BREAK-LEVEL correction (itemId null — a US11 scope request, GHI #73 A1) names
   // no boundary case, so this demo revisor has nothing mechanical to rewrite: the
@@ -67,11 +67,11 @@ export async function agentRevise(
   const commitMessage = `plan: revise ${planRef} per correction #${input.correctionIssue}\n\naddresses: correction #${input.correctionIssue}`;
   await gh.repos.createOrUpdateFileContents({
     ...repo,
-    path: 'plan.json',
+    path: file.path,
     message: commitMessage,
     content: Buffer.from(JSON.stringify(plan, null, 2)).toString('base64'),
     branch: planRef,
-    sha: data.sha,
+    sha: file.sha,
   });
 
   return { planRef, itemId: correction.itemId, commitMessage };

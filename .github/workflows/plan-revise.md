@@ -28,8 +28,10 @@ every open correction is carried out. You are read-only beyond safe outputs; the
 `plan-publish` workflow lands your revision on the plan branch after this run completes.
 
 1. Read Andon issue `#${{ inputs.andon }}`. Its `andon:v1` header names the plan ref
-   (`plan/<slug>/v<N>`). Read the current `plan.json` on that branch — that document, exactly
-   as it stands, is your starting point. If the header is missing or the branch does not exist,
+   (`plan/<slug>/v<N>`). Read the current plan document on that branch — `plans/<slug>/plan.json`,
+   falling back to the repo-root `plan.json` ONLY when that path is absent (branches published
+   before the per-workload path existed). That document, exactly as it stands, is your starting
+   point. If the header is missing, the branch does not exist, or neither path holds a document,
    upload nothing and end the run with a clear failure message.
 2. Read every OPEN correction on this review: the sub-issues labeled `correction:open` whose
    `correction:v1` marker names `andon:${{ inputs.andon }}`. Each carries exactly one specific,

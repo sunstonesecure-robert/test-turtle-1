@@ -9,6 +9,12 @@ import { errorStatus } from './errors';
 // well before the first call. (Not a dynamic import(); it need not be, and the
 // getAndon side is static too — a lone dynamic edge would not break the cycle.)
 import { withdrawOpenCorrections } from './corrections';
+// plans.ts statically imports createAndonIssue from here, so this edge closes a
+// second cycle — safe for the same reason as the corrections one above: planPath
+// is referenced only inside a function body, never at module-evaluation time.
+// Imported rather than re-spelled: one definition of the plan document's repo
+// path, so the break body can never name a path no reader looks at.
+import { planPath } from './plans';
 import {
   parseAndonHeader,
   parseCorrectionMarker,
@@ -40,7 +46,7 @@ export function renderAndonBody(plan: PlanDoc, planRef: string): string {
   return [
     serializeAndonHeader({ runId: plan.run_id, planRef }),
     '## Proposed plan',
-    `Plan branch: \`${planRef}\` (plan.json)`,
+    `Plan branch: \`${planRef}\` (\`${planPath(plan.feature)}\`)`,
     '',
     '## Judgments required',
     ...items.map(serializeJudgmentItem),
@@ -184,7 +190,9 @@ export async function withdrawProposal(
   repo: RepoRef,
   issueNumber: number,
   input: { by: string; at: string; cause: string },
-): Promise<void> {
+  /** the corrections the cascade withdrew, by number — the caller re-reads them
+   *  past GitHub's list lag so they do not re-render as still open. */
+): Promise<number[]> {
   const cause = input.cause.trim();
   if (cause.length === 0) {
     throw new Error('withdrawal refused: a cause must be recorded (issue-tracker-contract.md §Andon Break)');
@@ -196,7 +204,7 @@ export async function withdrawProposal(
     // the live labels or closing, so finish that teardown to converge. No second
     // cascade or comment — those already ran on the attempt that superseded it.
     await dropLiveLabelsAndClose(gh, repo, issueNumber);
-    return;
+    return []; // the cascade already ran on the attempt that superseded it
   }
   if (andon.labels.includes('andon:resolved')) {
     throw new Error(
@@ -208,7 +216,7 @@ export async function withdrawProposal(
   }
 
   // Cascade first: no correction:open may outlive its break (data-model "Correction").
-  await withdrawOpenCorrections(gh, repo, issueNumber, {
+  const cascaded = await withdrawOpenCorrections(gh, repo, issueNumber, {
     by: input.by,
     at: input.at,
     cause: `Andon #${issueNumber} proposal withdrawn: ${cause}`,
@@ -231,6 +239,7 @@ export async function withdrawProposal(
   // searchable record; closure is never deletion, FR-042).
   await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: ['andon:superseded'] });
   await dropLiveLabelsAndClose(gh, repo, issueNumber);
+  return cascaded;
 }
 
 /** Teardown tail shared by every terminal closure — withdrawProposal here,

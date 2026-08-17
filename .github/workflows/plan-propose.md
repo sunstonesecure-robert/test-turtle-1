@@ -51,7 +51,10 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
 5. Upload the plan document as a workflow artifact named `plan.json` (`upload-artifact` safe
    output). After this run completes, the deterministic `plan-publish` workflow validates it
    against the schema, locates your Andon break by its header, and creates the branch
-   `plan/${{ inputs.workload }}/v<N>` with `plan.json` committed on your behalf.
+   `plan/${{ inputs.workload }}/v<N>`, committing the document at
+   `plans/${{ inputs.workload }}/plan.json` on your behalf. The artifact stays flat — the
+   publisher owns the repo path, one directory per workload so that approval merges of
+   parallel workloads never touch the same file.
 6. Raise the Andon break via the `create-issue` safe output. Do NOT include HTML comments in
    the body — the safe-output sanitizer strips them; the `plan-publish` workflow injects the
    machine-readable `andon:v1` header afterwards (it locates your issue via this run's footer

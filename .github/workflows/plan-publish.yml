@@ -5,7 +5,9 @@
 # locates the run's Andon break (andon:v1 header, else the gh-aw footer link to
 # this triggering run — the safe-output sanitizer strips agent HTML comments, so
 # the publisher injects the canonical header), patches the real andon_issue
-# number in, and creates plan/<slug>/v<N> with plan.json committed.
+# number in, and creates plan/<slug>/v<N> with the document committed at
+# plans/<slug>/plan.json — one directory per workload, so one workload's approval
+# merge never touches a file another workload's plan branch owns (GHI #79).
 # RESUMABLE on re-delivery or partial publish (existing branch/file completed,
 # unchanged content = no-op); an existing frozen TAG for the version is a hard
 # error (agent must bump). Substrate split: agent proposes, deterministic
@@ -24,7 +26,7 @@ on:
       - "plan-revise — agent revises a live plan to carry out the operator's corrections"
     types: [completed]
 permissions:
-  contents: write # plan/<slug>/v<N> branch + plan.json commit — the only writer of unfrozen plan branches
+  contents: write # plan/<slug>/v<N> branch + plans/<slug>/plan.json commit — the only writer of unfrozen plan branches
   issues: write # locate the Andon break (gh-aw footer run-link) + inject the andon:v1 header the safe-output sanitizer strips
 concurrency:
   group: plan-publish-${{ github.event.workflow_run.id }}

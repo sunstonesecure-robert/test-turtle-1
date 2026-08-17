@@ -63,9 +63,20 @@ export function printReport(report: GateReport, json: boolean): void {
   console.log(report.result === 'pass' ? 'ALL GATES GREEN' : 'GATE FAILURES — see above');
 }
 
-/** Shared CLI plumbing: run, print, translate outcomes to contract exit codes. */
-export async function cliMain(fn: (args: Map<string, string>, flags: Set<string>) => Promise<GateReport>): Promise<void> {
+/**
+ * Shared CLI plumbing: run, print, translate outcomes to contract exit codes.
+ *
+ * `repeated` carries EVERY value each named argument was given, in command-line
+ * order, so a repeatable argument (build-preflight's `--step <step-id>`, §2) needs
+ * no special case in the parser. It is collected for all arguments, not just the
+ * ones known to repeat: `args` keeps its last-wins single value so no existing
+ * caller changes, and a caller that repeats an argument reads the whole list here.
+ */
+export async function cliMain(
+  fn: (args: Map<string, string>, flags: Set<string>, repeated: Map<string, string[]>) => Promise<GateReport>,
+): Promise<void> {
   const args = new Map<string, string>();
+  const repeated = new Map<string, string[]>();
   const flags = new Set<string>();
   const argv = process.argv.slice(2);
   for (let i = 0; i < argv.length; i++) {
@@ -75,13 +86,14 @@ export async function cliMain(fn: (args: Map<string, string>, flags: Set<string>
     const next = argv[i + 1];
     if (next !== undefined && !next.startsWith('--')) {
       args.set(name, next);
+      repeated.set(name, [...(repeated.get(name) ?? []), next]);
       i++;
     } else {
       flags.add(name);
     }
   }
   try {
-    const report = await fn(args, flags);
+    const report = await fn(args, flags, repeated);
     printReport(report, flags.has('json'));
     process.exit(report.result === 'pass' ? 0 : 1);
   } catch (error: unknown) {

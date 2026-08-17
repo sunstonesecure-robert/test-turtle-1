@@ -14,6 +14,7 @@
     "vt:report": "tsx scripts/vt-report.ts",
     "demo:propose-plan": "tsx scripts/demo/propose-plan.ts",
     "demo:agent-revise": "tsx scripts/demo/agent-revise.ts",
+    "demo:flag-high-stakes": "tsx scripts/demo/flag-high-stakes.ts",
     "test": "vitest run",
     "test:bdd": "NODE_OPTIONS=\"--import tsx\" cucumber-js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p dashboard/tsconfig.json --noEmit",

@@ -18,7 +18,12 @@ export const AGENTIC_WORKFLOWS = ['plan-propose', 'plan-revise', 'build-template
 // runs lifecycle-gate L3 reads, so a target missing it can never complete a
 // workload (FR-034) — and readiness reporting green while completion is
 // structurally impossible is exactly the false "ready" I5 exists to prevent.
-export const DETERMINISTIC_WORKFLOWS = ['plan-gate', 'plan-post-merge', 'workload-lifecycle', 'vt-report'] as const;
+// confirm-record joins for the same reason: it is the ONLY writer of the
+// `confirmed:<authority>` labels the review panel and the board read. Its absence does
+// NOT let a high-stakes build through — B5 reads the record FILE, never the label — but
+// it makes every confirmation invisible, so a target missing it reports ready while the
+// operator can obtain sign-offs the board will never show.
+export const DETERMINISTIC_WORKFLOWS = ['plan-gate', 'plan-post-merge', 'workload-lifecycle', 'vt-report', 'confirm-record'] as const;
 /** All oversight workflows with the file each must exist as (I5). */
 export const OVERSIGHT_WORKFLOW_FILES: readonly string[] = [
   ...AGENTIC_WORKFLOWS.map((w) => `${w}.lock.yml`),

@@ -5,8 +5,8 @@ import { errorMessage, errorStatus } from './errors';
 import { createAndonIssue, dropLiveLabelsAndClose } from './andon';
 
 /**
- * Plan module (T033 tracer surface): read plan.json from a ref, resolve the
- * official version (DERIVED: the newest frozen plan/<slug>/v* tag —
+ * Plan module (T033 tracer surface): read the plan document from a ref, resolve
+ * the official version (DERIVED: the newest frozen plan/<slug>/v* tag —
  * 2026-07-11, GHI #44), derive lifecycle state, perform the post-merge
  * freeze that the plan-post-merge single-writer workflow runs (T038 logic),
  * and commit the operator's scope edits back to a live plan branch
@@ -39,13 +39,175 @@ export function slugFromPlanRef(ref: string | null | undefined): string | null {
   return /^plan\/([a-z0-9][a-z0-9-]*)\/v\d+$/.exec(ref)?.[1] ?? null;
 }
 
-export async function readPlanAtRef(gh: Octokit, repo: RepoRef, ref: string): Promise<PlanDoc> {
-  const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref });
-  if (Array.isArray(data) || data.type !== 'file' || !('content' in data)) {
-    throw new Error(`plan.json is not a file at ref ${ref}`);
+/**
+ * Repo path of a workload's plan document — ONE DIRECTORY PER WORKLOAD.
+ *
+ * Every plan used to be written to the repo-root `plan.json`. Because approval
+ * IS a merge to main (the FR-006 freeze mechanism), one shared path meant every
+ * approval rewrote the one file every other in-flight plan branch also owns:
+ * the moment any workload's approval merged, every other open approval PR
+ * conflicted, and it compounded with each approval (live PB-003 finding F15,
+ * GHI #79). Per-workload paths make approval merges conflict-free by
+ * construction and give FR-044's parallel independence a structural basis at
+ * the one step that matters most — the operator's go-ahead. Main then
+ * accumulates one directory per workload, which is a better record besides.
+ */
+export function planPath(slug: string): string {
+  return `plans/${slug}/plan.json`;
+}
+
+/**
+ * Where the document lived before GHI #79 — a READ fallback only, never a write
+ * target. Frozen tags are immutable (FR-042), so pre-migration refs keep the
+ * document at the root forever and every reader must still resolve it there.
+ */
+export const LEGACY_PLAN_PATH = 'plan.json';
+
+export interface PlanFile {
+  /** the repo path the document was actually read from */
+  path: string;
+  /** raw file text, unparsed — callers decide how strictly to validate it */
+  raw: string;
+  /** blob sha, for a compare-and-swap write back to the same path */
+  sha: string;
+}
+
+/** One file at one ref, or null when absent. Non-404 failures propagate. */
+async function getFileAtRef(
+  gh: Octokit,
+  repo: RepoRef,
+  path: string,
+  ref: string,
+): Promise<{ raw: string; sha: string } | null> {
+  let data;
+  try {
+    ({ data } = await gh.repos.getContent({ ...repo, path, ref }));
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
+    throw error;
   }
-  const raw = Buffer.from(data.content, 'base64').toString('utf8');
-  return PlanDoc.parse(JSON.parse(raw));
+  if (Array.isArray(data) || data.type !== 'file' || !('content' in data)) {
+    throw new Error(`${path} is not a file at ref ${ref}`);
+  }
+  return { raw: Buffer.from(data.content, 'base64').toString('utf8'), sha: data.sha };
+}
+
+export type LegacyPlanFileOutcome = 'absent' | 'unchanged' | 'aligned';
+
+/**
+ * Un-conflict an approval PR whose branch was published BEFORE the per-workload
+ * path (GHI #79) — by aligning the branch's stale repo-root `plan.json` with the
+ * base's copy of that same path.
+ *
+ * The live blocker (PB-003 finding F15, approval PR #31): a pre-migration branch
+ * carries ITS plan at the repo root, `main` carries whichever workload approved
+ * most recently at the SAME path, and both differ from the merge base — a textual
+ * conflict on the one file the operator's go-ahead has to merge. Moving the
+ * document to `plans/<slug>/plan.json` fixes every FUTURE branch, but a branch
+ * whose history already contains a root write keeps conflicting, so those PRs
+ * would each need hand-resolution in the web conflict editor.
+ *
+ * They don't. A three-way merge conflicts only when the two sides DISAGREE about
+ * a path: make the branch's copy byte-identical to the base's and both sides
+ * agree, so git merges it without a decision to make — whatever the merge base
+ * held. That is a forward commit on the plan branch, not a history rewrite.
+ *
+ * Aligning to the BASE rather than reverting to the merge base is deliberate:
+ * it takes one read instead of a merge-base computation, it works for the
+ * add/add case as well as modify/modify, and it leaves `main`'s root file
+ * exactly as it is — the vestige is removed once, later, for the whole repo
+ * (GHI #81), not smuggled in through a plan approval.
+ *
+ * Ordering matters and is enforced by the caller: the canonical document must be
+ * written FIRST. After alignment the branch's root copy holds another workload's
+ * plan, which `readPlanFileAtRef` refuses for this slug — so if the canonical
+ * write had not happened, reads would fail loudly rather than resolve to the
+ * wrong plan.
+ *
+ * Never runs on a frozen version: the only caller publishes, and publishing
+ * refuses when the version's tag exists (FR-007/FR-042).
+ */
+export async function alignLegacyPlanFileWithBase(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { planRef: string; base: string; actor?: string },
+): Promise<LegacyPlanFileOutcome> {
+  if (!/^plan\/[a-z0-9-]+\/v\d+$/.test(input.planRef)) {
+    throw new Error(`refusing to write: "${input.planRef}" is not a plan branch`);
+  }
+  const onBranch = await getFileAtRef(gh, repo, LEGACY_PLAN_PATH, input.planRef);
+  // Every branch published after #79 leaves the root path alone — one 404 and done.
+  if (!onBranch) return 'absent';
+
+  const onBase = await getFileAtRef(gh, repo, LEGACY_PLAN_PATH, input.base);
+  // Base has no copy of this path, so the branch's is a one-sided add: git takes
+  // it, no conflict. (Only reachable on a repo where no pre-#79 approval ever
+  // merged — which is also a repo whose branches carry no root document at all.)
+  if (!onBase) return 'unchanged';
+  if (onBase.raw === onBranch.raw) return 'unchanged';
+
+  await gh.repos.createOrUpdateFileContents({
+    ...repo,
+    path: LEGACY_PLAN_PATH,
+    message:
+      `plan: align the superseded root ${LEGACY_PLAN_PATH} with ${input.base} (GHI #79)\n\n` +
+      `This branch predates the per-workload plan path; its plan now lives at the ` +
+      `plans/<slug>/ path and this file is a leftover. Matching ${input.base} byte for byte ` +
+      `is what lets the approval merge go through without a hand-resolved conflict — ` +
+      `both sides of the merge now agree about this path, and ${input.base}'s copy is untouched.`,
+    content: Buffer.from(onBase.raw).toString('base64'),
+    branch: input.planRef,
+    sha: onBranch.sha,
+  });
+  return 'aligned';
+}
+
+/** The `feature` a raw document declares; null when it is not readable JSON. */
+function declaredFeature(raw: string): string | null {
+  try {
+    const doc: unknown = JSON.parse(raw);
+    const feature = (doc as { feature?: unknown } | null)?.feature;
+    return typeof feature === 'string' ? feature : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Locate the plan document at a ref: canonical `plans/<slug>/plan.json` first,
+ * then the pre-#79 root `plan.json`.
+ *
+ * The fallback is GUARDED by `feature`. Post-migration, main's root `plan.json`
+ * is a vestige of whichever workload merged last, and every branch cut from main
+ * inherits it — so an unguarded fallback would silently hand a caller ANOTHER
+ * workload's plan whenever the canonical path was missing. Wrong-plan-silently
+ * is exactly the failure mode #79 exists to remove, so a root document that
+ * names a different feature is treated as absent, not as this plan.
+ * A root document whose JSON is unreadable is NOT rejected here — it is returned
+ * so the caller's schema parse reports the real defect instead of "not found".
+ */
+export async function readPlanFileAtRef(gh: Octokit, repo: RepoRef, ref: string): Promise<PlanFile> {
+  const slug = slugFromPlanRef(ref);
+  if (slug !== null) {
+    const canonical = await getFileAtRef(gh, repo, planPath(slug), ref);
+    if (canonical) return { path: planPath(slug), ...canonical };
+  }
+  const legacy = await getFileAtRef(gh, repo, LEGACY_PLAN_PATH, ref);
+  if (legacy && (slug === null || (declaredFeature(legacy.raw) ?? slug) === slug)) {
+    return { path: LEGACY_PLAN_PATH, ...legacy };
+  }
+  if (slug === null) throw new Error(`no plan document at ref ${ref}: ${LEGACY_PLAN_PATH} is absent`);
+  throw new Error(
+    `no plan document at ref ${ref}: ${planPath(slug)} is absent and the root ${LEGACY_PLAN_PATH} ` +
+      (legacy
+        ? `belongs to "${declaredFeature(legacy.raw)}", not "${slug}"`
+        : 'is absent too'),
+  );
+}
+
+export async function readPlanAtRef(gh: Octokit, repo: RepoRef, ref: string): Promise<PlanDoc> {
+  const file = await readPlanFileAtRef(gh, repo, ref);
+  return PlanDoc.parse(JSON.parse(file.raw));
 }
 
 /** Untrusted-input variant for gates: returns issues instead of throwing on schema failure. */
@@ -55,9 +217,8 @@ export async function tryReadPlanAtRef(
   ref: string,
 ): Promise<{ plan: PlanDoc | null; errors: string[] }> {
   try {
-    const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref });
-    if (Array.isArray(data) || !('content' in data)) return { plan: null, errors: ['plan.json is not a file'] };
-    const parsed = PlanDoc.safeParse(JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')));
+    const file = await readPlanFileAtRef(gh, repo, ref);
+    const parsed = PlanDoc.safeParse(JSON.parse(file.raw));
     if (!parsed.success) {
       return { plan: null, errors: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) };
     }
@@ -110,19 +271,24 @@ export async function commitPlanUpdate(
       `refusing to write: the approval PR for ${input.planRef} is merged — the go-ahead happened and the freeze is imminent; an edit now would not be part of the official version (FR-007)`,
     );
   }
-  const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref: input.planRef });
-  if (Array.isArray(data) || data.type !== 'file' || !('content' in data)) {
-    throw new Error(`plan.json is not a file at ref ${input.planRef}`);
-  }
-  const current = PlanDoc.parse(JSON.parse(Buffer.from(data.content, 'base64').toString('utf8')));
+  // Written back to the path it was READ from, not unconditionally to the
+  // canonical one: a branch published before GHI #79 carries its document at the
+  // root, and an operator edit is not the right moment to move it. Migrating a
+  // legacy branch is the PUBLISHER's job — it writes the canonical document and
+  // then aligns the leftover root copy (alignLegacyPlanFileWithBase), in that
+  // order. After that runs, "the path it was read from" IS the canonical one, so
+  // this seam follows the branch forward without needing to know which era it
+  // belongs to.
+  const file = await readPlanFileAtRef(gh, repo, input.planRef);
+  const current = PlanDoc.parse(JSON.parse(file.raw));
   const updated = PlanDoc.parse(input.mutate(current));
   await gh.repos.createOrUpdateFileContents({
     ...repo,
-    path: 'plan.json',
+    path: file.path,
     message: input.message(updated),
     content: Buffer.from(JSON.stringify(updated, null, 2)).toString('base64'),
     branch: input.planRef,
-    sha: data.sha,
+    sha: file.sha,
   });
   return updated;
 }
@@ -355,16 +521,21 @@ export async function reopenPlan(
   const andonIssue = await createAndonIssue(gh, repo, { slug: input.slug, plan: seed, planRef });
   const plan: PlanDoc = { ...seed, andon_issue: andonIssue };
 
-  // The branch inherits the frozen plan.json from the tag — overwriting needs its blob sha.
-  const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref: planRef });
-  const inheritedSha = !Array.isArray(data) && 'sha' in data ? data.sha : undefined;
+  // The branch inherits the frozen document from the tag — overwriting needs its
+  // blob sha. A tag frozen before GHI #79 carries it at the ROOT instead, so the
+  // canonical path is absent there and this write creates it; that stale root
+  // copy is left exactly where it is (the tag is immutable, FR-042, and the
+  // guarded fallback still resolves it AT the tag) — never rewritten, because
+  // rewriting the shared root path is the collision this change removes.
+  const path = planPath(input.slug);
+  const inherited = await getFileAtRef(gh, repo, path, planRef);
   await gh.repos.createOrUpdateFileContents({
     ...repo,
-    path: 'plan.json',
+    path,
     message: `plan: re-open ${current} as ${planRef} by @${input.actor} at ${input.at}`,
     content: Buffer.from(JSON.stringify(plan, null, 2)).toString('base64'),
     branch: planRef,
-    ...(inheritedSha ? { sha: inheritedSha } : {}),
+    ...(inherited ? { sha: inherited.sha } : {}),
   });
 
   return { planRef, andonIssue, version };

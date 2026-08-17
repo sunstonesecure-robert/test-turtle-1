@@ -1,0 +1,59 @@
+# confirm-record — validates committed high-stakes confirmations and lights the
+# board (deterministic, no LLM — plain Actions YAML by design, substrate split:
+# an authority's answer is recorded by a human and merely CHECKED here).
+# Every confirmations/<step-id>.json is validated against schemas/confirmation.ts
+# (the same parse build-preflight's B5 makes), and each valid record applies
+# `confirmed:<authority>` to the tracking issue of the step it names
+# (issue-tracker-contract.md authority matrix, FR-023/FR-024).
+# A rejected record fails the run and applies NO label: the label is a board
+# signal, and one standing without a record behind it would tell the operator an
+# authority answered a question it never saw. It can never forge a build past the
+# gate either — B5 reads the FILE, not the label — which is precisely why the two
+# must never disagree.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: confirm-record
+on:
+  push:
+    # The DEFAULT BRANCH, and it must stay the default branch: B5 reads
+    # confirmations/<step-id>.json from the default branch HEAD (FR-024 blocks the
+    # build even on an approved plan, so the record lands after the freeze and can
+    # never be in the frozen tag). A record on any other branch is not one B5 will
+    # ever read, so labeling from it would light the board for a build still blocked.
+    branches: [main]
+    paths:
+      - 'confirmations/**.json'
+  # Re-runnable by hand: the validator scans the whole directory rather than a
+  # push diff, so a dispatch reconciles every record — after a label was removed,
+  # or once a plan freezes and its steps become labelable.
+  workflow_dispatch:
+permissions:
+  contents: read # checkout + read each workload's OFFICIAL plan at its frozen tag (the step and its tracking issue)
+  issues: write # confirmed:<authority> on the step's tracking issue — this workflow is that label's ONLY writer.
+  #   Specifying ANY permissions block sets every unlisted scope to none, which is the intent here: no
+  #   contents write (it never commits a record — an operator does), no checks, no actions.
+concurrency:
+  # Serialized, never canceled: a run interrupted between two label writes leaves
+  # the board half-lit. A full-directory scan makes a queued run cheap and makes
+  # any superseded one harmless.
+  group: confirm-record-${{ github.ref }}
+jobs:
+  confirm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # ALWAYS the default branch, never the dispatch ref. B5 reads
+          # confirmations/<step-id>.json at the default branch HEAD and nowhere else, so a
+          # workflow_dispatch launched from a feature branch would otherwise validate that
+          # branch's records and light `confirmed:<authority>` for a build that stays
+          # blocked — the board claiming a sign-off the gate cannot see.
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: validate confirmations + apply confirmed:<authority> (FR-023/FR-024)
+        run: npx tsx scripts/confirm-record.ts --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

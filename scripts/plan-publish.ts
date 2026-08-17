@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { PlanDoc } from '../schemas/plan';
-import { planBranch, tagExists } from '../dashboard/lib/github/plans';
+import { alignLegacyPlanFileWithBase, planBranch, planPath, tagExists } from '../dashboard/lib/github/plans';
 import { parseAndonHeader, serializeAndonHeader } from '../dashboard/lib/github/markers';
 import { getWorkload, getWorkloadByIssue } from '../dashboard/lib/github/workloads';
 import { findOpenAndonByPlanRef } from '../dashboard/lib/github/andon';
@@ -17,8 +17,10 @@ import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
  * workflow_run completion, takes the uploaded plan.json artifact, finds the
  * agent's Andon break by its plan-ref header, patches the real andon_issue
  * number in (the agent can't know it before the issue exists), validates the
- * document against the schema, and creates `plan/<slug>/v<N>` with plan.json
- * committed — the same write the demo seed script performs, moved behind the
+ * document against the schema, and creates `plan/<slug>/v<N>` with the document
+ * committed at `plans/<slug>/plan.json` (per-workload path, GHI #79 — a shared
+ * repo-root file made every approval merge collide with every other in-flight
+ * approval PR) — the same write the demo seed script performs, moved behind the
  * substrate split: agent proposes, deterministic single writer publishes.
  * Idempotent: an existing branch for this plan ref is a no-op re-run; an
  * existing TAG for it is a version collision with a frozen plan and errors.
@@ -177,6 +179,11 @@ async function writePlanBranch(
   addresses: number[] = [],
 ): Promise<PublishResult> {
   const desired = JSON.stringify(plan, null, 2);
+  // The canonical per-workload path (GHI #79). The publisher ALWAYS writes here,
+  // never to the shared repo root: root is a read-only fallback for refs frozen
+  // before the migration, and writing it again is precisely what made one
+  // workload's approval merge conflict with every other in-flight approval PR.
+  const path = planPath(plan.feature);
 
   try {
     const { data: baseRef } = await gh.git.getRef({ ...repo, ref: `heads/${base}` });
@@ -185,14 +192,17 @@ async function writePlanBranch(
     if (errorStatus(error) !== 422) throw error; // 422 = branch already exists — resume below
   }
 
-  // The branch may already carry a plan.json (inherited from base — approval merges put the
-  // prior plan.json on main — or written by an earlier attempt): supply its sha, skip if equal.
+  // The branch may already carry THIS workload's document at this path — inherited
+  // from base (a prior approval merge for the same slug left it on main) or written
+  // by an earlier attempt: supply its sha, skip if equal. Other workloads' documents
+  // live under their own slug and are never touched.
   let existingSha: string | undefined;
+  let alreadyPublished = false;
   try {
-    const { data } = await gh.repos.getContent({ ...repo, path: 'plan.json', ref: planRef });
+    const { data } = await gh.repos.getContent({ ...repo, path, ref: planRef });
     if (!Array.isArray(data) && 'content' in data && typeof data.content === 'string' && 'sha' in data) {
       if (Buffer.from(data.content, 'base64').toString('utf8').trim() === desired.trim()) {
-        return { outcome: 'already_published', planRef };
+        alreadyPublished = true;
       }
       existingSha = data.sha;
     }
@@ -200,22 +210,36 @@ async function writePlanBranch(
     if (errorStatus(error) !== 404) throw error;
   }
 
-  // A REVISION cites every correction it carries out — the `addresses:` commit
-  // trailers are exactly what revisionCites() reads to permit the operator's
-  // re-judge ✓ (FR-004); one commit may address several corrections.
-  const trailers = addresses.map((n) => `addresses: correction #${n}`).join('\n');
-  await gh.repos.createOrUpdateFileContents({
-    ...repo,
-    path: 'plan.json',
-    message:
-      addresses.length > 0
-        ? `plan: revise ${planRef} (run ${plan.run_id}, Andon #${plan.andon_issue})\n\n${trailers}`
-        : `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${plan.andon_issue})`,
-    content: Buffer.from(desired).toString('base64'),
-    branch: planRef,
-    ...(existingSha ? { sha: existingSha } : {}),
-  });
-  return { outcome: 'published', planRef, andonIssue: plan.andon_issue };
+  if (!alreadyPublished) {
+    // A REVISION cites every correction it carries out — the `addresses:` commit
+    // trailers are exactly what revisionCites() reads to permit the operator's
+    // re-judge ✓ (FR-004); one commit may address several corrections.
+    const trailers = addresses.map((n) => `addresses: correction #${n}`).join('\n');
+    await gh.repos.createOrUpdateFileContents({
+      ...repo,
+      path,
+      message:
+        addresses.length > 0
+          ? `plan: revise ${planRef} (run ${plan.run_id}, Andon #${plan.andon_issue})\n\n${trailers}`
+          : `plan: publish ${planRef} (proposed by run ${plan.run_id}, Andon #${plan.andon_issue})`,
+      content: Buffer.from(desired).toString('base64'),
+      branch: planRef,
+      ...(existingSha ? { sha: existingSha } : {}),
+    });
+  }
+
+  // STRICTLY AFTER the canonical write: a branch published before GHI #79 still
+  // carries its plan at the shared repo root, which conflicts with base's copy of
+  // that path and makes the approval PR unmergeable. Aligning the leftover with
+  // base makes both sides of the merge agree, so the go-ahead stays one click
+  // instead of a hand-resolved conflict. Runs on the resumed path too — an
+  // already-published branch is exactly the one whose PR is sitting open and
+  // blocked. No-op (one 404) for every branch published after the migration.
+  await alignLegacyPlanFileWithBase(gh, repo, { planRef, base });
+
+  return alreadyPublished
+    ? { outcome: 'already_published', planRef }
+    : { outcome: 'published', planRef, andonIssue: plan.andon_issue };
 }
 
 /** Locate a named file anywhere under the downloaded-artifacts directory. */
