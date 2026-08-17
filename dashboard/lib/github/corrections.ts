@@ -143,7 +143,7 @@ export async function listOpenCorrections(gh: Octokit, repo: RepoRef, andonIssue
 export async function sendCorrection(
   gh: Octokit,
   repo: RepoRef,
-  input: { andonIssue: number; itemId?: string; instruction: string },
+  input: { andonIssue: number; itemId?: string; instruction: string; supersedes?: number },
 ): Promise<number> {
   const problems = instructionProblems(input.instruction);
   if (problems.length > 0) throw new Error(`correction refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
@@ -163,7 +163,20 @@ export async function sendCorrection(
   // break-level one — otherwise a retried scope edit would stack duplicates that
   // each need withdrawing before approval can proceed.
   const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === itemId);
-  if (open) {
+  if (open && open.issueNumber === input.supersedes) {
+    // The caller just withdrew this exact correction (the revise path), but the
+    // LIST endpoint is not read-after-write consistent (PB-003 finding B) and can
+    // serve the stale correction:open row for a beat — hit live 2026-08-16: a
+    // revise withdrew #30, then refused its own replacement because the list
+    // still showed #30 open. The GET endpoint IS consistent: re-read the single
+    // issue, and only trust the hint when it confirms the withdrawal.
+    const live = await getCorrection(gh, repo, open.issueNumber);
+    if (live.state === 'open') {
+      throw new Error(
+        `correction #${open.issueNumber} is still open — supersedes may only name a correction that was just withdrawn`,
+      );
+    }
+  } else if (open) {
     throw new Error(
       itemId === null
         ? `Andon #${input.andonIssue} already has an open break-level correction (#${open.issueNumber}) — revise or withdraw it before sending another`
@@ -204,6 +217,29 @@ export async function sendCorrection(
     console.warn(`sub-issue attach failed for correction #${created.number} → Andon #${input.andonIssue} (non-fatal): ${errorMessage(error)}`);
   }
   return created.number;
+}
+
+/**
+ * Every correction cited by a commit on the plan branch, with the citing
+ * commit's sha and date — the review page's "revision landed" indicator (live
+ * finding, PB run 2026-08-16: the agent ran and landed a revision and the page
+ * showed NOTHING — every state change must be visible). One page from the tip,
+ * same bound and rationale as revisionCites below.
+ */
+export async function citedCorrections(
+  gh: Octokit,
+  repo: RepoRef,
+  planRef: string,
+): Promise<Map<number, { sha: string; at: string | null }>> {
+  const { data: commits } = await gh.repos.listCommits({ ...repo, sha: planRef, per_page: 100 });
+  const cited = new Map<number, { sha: string; at: string | null }>();
+  // Walk oldest-last so the NEWEST citing commit wins for each correction.
+  for (const c of [...commits].reverse()) {
+    for (const n of parseAddressesTrailers(c.commit.message ?? '')) {
+      cited.set(n, { sha: c.sha, at: c.commit.committer?.date ?? c.commit.author?.date ?? null });
+    }
+  }
+  return cited;
 }
 
 /** Does any commit on the plan branch cite this correction (`addresses: correction #N`)?
@@ -329,10 +365,14 @@ export async function reviseCorrection(
     at: input.at,
     cause: 'superseded by a revised instruction (re-sent with new text)',
   });
+  // supersedes: the list endpoint may still serve the just-withdrawn correction
+  // as open (read-after-write lag, PB-003 finding B — hit live 2026-08-16);
+  // naming it lets the dup-check verify via the consistent GET instead.
   return sendCorrection(gh, repo, {
     andonIssue: input.andonIssue,
     itemId: input.itemId,
     instruction: input.instruction,
+    supersedes: correctionIssue,
   });
 }
 

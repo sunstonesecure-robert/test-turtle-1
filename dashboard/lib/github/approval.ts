@@ -7,6 +7,19 @@ import type { RepoRef } from './client';
  * App token must never merge (SC-003). The dashboard only deep-links to the PR.
  */
 
+/** The open approval PR for a plan version, when one exists — the review page's
+ *  "merge it as yourself" indicator (live finding, PB run 2026-08-16: Approve
+ *  plan created PR #31 and the page showed nothing). Read-only. */
+export async function findOpenApprovalPr(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { slug: string; version: number },
+): Promise<{ number: number; url: string } | null> {
+  const head = `plan/${input.slug}/v${input.version}`;
+  const { data } = await gh.pulls.list({ ...repo, state: 'open', head: `${repo.owner}:${head}`, base: 'main' });
+  return data[0] ? { number: data[0].number, url: data[0].html_url } : null;
+}
+
 export async function openApprovalPr(
   gh: Octokit,
   repo: RepoRef,

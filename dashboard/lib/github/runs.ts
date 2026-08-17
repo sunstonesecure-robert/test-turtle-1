@@ -224,6 +224,27 @@ export interface RunSummary {
  * (GET /actions/runs?event=…). head_branch is the plan-ref session key callers
  * group by. Paginated so a growing run history is never silently truncated.
  */
+/**
+ * In-flight plan-revise runs (queued or in_progress) — the review page's "an
+ * agent is working right now" indicator (live finding, PB run 2026-08-16: the
+ * operator dispatched the revision agent and the page showed nothing). The
+ * dispatch INPUT (which review) is invisible to the runs API — the same
+ * payload blindness B8 documents — so this is honest about granularity: SOME
+ * revision run is in flight, watch the run monitor for it.
+ */
+export async function listInFlightRevisionRuns(
+  gh: Octokit,
+  repo: RepoRef,
+): Promise<{ id: number; status: string; startedAt: string | null }[]> {
+  const pages = await Promise.all(
+    (['queued', 'in_progress'] as const).map((status) => listRuns(gh, repo, { status })),
+  );
+  return pages
+    .flat()
+    .filter((r) => (r.name ?? '').startsWith('plan-revise'))
+    .map((r) => ({ id: r.id, status: r.status, startedAt: null }));
+}
+
 export async function listRuns(
   gh: Octokit,
   repo: RepoRef,
