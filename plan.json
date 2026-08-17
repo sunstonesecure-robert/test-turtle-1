@@ -9,7 +9,7 @@
       "id": "step-resolve-timezone",
       "title": "Resolve the operator's local timezone",
       "intent": "Determine the timezone in which the clock is rendered so that \"local time\" is meaningful for the operator.",
-      "acceptance": "The rendered wall-clock time equals the current time in the resolved timezone within 1 second of the request instant.",
+      "acceptance": "When an operator timezone resolves, the rendered wall-clock time equals the current time in that timezone within 1 second of the request instant; when no operator timezone can be resolved, the timezone falls back to UTC and the clock renders in UTC.",
       "priority": "MUST",
       "evidence_tag": "assumption",
       "stand_in": "System/process local timezone (TZ) as a stand-in for an unspecified operator timezone source; the workload does not state where the timezone comes from.",
@@ -36,8 +36,8 @@
     {
       "id": "step-render-greeting",
       "title": "Render the operator greeting with the clock",
-      "intent": "Combine a salutation with the formatted local clock into the operator-facing greeting.",
-      "acceptance": "The greeting response contains a salutation immediately followed by the formatted clock string produced by step-format-clock.",
+      "intent": "Combine a salutation with the formatted local clock into the operator-facing greeting, and keep the clock ticking live as time advances.",
+      "acceptance": "The greeting response contains a salutation immediately followed by the formatted clock string produced by step-format-clock, and the displayed clock advances to the new local time as wall-clock time passes (a live-ticking clock, not a static per-request snapshot).",
       "priority": "MUST",
       "evidence_tag": "assumption",
       "stand_in": "The \"Hello, operator!\" salutation from the frozen demo3 plan as a stand-in for unspecified greeting copy.",
@@ -71,7 +71,7 @@
   "boundary_cases": [
     {
       "id": "bc-missing-tz",
-      "description": "When no operator timezone can be resolved, refuse with a setup hint instead of silently defaulting to UTC.",
+      "description": "When no operator timezone can be resolved, fall back to UTC and render the clock in UTC rather than refusing.",
       "step_id": "step-resolve-timezone"
     },
     {
