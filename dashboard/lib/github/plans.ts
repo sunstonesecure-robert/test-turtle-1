@@ -210,21 +210,34 @@ export async function readPlanAtRef(gh: Octokit, repo: RepoRef, ref: string): Pr
   return PlanDoc.parse(JSON.parse(file.raw));
 }
 
-/** Untrusted-input variant for gates: returns issues instead of throwing on schema failure. */
+/**
+ * Untrusted-input variant for gates: returns issues instead of throwing on schema failure.
+ *
+ * `path` is the repo path the document was actually resolved at — canonical or
+ * the pre-#79 root — and null only when no document was found at all. Callers
+ * that want to LINK an operator to the plan they are being asked to reason
+ * about need it: the two paths are both live (frozen tags are immutable), so a
+ * link built from `planPath(slug)` alone would 404 on exactly the older plans
+ * whose documents are hardest to find by hand.
+ */
 export async function tryReadPlanAtRef(
   gh: Octokit,
   repo: RepoRef,
   ref: string,
-): Promise<{ plan: PlanDoc | null; errors: string[] }> {
+): Promise<{ plan: PlanDoc | null; errors: string[]; path: string | null }> {
   try {
     const file = await readPlanFileAtRef(gh, repo, ref);
     const parsed = PlanDoc.safeParse(JSON.parse(file.raw));
     if (!parsed.success) {
-      return { plan: null, errors: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) };
+      return {
+        plan: null,
+        errors: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+        path: file.path,
+      };
     }
-    return { plan: parsed.data, errors: [] };
+    return { plan: parsed.data, errors: [], path: file.path };
   } catch (error: unknown) {
-    return { plan: null, errors: [errorMessage(error)] };
+    return { plan: null, errors: [errorMessage(error)], path: null };
   }
 }
 
@@ -343,6 +356,52 @@ export async function resolveCurrent(gh: Octokit, repo: RepoRef, slug: string): 
     if (errorStatus(error) !== 404) throw error;
   }
   return max > 0 ? planBranch(slug, max) : null;
+}
+
+/**
+ * A workload's OFFICIAL plan, flattened for the surfaces that have to talk
+ * about it — where to read it, and what its steps are called.
+ *
+ * Exists because more than one page needs the same three-step derivation
+ * (resolveCurrent → read the document → its steps) in order to print something
+ * the operator can act on: the evidence page lists the step ids evidence may be
+ * recorded against, the backlog page resolves the frozen tag and workload slug a
+ * build must be dispatched with. Written twice, the two would eventually
+ * disagree about which version is official — and both are telling the operator
+ * what to type into a gate that will check it.
+ *
+ * Never rejects, and every failure is a value: nothing frozen yet
+ * (`planRef: null`) and a frozen plan that no longer parses (`unreadable`) are
+ * both ordinary states a page must render, not errors that should blank it.
+ */
+export interface OfficialPlan {
+  slug: string;
+  /** the newest frozen version, or null when this workload has approved none */
+  planRef: string | null;
+  /** repo path the document resolved at — canonical, or the pre-#79 root */
+  path: string | null;
+  /** the review where that version was judged */
+  andonIssue: number | null;
+  steps: { id: string; title: string; trackingIssue: number | null }[];
+  /** frozen, but the document no longer parses as a plan */
+  unreadable: boolean;
+}
+
+export async function readOfficialPlan(gh: Octokit, repo: RepoRef, slug: string): Promise<OfficialPlan> {
+  const planRef = await resolveCurrent(gh, repo, slug);
+  if (planRef === null) {
+    return { slug, planRef: null, path: null, andonIssue: null, steps: [], unreadable: false };
+  }
+  const { plan, path } = await tryReadPlanAtRef(gh, repo, planRef);
+  if (!plan) return { slug, planRef, path, andonIssue: null, steps: [], unreadable: true };
+  return {
+    slug,
+    planRef,
+    path,
+    andonIssue: plan.andon_issue,
+    steps: plan.steps.map((s) => ({ id: s.id, title: s.title, trackingIssue: s.tracking_issue ?? null })),
+    unreadable: false,
+  };
 }
 
 export async function tagExists(gh: Octokit, repo: RepoRef, tagRef: string): Promise<boolean> {

@@ -33,16 +33,27 @@ export function createClient(opts: ClientOptions = {}): Octokit {
       retries: 2,
       retryAfter: 1,
     },
-    // A 304 is the ETag cache working — the hook below re-serves the cached body —
-    // but octokit's bundled request-log plugin runs inside that hook and logs every
-    // non-2xx via log.error before recovery. Drop only that message; real failures
-    // still log AND throw.
+    // octokit's bundled request-log plugin runs inside the hook below and logs
+    // every non-2xx via log.error BEFORE this module gets to recover from it.
+    // Next's dev overlay promotes a server console.error into a red page error,
+    // so two statuses that are routine answers here must not reach the console:
+    //
+    //   304 — the ETag cache working: the hook re-serves the cached body.
+    //   404 — "absent", a first-class answer. Two dozen call sites ask GitHub
+    //         whether a file/ref/issue exists by reading it and reading 404 as
+    //         no. readPlanFileAtRef's probe of the canonical plans/<slug>/ path
+    //         is one, and it 404s on every render of an Andon break whose branch
+    //         predates GHI #79 and still keeps its document at the repo root.
+    //
+    // Nothing is lost by dropping them: a 404 nobody handles still THROWS, and
+    // the thrown RequestError carries the same status and URL the log line would
+    // have shown. Every other status still logs AND throws.
     log: {
       debug: () => {},
       info: () => {},
       warn: console.warn,
       error: (...args: unknown[]) => {
-        if (typeof args[0] === 'string' && args[0].includes(' - 304 with id ')) return;
+        if (typeof args[0] === 'string' && / - (?:304|404) with id /.test(args[0])) return;
         console.error(...args);
       },
     },

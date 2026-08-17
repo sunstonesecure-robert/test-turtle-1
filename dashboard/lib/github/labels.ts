@@ -8,6 +8,10 @@
 // a review ended without approval — distinct from andon:resolved, which is
 // approval-only. Both are terminal and mutually exclusive with the live states.
 export const ANDON_LABELS = ['andon:open', 'andon:under-review', 'andon:resolved', 'andon:superseded'] as const;
+// The two halves of that family, named because THREE modules query one half by label
+// and must agree on which half they got (same reason CONFLICT_LABEL is named below).
+export const LIVE_ANDON_LABELS = ['andon:open', 'andon:under-review'] as const;
+export const TERMINAL_ANDON_LABELS = ['andon:resolved', 'andon:superseded'] as const;
 export const CORRECTION_LABELS = ['correction:open', 'correction:addressed', 'correction:withdrawn'] as const;
 export const CHUNK_LABELS = ['chunk:title-only', 'chunk:ready'] as const;
 export const WORKLOAD_LABELS = [
@@ -46,6 +50,32 @@ const EXCLUSIVE_FAMILIES: readonly (readonly string[])[] = [
   CHUNK_LABELS,
   WORKLOAD_LABELS,
 ];
+
+/**
+ * Is this break LIVE — a review that still wants the operator? A live label alone does
+ * not answer it. Every terminal closure adds its terminal label FIRST and drops the live
+ * ones after (GHI #48 ordering, so a crash never leaves the break label-less), which means
+ * a teardown that fails in between leaves BOTH on the issue. The break's own page reads
+ * the terminal label and says "Withdrawn"; every surface that asked only "does it carry a
+ * live label?" kept calling it live — an action-required banner on /workloads, a "Continue
+ * review" in the Inbox, and a lifecycle-gate blocker, all pointing at a review the operator
+ * had already ended (live finding, 2026-08-17: demo5 / break #25 held all three).
+ *
+ * Terminal wins, deliberately: it is the LAST thing the operator was told, it is the state
+ * the break's own page renders, and it is the half of the pair that closures write first —
+ * so believing it can never be premature. The stale live label is then inert everywhere
+ * rather than half-believed, and the withdrawal's own idempotent retry stays the thing that
+ * converges the labels.
+ *
+ * This is the READ-side guard only. What strands the label in the first place — a teardown
+ * whose first (usually no-op) removeLabel takes the close down with it — is GHI #104.
+ */
+export function isLiveAndon(labels: string[]): boolean {
+  return (
+    labels.some((l) => (LIVE_ANDON_LABELS as readonly string[]).includes(l)) &&
+    !labels.some((l) => (TERMINAL_ANDON_LABELS as readonly string[]).includes(l))
+  );
+}
 
 /** Returns the families violated by the given label set (≥2 labels of one exclusive family). */
 export function exclusivityViolations(labels: string[]): string[][] {

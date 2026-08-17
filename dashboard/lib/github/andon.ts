@@ -15,6 +15,10 @@ import { withdrawOpenCorrections } from './corrections';
 // Imported rather than re-spelled: one definition of the plan document's repo
 // path, so the break body can never name a path no reader looks at.
 import { planPath } from './plans';
+// The live/terminal split of the andon:* family, and the one predicate that reads it —
+// taken from the taxonomy rather than re-spelled, so a query here can never disagree with
+// the break page about which labels mean "still waiting on you".
+import { isLiveAndon, LIVE_ANDON_LABELS } from './labels';
 import {
   parseAndonHeader,
   parseCorrectionMarker,
@@ -140,11 +144,17 @@ export async function judgeItem(gh: Octokit, repo: RepoRef, issueNumber: number,
 /** The LIVE Andon break (open or under-review — both are in-flight reviews;
  *  a review the operator has picked up must still be findable) whose header
  *  references this plan ref; null when none. The labels param is AND-semantic,
- *  so the two states need two queries. */
+ *  so the two states need two queries — and the LIST answers by label alone, so
+ *  isLiveAndon re-checks the whole set: a break mid-teardown still carries a live
+ *  label under its terminal one, and that is not a review to send anyone to. */
 export async function findOpenAndonByPlanRef(gh: Octokit, repo: RepoRef, planRef: string): Promise<number | null> {
-  for (const label of ['andon:open', 'andon:under-review']) {
+  for (const label of LIVE_ANDON_LABELS) {
     const breaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'open', per_page: 100 });
-    const match = breaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
+    const match = breaks.find(
+      (issue) =>
+        parseAndonHeader(issue.body ?? '')?.planRef === planRef &&
+        isLiveAndon((issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')))),
+    );
     if (match) return match.number;
   }
   return null;
@@ -160,14 +170,18 @@ export async function findLiveAndonsBySlug(gh: Octokit, repo: RepoRef, slug: str
   // (labels is AND-semantic, so they can't be one call); the Set dedupes and
   // the sort keeps the result deterministic.
   const pages = await Promise.all(
-    ['andon:open', 'andon:under-review'].map((label) =>
+    LIVE_ANDON_LABELS.map((label) =>
       gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'open', per_page: 100 }),
     ),
   );
   const found = new Set<number>();
   for (const issue of pages.flat()) {
     const header = parseAndonHeader(issue.body ?? '');
-    if (header && versionRe.test(header.planRef)) found.add(issue.number);
+    // isLiveAndon, not the LIST's label alone: an already-withdrawn break whose teardown
+    // half-landed must not read as live work — the lifecycle gate consumes this and would
+    // block a cancel on a review that is already over.
+    const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+    if (header && versionRe.test(header.planRef) && isLiveAndon(labels)) found.add(issue.number);
   }
   return [...found].sort((a, b) => a - b);
 }
