@@ -3,6 +3,7 @@ import type { RepoRef } from './client';
 import { PlanDoc } from '../../../schemas/plan';
 import { errorMessage, errorStatus } from './errors';
 import { createAndonIssue, dropLiveLabelsAndClose } from './andon';
+import { CONTRADICTION_LABEL } from './labels';
 
 /**
  * Plan module (T033 tracer surface): read the plan document from a ref, resolve
@@ -511,6 +512,11 @@ export async function freezeApprovedPlan(
     );
   }
 
+  // The corrected plan is approved, so the contradictions it answers are answered
+  // (GHI #75). Before the break is closed, because a failure here should leave a
+  // retryable freeze rather than a resolved review with work still blocked.
+  await clearContradictionFlags(gh, repo, tagRef);
+
   // Terminal label BEFORE the live ones are dropped (GHI #48, the
   // withdrawProposal ordering): a partial failure never leaves the break with
   // no andon:* label, and the re-runnable freeze converges from any point.
@@ -518,6 +524,60 @@ export async function freezeApprovedPlan(
   await dropLiveLabelsAndClose(gh, repo, input.andonIssue);
 
   return { tagRef };
+}
+
+/**
+ * Clear `flagged:wrong-assumption` from every work item the NEWLY frozen plan's
+ * steps name (GHI #75, operator decision 2026-08-17: the fresh approval is the
+ * clearing point).
+ *
+ * NOTHING CLEARED THE FLAG. `markContradicted` applies it, preflight B6 and
+ * lifecycle L8 both refuse on it, and no production transition removed it — so a
+ * contradicted work item stayed permanently unbuildable, and the only way out was
+ * hand-editing labels on GitHub, which nothing told the operator to do. The
+ * correction loop already ends somewhere sensible: contradiction → flags + re-open
+ * → the operator corrects the plan → a fresh approval freezes v<N+1>. That freeze
+ * is this function.
+ *
+ * WHY THE APPROVAL, and not a separate "resolve this flag" control. Re-opening
+ * resets every judgment item, so approving the new version means the operator
+ * re-read and re-agreed to the whole plan — the attribution is already recorded, in
+ * the approval, by a named human with a timestamp. A separate control would add a
+ * second record and a second chore, and an operator who fixed the plan but forgot
+ * the extra click would leave the work blocked with no visible reason. (The
+ * alternative was offered and declined; if flags ever need clearing *without* an
+ * approval — an item dropped from the corrected plan keeps its flag, deliberately —
+ * that is the case for adding the control later.)
+ *
+ * SCOPE IS THE NEW PLAN'S OWN ITEMS. A work item dropped from the corrected plan is
+ * NOT cleared: no approved plan covers it any more, so nothing has answered its
+ * contradiction and silently clearing it would be the freeze asserting something
+ * nobody said.
+ *
+ * Runs on EVERY freeze, not only on a re-approval. A v1 can carry a flag too — a
+ * work item may be contradicted before any plan is approved against it — and
+ * scoping this to `supersedes >= 1` would leave exactly that case stuck forever.
+ * Clearing an absent label is a 404 and a no-op, so the cost of the general case is
+ * one tolerated request per item.
+ */
+async function clearContradictionFlags(gh: Octokit, repo: RepoRef, tagRef: string): Promise<void> {
+  // Read at the TAG, which is the version just approved — reading the branch would
+  // pick up any commit that landed after the merge.
+  const { plan } = await tryReadPlanAtRef(gh, repo, tagRef);
+  if (!plan) return; // an unreadable frozen plan is the plan gate's business, not the freeze's
+  const items = [...new Set(plan.steps.map((s) => s.tracking_issue).filter((n): n is number => typeof n === 'number'))].sort(
+    (a, b) => a - b,
+  );
+  for (const issueNumber of items) {
+    try {
+      await gh.issues.removeLabel({ ...repo, issue_number: issueNumber, name: CONTRADICTION_LABEL });
+    } catch (error: unknown) {
+      // 404 = the item was never flagged, or a concurrent clear won. Both are the
+      // outcome we wanted. Anything else is loud: a swallowed 5xx would report an
+      // approval that silently left the work unbuildable (the andon.ts stance).
+      if (errorStatus(error) !== 404) throw error;
+    }
+  }
 }
 
 export interface ReopenResult {

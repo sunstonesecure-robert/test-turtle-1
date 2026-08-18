@@ -2,15 +2,25 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-turtles/schemas/confirmation.schema.json",
   "title": "Agentic Turtles High-Stakes Confirmation Record",
-  "description": "Attributable external sign-off for one high-stakes plan step, committed at confirmations/<step-id>.json on the default branch. Its existence is what unblocks the build, even on an approved, frozen plan (FR-023, FR-024, SC-006).",
+  "description": "Attributable external sign-off for one high-stakes plan step, committed at confirmations/<workload>/<step-id>.json on the default branch. Its existence is what unblocks the build, even on an approved, frozen plan (FR-023, FR-024, SC-006). The record is BOUND to the work it was given about: the workload it belongs to, and a digest of the step's own content (amended 2026-08-17, GHI #95) — an authority's answer authorizes THAT step in THAT workload and nothing else.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["step_id", "authority", "confirmer", "confirmed_at", "scope"],
+  "required": ["step_id", "workload", "step_digest", "authority", "confirmer", "confirmed_at", "scope"],
   "properties": {
     "step_id": {
       "type": "string",
       "pattern": "^step-[a-z0-9-]+$",
       "description": "The plan step this confirms; must equal the <step-id> in the filename (the record is looked up by it)"
+    },
+    "workload": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "The workload slug this confirms a step of; must equal the <workload> directory in the path. Step ids are unique only WITHIN a plan, so without this two workloads that both declare step-billing-cycle would share one record and one authority's answer would unblock the other's build (GHI #95)."
+    },
+    "step_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "sha256 over the step's id, intent, acceptance and authority, canonically serialized. B5 recomputes it from the frozen plan and refuses a mismatch, so a re-approval that CHANGED this step invalidates the sign-off while a re-approval that left it alone does not (GHI #95). Obtain it from the review page's high-stakes panel — it prints the record to commit with this field filled in."
     },
     "authority": {
       "enum": ["customer", "clinical", "legal"],

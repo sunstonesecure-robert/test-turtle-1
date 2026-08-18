@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import type { PlanDoc } from '../../../schemas/plan';
-import { errorStatus } from './errors';
+import { errorMessage, errorStatus } from './errors';
 // Static import that closes an import cycle: corrections.ts statically imports
 // getAndon from here, so andon.ts ↔ corrections.ts is circular. The cycle is
 // safe because neither binding is touched at module-evaluation time — both are
@@ -256,25 +256,58 @@ export async function withdrawProposal(
   return cascaded;
 }
 
-/** Teardown tail shared by every terminal closure — withdrawProposal here,
- *  freezeApprovedPlan in plans.ts — and their crash-recovery retries: drop the
- *  live andon:* labels and close the issue. Callers add their terminal label
- *  FIRST (GHI #48 ordering), so a partial failure never leaves the break
- *  label-less. removeLabel 404s are swallowed — at most one live label is
- *  normally present, so the other's absence is the EXPECTED case — but any
- *  other failure propagates: the terminal label is already on, so the
- *  caller's retry re-enters here and converges, whereas a swallowed 5xx
- *  would report success with a stale live label stranded (PR #51 review).
- *  Closing an already-closed issue is a no-op. */
+/**
+ * Teardown tail shared by every terminal closure — withdrawProposal here,
+ * freezeApprovedPlan in plans.ts — and their crash-recovery retries: drop the
+ * live andon:* labels and close the issue. Callers add their terminal label
+ * FIRST (GHI #48 ordering), so a partial failure never leaves the break
+ * label-less.
+ *
+ * EVERY CALL IS ATTEMPTED, and the failures are collected rather than thrown at
+ * the first one (GHI #104). It used to be three sequential awaits, which made
+ * any non-404 failure in the FIRST removeLabel skip both remaining calls — and
+ * the ordering made that as bad as it can be: `andon:open` is the call least
+ * likely to matter (at most one live label is normally present, and on a break
+ * the operator picked up it is already gone) while also being the call that
+ * gated the close, which is the state every reader keys on. A transient 403/5xx
+ * on a no-op DELETE therefore stranded the break exactly as demo5 / break #25
+ * was found live on 2026-08-17: `andon:under-review` still on, still OPEN, its
+ * own page already reading "Withdrawn".
+ *
+ * removeLabel 404s stay swallowed — "already absent" is the EXPECTED case, not a
+ * failure. Everything else is still LOUD (PR #51 review): reporting success with
+ * a stale live label stranded is the one outcome this must never produce. The
+ * terminal label is already on, so the caller's retry re-enters the idempotent
+ * branch and converges from any partial state. What changed is only that a
+ * no-op DELETE can no longer take the close down with it.
+ *
+ * Closing an already-closed issue is a no-op.
+ */
 export async function dropLiveLabelsAndClose(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<void> {
-  for (const stale of ['andon:open', 'andon:under-review']) {
+  const failures: unknown[] = [];
+  for (const stale of LIVE_ANDON_LABELS) {
     try {
       await gh.issues.removeLabel({ ...repo, issue_number: issueNumber, name: stale });
     } catch (error: unknown) {
-      if (errorStatus(error) !== 404) throw error;
+      if (errorStatus(error) !== 404) failures.push(error);
     }
   }
-  await gh.issues.update({ ...repo, issue_number: issueNumber, state: 'closed' });
+  try {
+    await gh.issues.update({ ...repo, issue_number: issueNumber, state: 'closed' });
+  } catch (error: unknown) {
+    failures.push(error);
+  }
+  if (failures.length > 0) {
+    // The causes are spelled into the message as well as carried in `errors`:
+    // every reporting path in this repo goes through errorMessage(), which reads
+    // `.message` only — an AggregateError raised with a bare summary would reach
+    // the operator as "teardown incomplete" with nothing to act on.
+    throw new AggregateError(
+      failures,
+      `Andon #${issueNumber}: teardown incomplete — ${failures.map((f) => errorMessage(f)).join('; ')}. ` +
+        `The terminal label is already applied, so retrying the same action re-enters the teardown and converges.`,
+    );
+  }
 }
 
 /** Open corrections linked to this Andon (G7 input) — matched via the machine-readable

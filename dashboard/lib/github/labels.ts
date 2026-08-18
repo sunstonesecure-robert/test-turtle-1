@@ -30,7 +30,11 @@ export const CONFIRMED_LABELS = ['confirmed:customer', 'confirmed:clinical', 'co
 // taxonomy (or each other) about the string: a one-character drift would silently mean
 // "no conflicts anywhere" on a view whose whole job is to surface them.
 export const CONFLICT_LABEL = 'conflict:open';
-export const STANDALONE_LABELS = ['intent:confirmed', 'evidence:batch', 'flagged:wrong-assumption', CONFLICT_LABEL] as const;
+// Named for the same reason CONFLICT_LABEL is: it has a writer (markContradicted),
+// two readers that BLOCK on it (preflight B6, lifecycle L8), and now a clearer at
+// the freeze (GHI #75) — four modules that must spell it identically.
+export const CONTRADICTION_LABEL = 'flagged:wrong-assumption';
+export const STANDALONE_LABELS = ['intent:confirmed', 'evidence:batch', CONTRADICTION_LABEL, CONFLICT_LABEL] as const;
 
 export const ALL_LABELS: readonly string[] = [
   ...ANDON_LABELS,

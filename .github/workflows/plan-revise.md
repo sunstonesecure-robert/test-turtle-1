@@ -46,6 +46,13 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    every id stable unless a correction requires changing what an id describes. Change NOTHING
    a correction (or recorded answer) does not call for: the operator re-judges only the flagged
    items, so an unasked-for change would ship unreviewed.
+   **`tracking_issue` is the operator's field, not yours.** It links a step to the backlog item
+   that step delivers, and the operator sets it by hand under **Work items** on the review page.
+   CARRY EVERY EXISTING VALUE THROUGH UNCHANGED — silently dropping one un-links work the
+   operator linked and refuses the next build aimed at it. Set one only where a correction
+   explicitly tells you to, or on a step you are ADDING that plainly delivers an open
+   `chunk:title-only` / `chunk:ready` issue you actually read; at most one step per issue, and
+   `null` whenever you are unsure. A wrong link points a build at work nobody asked for.
 4. Upload two artifacts (`upload-artifact` safe output):
    - `plan.json` — the full revised document (must validate against `schemas/plan.schema.json`);
    - `addresses.json` — a JSON array of the correction ISSUE NUMBERS your revision carries out,

@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
@@ -9,14 +9,14 @@ import { resolveCurrent, tryReadPlanAtRef } from '../dashboard/lib/github/plans'
 import { listWorkloads } from '../dashboard/lib/github/workloads';
 import type { ConfirmationRecord } from '../schemas/confirmation';
 import type { PlanStep } from '../schemas/plan';
-import { confirmationPath, parseConfirmation } from './gates/lib/checks-preflight';
+import { CONFIRMATION_DIR, confirmationMismatch, parseConfirmation } from './gates/lib/checks-preflight';
 
 /**
  * confirm-record — validates every committed high-stakes confirmation and applies
  * `confirmed:<authority>` to the tracking issue of the step each record names
  * (issue-tracker-contract.md authority matrix, FR-023/FR-024). Invoked by the
- * confirm-record workflow when a `confirmations/<step-id>.json` lands on the
- * default branch.
+ * confirm-record workflow when a `confirmations/<workload>/<step-id>.json` lands on
+ * the default branch.
  *
  * The label is a BOARD SIGNAL, never the gate: B5 reads the FILE, so a label can
  * neither unblock a build nor be forged into one. That is exactly why it must never
@@ -26,10 +26,11 @@ import { confirmationPath, parseConfirmation } from './gates/lib/checks-prefligh
  * would let a record earn the label and still block the build it was recorded for.
  *
  * Outcomes are split three ways, because only one of them is the record's own fault:
- *   rejected  — unparseable or off-schema, a `step_id` that disagrees with the
- *     filename, an authority the step does not route to, or a step id claimed by two
- *     official plans at once. Nothing but an edit fixes these, and every one of them
- *     would make `confirmed:<authority>` say something untrue, so the run fails.
+ *   rejected  — unparseable or off-schema, a `step_id` or `workload` that disagrees
+ *     with the path, an authority the step does not route to, a `step_digest` that
+ *     confirms a superseded version of the step, or a record still sitting at the
+ *     pre-GHI-#95 unscoped path. Nothing but an edit fixes these, and every one of
+ *     them would make `confirmed:<authority>` say something untrue, so the run fails.
  *   unlabeled — no official plan names the step yet, or the step carries no
  *     `tracking_issue`. Those are states of the PLAN, not defects in the record: the
  *     identical file becomes labelable later without changing a byte, so failing
@@ -44,9 +45,50 @@ import { confirmationPath, parseConfirmation } from './gates/lib/checks-prefligh
  * much the plans around it churn.
  */
 
-/** Where the records live — derived from the path helper B5 reads, so the validator
- *  and the gate can never end up looking in two different places. */
-export const RECORD_DIR = dirname(confirmationPath('step-any'));
+/** Where the records live — taken from the constant B5 reads, so the validator and
+ *  the gate can never end up looking in two different places. One directory per
+ *  workload beneath it (GHI #95). */
+export const RECORD_DIR = CONFIRMATION_DIR;
+
+/**
+ * Every record in the tree, as `{ workload, stepId, file }`. Two levels deep and no
+ * deeper: the path IS the binding (`confirmations/<workload>/<step-id>.json`), so a
+ * file at any other depth is not a record this validator can attribute to anything.
+ *
+ * A `.json` sitting at the ROOT is the pre-#95 unscoped shape, and it is surfaced
+ * rather than skipped: silence would leave an operator believing a sign-off they
+ * genuinely obtained is in force, when B5 no longer reads that path at all.
+ */
+interface FoundRecord {
+  workload: string;
+  stepId: string;
+  /** display path, relative to the record dir — this is what the run log prints */
+  file: string;
+  absolute: string;
+}
+
+async function findRecords(dir: string): Promise<{ records: FoundRecord[]; unscoped: string[] }> {
+  // A directory that does not exist yet is the ordinary state of a repo before its
+  // first high-stakes step, not an error.
+  if (!existsSync(dir)) return { records: [], unscoped: [] };
+  const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+  const unscoped = entries.filter((e) => e.isFile() && e.name.endsWith('.json')).map((e) => e.name);
+  const records: FoundRecord[] = [];
+  for (const entry of entries.filter((e) => e.isDirectory())) {
+    const workload = entry.name;
+    const files = (await readdir(join(dir, workload))).filter((f) => f.endsWith('.json')).sort();
+    for (const file of files) {
+      records.push({
+        workload,
+        stepId: basename(file, '.json'),
+        file: `${workload}/${file}`,
+        absolute: join(dir, workload, file),
+      });
+    }
+  }
+  // Sorted so one commit's log reads the same every time (report determinism).
+  return { records, unscoped };
+}
 
 export interface ConfirmOutcome {
   /** file name within the records directory; for a `cleared` orphan whose step no
@@ -65,14 +107,18 @@ interface LocatedStep {
 }
 
 /**
- * step id → every official plan that declares it. A list, not one entry, because
- * `confirmations/<step-id>.json` is a REPO-GLOBAL path while step ids are only unique
- * within a plan: two workloads that both name `step-billing-cycle` would share one
- * file, and one workload's authority would silently unblock the other's build.
- * Unattributable by construction, so it is reported rather than guessed at.
+ * `<workload>/<step-id>` → the official step it names.
+ *
+ * ONE entry, not a list, since GHI #95 scoped the record path by workload. It used
+ * to be a list keyed on step id alone, because `confirmations/<step-id>.json` was a
+ * repo-global path while step ids are unique only WITHIN a plan — two workloads both
+ * naming `step-billing-cycle` shared one file, and this validator REFUSED to label
+ * the ambiguity while B5 went on accepting the record. That disagreement is gone:
+ * the path now carries the workload, so the key is unambiguous by construction and
+ * there is no ambiguity left to report.
  */
 interface OfficialIndex {
-  byStep: Map<string, LocatedStep[]>;
+  byStep: Map<string, LocatedStep>;
   /** tracking issue → the official steps naming it, for the orphan-label sweep */
   byIssue: Map<number, LocatedStep[]>;
   /** official plans we could NOT read. A partial view must never drive a deletion, so
@@ -80,8 +126,11 @@ interface OfficialIndex {
   unreadable: string[];
 }
 
+/** The index key — spelled once so the writer and every reader agree. */
+const stepKey = (workload: string, stepId: string): string => `${workload}/${stepId}`;
+
 async function indexOfficialSteps(gh: Octokit, repo: RepoRef): Promise<OfficialIndex> {
-  const byStep = new Map<string, LocatedStep[]>();
+  const byStep = new Map<string, LocatedStep>();
   const byIssue = new Map<number, LocatedStep[]>();
   const unreadable: string[] = [];
   const workloads = (await listWorkloads(gh, repo)).sort((a, b) => a.slug.localeCompare(b.slug));
@@ -96,7 +145,7 @@ async function indexOfficialSteps(gh: Octokit, repo: RepoRef): Promise<OfficialI
       continue;
     }
     for (const step of plan.steps) {
-      byStep.set(step.id, [...(byStep.get(step.id) ?? []), { planRef, step }]);
+      byStep.set(stepKey(workload.slug, step.id), { planRef, step });
       if (typeof step.tracking_issue === 'number') {
         byIssue.set(step.tracking_issue, [...(byIssue.get(step.tracking_issue) ?? []), { planRef, step }]);
       }
@@ -107,8 +156,9 @@ async function indexOfficialSteps(gh: Octokit, repo: RepoRef): Promise<OfficialI
 
 /**
  * Remove every `confirmed:<authority>` whose record no longer earns it — absent, edited
- * into invalidity, deleted, now claimed by two official plans, or pointed at a step whose
- * authority changed. B5 goes on blocking such a build correctly, so this is not about the
+ * into invalidity, deleted, left at the pre-#95 unscoped path, pointed at a step whose
+ * authority changed, or confirming a version of the step a later approval rewrote
+ * (GHI #95). B5 goes on blocking such a build correctly, so this is not about the
  * gate: it is about the board not testifying to a sign-off that no longer exists, which is
  * the one thing this workflow owns and the only lie it could tell.
  *
@@ -165,24 +215,40 @@ async function clearOrphanedLabels(
 /** Validate every record under `dir` and label what can be labeled. Outcomes come back
  *  in file order (sorted) — the log for one commit must read the same every time. */
 export async function confirmRecords(gh: Octokit, repo: RepoRef, dir: string = RECORD_DIR): Promise<ConfirmOutcome[]> {
-  // A directory that does not exist yet is the ordinary state of a repo before its
-  // first high-stakes step, not an error.
-  const files = existsSync(dir) ? (await readdir(dir)).filter((f) => f.endsWith('.json')).sort() : [];
+  const { records, unscoped } = await findRecords(dir);
 
   // Parsed before a single API call: a record's validity is intrinsic to the file, so
   // a directory of malformed ones is rejected without asking GitHub anything.
   const outcomes: ConfirmOutcome[] = [];
-  const valid: { file: string; stepId: string; record: ConfirmationRecord }[] = [];
-  for (const file of files) {
-    // The filename IS the lookup key (B5 reads confirmations/<step-id>.json), so it —
-    // not the record's own field — decides which step is being confirmed.
-    const stepId = basename(file, '.json');
-    const parsed = parseConfirmation(await readFile(join(dir, file), 'utf8'), stepId);
+  // Surfaced, never silently skipped: a file at the pre-#95 root path is an answer a
+  // real authority gave, and B5 no longer reads it. Rejected rather than "unlabeled"
+  // because only an edit fixes it — and because an operator who obtained a sign-off
+  // needs to hear that it is not in force.
+  for (const file of unscoped) {
+    outcomes.push({
+      file,
+      status: 'rejected',
+      detail:
+        `sits at the pre-GHI-#95 unscoped path — records now live at ` +
+        `${CONFIRMATION_DIR}/<workload>/${file} and carry \`workload\` and \`step_digest\`, which bind the ` +
+        `sign-off to one workload and one version of the step. Move it and add those fields; the review ` +
+        `page's high-stakes panel prints the record to commit`,
+    });
+  }
+  const valid: { file: string; workload: string; stepId: string; record: ConfirmationRecord }[] = [];
+  for (const found of records) {
+    // The PATH is the lookup key (B5 reads confirmations/<workload>/<step-id>.json),
+    // so it — not the record's own fields — decides what is being confirmed; the
+    // fields must then agree with it.
+    const parsed = parseConfirmation(await readFile(found.absolute, 'utf8'), {
+      workload: found.workload,
+      stepId: found.stepId,
+    });
     if ('reason' in parsed) {
-      outcomes.push({ file, status: 'rejected', detail: `not a valid confirmation record — ${parsed.reason}` });
+      outcomes.push({ file: found.file, status: 'rejected', detail: `not a valid confirmation record — ${parsed.reason}` });
       continue;
     }
-    valid.push({ file, stepId, record: parsed.record });
+    valid.push({ file: found.file, workload: found.workload, stepId: found.stepId, record: parsed.record });
   }
   // No early return on an empty `valid` set: the sweep below still has to run. A deleted
   // or newly-corrupted record produces nothing to react to, and that is exactly the case
@@ -190,32 +256,27 @@ export async function confirmRecords(gh: Octokit, repo: RepoRef, dir: string = R
   const index = await indexOfficialSteps(gh, repo);
   const earned = new Map<number, Set<string>>();
 
-  for (const { file, stepId, record } of valid) {
+  for (const { file, workload, stepId, record } of valid) {
     const { authority } = record;
-    const located = index.byStep.get(stepId) ?? [];
-    if (located.length === 0) {
-      outcomes.push({ file, status: 'unlabeled', detail: `valid ${authority} confirmation; no official plan names ${stepId} yet — nothing to label` });
-      continue;
-    }
-    if (located.length > 1) {
+    const located = index.byStep.get(stepKey(workload, stepId));
+    if (located === undefined) {
       outcomes.push({
         file,
-        status: 'rejected',
-        detail:
-          `${stepId} is declared by ${located.map((l) => l.planRef).join(' and ')} — one repo-global record cannot ` +
-          `attribute an authority's answer to two plans, and confirming one would unblock the other`,
+        status: 'unlabeled',
+        detail: `valid ${authority} confirmation; no official plan for workload ${workload} names ${stepId} yet — nothing to label`,
       });
       continue;
     }
-    const { planRef, step } = located[0]!;
-    if (authority !== step.authority) {
+    const { planRef, step } = located;
+    // The gate's own binding check, imported not restated (GHI #95): a record that
+    // confirms a superseded version of the step must not light a label saying the
+    // authority signed off on what is frozen today.
+    const mismatch = confirmationMismatch(record, step);
+    if (mismatch !== null) {
       outcomes.push({
         file,
         status: 'rejected',
-        detail:
-          `confirmed by ${authority}, but ${stepId} in ${planRef} routes to ` +
-          `${step.authority ?? 'no authority — the step is not flagged high-stakes'} — the label would credit an ` +
-          `answer to a question that authority was never asked`,
+        detail: `${mismatch} — until then the label would credit an answer to a question that authority was never asked (${planRef})`,
       });
       continue;
     }

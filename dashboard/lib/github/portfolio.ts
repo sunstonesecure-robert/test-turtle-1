@@ -11,6 +11,10 @@ import { resolveCurrent, slugFromPlanRef, tryReadPlanAtRef } from './plans';
 import { listWorkloads, type Workload } from './workloads';
 import { listXLinks } from './xlinks';
 import { buildRunMonitorSnapshot, type RunMonitorRow } from '../../app/runs/snapshot';
+// The gate functions' own verdict on whether a workload's official plan could pass
+// preflight today (GHI #109) — reused, never re-derived, so a plan this view calls
+// unbuildable is one the build actually refuses.
+import { scanBuildability } from '../../../scripts/gates/lib/buildability';
 
 /**
  * Portfolio rollup (T147, FR-045/FR-046, SC-015): every NON-ARCHIVED workload's
@@ -86,6 +90,16 @@ export interface PortfolioInput {
   conflicts: { slug: string; issueNumber: number }[];
   /** US3 monitor rows, attributed by sessionKey (= head_branch = the plan ref) */
   runs: { slug: string; row: RunMonitorRow }[];
+  /**
+   * Workloads whose OFFICIAL plan cannot pass today's structural preflight
+   * (GHI #109) — one entry per workload, carrying every cause.
+   *
+   * An unbuildable official plan is exactly as blocking as a stalled run or an
+   * open conflict, and until this existed it was the only one of the three that
+   * nothing anywhere reported: the operator found out by dispatching a build and
+   * reading a failed Actions run, while this very view called the workload healthy.
+   */
+  unbuildable: { slug: string; reasons: string[] }[];
 }
 
 /** One slug's issue-shaped signals, deduped by issue number and issue-ordered. Deduping
@@ -171,6 +185,11 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
             ? `${CONFLICT_LABEL} on this workload's issue #${conflict.issueNumber} — an unresolved cross-workload conflict`
             : `${CONFLICT_LABEL} on affected item #${conflict.issueNumber} — an unresolved cross-workload conflict`,
         );
+      }
+      // Before the run signals: a plan that cannot be built at all is upstream of
+      // every run reason below it — there will never BE a run to stall.
+      for (const reason of input.unbuildable.filter((u) => u.slug === w.slug).flatMap((u) => u.reasons)) {
+        reasons.push(reason);
       }
       let runNeedsOperator = false;
       for (const row of runsForSlug(input.runs, w.slug)) {
@@ -362,10 +381,26 @@ export async function loadPortfolio(gh: Octokit, repo: RepoRef): Promise<Portfol
   // The conflict attribution reads only NON-archived workloads' plans: an archived
   // workload owns no row, so resolving its steps would buy nothing (FR-045).
   const active = workloads.filter((w) => w.state !== 'archived');
-  const [corrections, conflicts] = await Promise.all([
+  const [corrections, conflicts, buildability] = await Promise.all([
     attributeCorrections(gh, repo, slugByAndon),
     attributeConflicts(gh, repo, active, flagged),
+    // Scoped to `active` for the same reason (GHI #109): a deferred or completed
+    // workload is not about to dispatch a build, so telling its operator that its
+    // plan would be refused is a banner about nothing. It becomes true and visible
+    // again the moment the workload is reactivated.
+    scanBuildability(
+      gh,
+      repo,
+      active.filter((w) => w.state === 'active').map((w) => w.slug),
+    ),
   ]);
 
-  return portfolioRollup({ workloads, andons, corrections, conflicts, runs });
+  return portfolioRollup({
+    workloads,
+    andons,
+    corrections,
+    conflicts,
+    runs,
+    unbuildable: buildability.filter((v) => !v.buildable).map(({ slug, reasons }) => ({ slug, reasons })),
+  });
 }

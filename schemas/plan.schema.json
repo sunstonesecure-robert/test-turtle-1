@@ -56,7 +56,11 @@
           "items": { "type": "string", "pattern": "^step-[a-z0-9-]+$" },
           "description": "Dependency edges used to propagate wrong-assumption flags (FR-022)"
         },
-        "tracking_issue": { "type": ["integer", "null"], "minimum": 1 }
+        "tracking_issue": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "The BACKLOG CHUNK issue this step delivers — the one issue that represents this step's work, and the single meaning of this field (clarified 2026-08-17, GHI #101). It is both the FR-025 mirror for linkability and the FR-017 build binding: preflight B3 refuses a build whose --chunk is not the tracking_issue of a step in the frozen plan, confirm-record applies confirmed:<authority> to it, and the portfolio attributes conflict:open through it. At most one step per issue — B3 asks whether ANY step tracks the named chunk, so two would make 'which step is this build for?' unanswerable. Written by plan-propose / plan-revise and correctable by the operator under Work items on the review page; null when no backlog item covers the step."
+        }
       },
       "allOf": [
         {

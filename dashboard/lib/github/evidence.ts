@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { errorStatus } from './errors';
+import { CONTRADICTION_LABEL } from './labels';
 import { parseWorkloadEvent } from './markers';
 import { readPlanAtRef, reopenPlan, resolveCurrent, tryReadPlanAtRef } from './plans';
 import { getWorkload, type Workload } from './workloads';
@@ -107,7 +108,7 @@ export async function scanDeferralContradictions(
     }),
   );
   for (const entry of labelsByIssue) {
-    if (!entry || !entry.labels.includes('flagged:wrong-assumption')) continue;
+    if (!entry || !entry.labels.includes(CONTRADICTION_LABEL)) continue;
     findings.push(
       entry.issueNumber === workload.issueNumber
         ? `workload issue #${entry.issueNumber} carries flagged:wrong-assumption`
@@ -311,7 +312,7 @@ export async function markContradicted(
     ),
   ].sort((a, b) => a - b);
   for (const issueNumber of trackingIssues) {
-    await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: ['flagged:wrong-assumption'] });
+    await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: [CONTRADICTION_LABEL] });
   }
 
   // The attributable reconciliation record on the batch issue (read back by

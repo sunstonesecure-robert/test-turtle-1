@@ -41,21 +41,38 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    never invent a feature name (no spec-kit-style `NNN-` prefixes): the publisher refuses any
    plan whose `feature` does not name an existing workload (PB-004 finding D), and every
    `plan/<slug>/v<N>` reference in your Andon body MUST use that same slug.
-4. Compute `<N>` = one more than the highest version among BOTH the frozen
+4. Link each step to the backlog item it delivers, where one exists. Read the OPEN issues
+   labeled `chunk:title-only` or `chunk:ready` — those are the backlog. When a step plainly
+   delivers one of them, set that step's `tracking_issue` to that issue's number; otherwise
+   leave it `null`. This is what tells a build dispatched against a backlog item WHICH step it
+   is doing, and it is how that item's own gates (fully written up, intent confirmed, not
+   contradicted) come to gate the right piece of work — a build naming an item no step tracks
+   is refused before any work happens. Rules, all enforceable and all checked by a human on the
+   review page:
+   - **At most one step per item.** Two steps naming the same issue makes "which step is this
+     build for?" unanswerable.
+   - **Only when it is obvious.** A guess is worse than `null`: an unlinked step is visibly
+     unlinked and the operator links it in one click, whereas a WRONG link points a build at
+     work nobody asked for and reads as deliberate. Prefer `null` whenever you are unsure.
+   - **Never invent a number.** Only issues you actually read and that carry a `chunk:*` label.
+   The operator sees every link you propose, under **Work items** on the review page, and
+   corrects it there — so state the correspondence you relied on in the Andon body when it is
+   not self-evident from the titles.
+5. Compute `<N>` = one more than the highest version among BOTH the frozen
    `plan/${{ inputs.workload }}/v*` tags AND the existing `plan/${{ inputs.workload }}/v*`
    branches. Branches count because an abandoned proposal (published, then withdrawn without
    freezing) keeps its branch — its version number is never reused (FR-058); the publisher
    refuses a plan that lands on such a ref. You are read-only on contents — you CANNOT push
    branches; do not try. Set the plan's `andon_issue` field to the placeholder `1` (the
    publisher patches the real number in).
-5. Upload the plan document as a workflow artifact named `plan.json` (`upload-artifact` safe
+6. Upload the plan document as a workflow artifact named `plan.json` (`upload-artifact` safe
    output). After this run completes, the deterministic `plan-publish` workflow validates it
    against the schema, locates your Andon break by its header, and creates the branch
    `plan/${{ inputs.workload }}/v<N>`, committing the document at
    `plans/${{ inputs.workload }}/plan.json` on your behalf. The artifact stays flat — the
    publisher owns the repo path, one directory per workload so that approval merges of
    parallel workloads never touch the same file.
-6. Raise the Andon break via the `create-issue` safe output. Do NOT include HTML comments in
+7. Raise the Andon break via the `create-issue` safe output. Do NOT include HTML comments in
    the body — the safe-output sanitizer strips them; the `plan-publish` workflow injects the
    machine-readable `andon:v1` header afterwards (it locates your issue via this run's footer
    link). The body MUST contain a `## Proposed plan` link section and a `## Judgments required`
@@ -69,7 +86,7 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    stand-in value you used. The operator answers each `q-` item with an attributed
    `answer:v1` comment on the Andon issue, and approval is blocked (gate G11) until every
    question is answered — so ask real questions, never manufactured ones. The plan ref in
-   your body text MUST agree with step 4's `<N>`.
+   your body text MUST agree with step 5's `<N>`.
 
 An isolated **Threat Detection judge job** (separate container, no shared credentials) scans the
 proposed plan before the Andon issue is opened; its report is advisory input attached for the

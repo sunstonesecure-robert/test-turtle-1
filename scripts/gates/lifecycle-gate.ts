@@ -7,7 +7,7 @@ import { findLiveAndonsBySlug } from '../../dashboard/lib/github/andon';
 import { resolveCurrent, tagTargetSha, tryReadPlanAtRef } from '../../dashboard/lib/github/plans';
 import { deriveCompletionStatus, listVtCheckRuns } from '../../dashboard/lib/github/checks';
 import { commitmentScope } from './lib/checks-scope';
-import { cliMain, runGates, UsageError, type GateReport, type GateResult } from './lib/runner';
+import { cliMain, runGateCatalogue, UsageError, type GateReport, type GateResult } from './lib/runner';
 
 /**
  * lifecycle-gate (T137/T155/T167/T174) — precondition check for every workload
@@ -108,6 +108,12 @@ async function checkL10NoLiveReview(gh: Octokit, repo: RepoRef, slug: string): P
       };
 }
 
+/** A from-state / argument precondition as a gate row: null means met. Collapses
+ *  the ten near-identical ternaries the per-action assembly used to carry. */
+function precondition(id: string, requirement: string, unmet: string | null): GateResult {
+  return unmet ? { id, status: 'fail', requirement, detail: unmet } : { id, status: 'pass', requirement };
+}
+
 export async function lifecycleGate(
   gh: Octokit,
   repo: RepoRef,
@@ -129,103 +135,136 @@ export async function lifecycleGate(
           : `no workload issue with a workload:v1 header for slug ${input.slug}`,
       };
 
-  const checks: GateResult[] = [l0];
+  // THE CATALOGUE — every L gate the contract declares, reported on every
+  // transition (GHI #108). The set used to be ASSEMBLED per action, so a cancel
+  // report listed L0 and L4 and said nothing about the eight it did not run; a
+  // reader could not tell "does not apply to a cancel" from "not implemented".
+  // `skip` now carries that distinction, and it carries the REASON, which is the
+  // part a reader actually needs: "this gate is about completing, and you are
+  // cancelling" is an answer, "absent" is not.
+  //
+  // The from-state preconditions are pure functions of the workload and the
+  // action, so they are computed up front rather than inside the checks: L8 needs
+  // to know whether L7 would pass BEFORE deciding whether it applies, and a skip
+  // predicate cannot wait for another gate's result.
+  const forAction = (...actions: string[]): (() => string | null) => {
+    return () =>
+      actions.includes(input.action)
+        ? null
+        : `this gate applies to ${actions.join('/')}, and this transition is ${input.action}`;
+  };
+  const reactivateUnmet = statePrecondition(workload, 'reactivate');
+
   let requiresReview: boolean | undefined;
 
-  if (input.action === 'activate') {
-    const unmet = statePrecondition(workload, 'activate');
-    checks.push(
-      unmet
-        ? { id: 'L1', status: 'fail', requirement: 'FR-033', detail: unmet }
-        : { id: 'L1', status: 'pass', requirement: 'FR-033' },
-    );
-  }
+  const report = await runGateCatalogue(`${input.slug}:${input.action}`, [
+    // L0 is the only gate on every transition: a workload whose state cannot be
+    // read has no legal transition at all.
+    { id: 'L0', requirement: 'FR-032', run: () => l0 },
+    {
+      id: 'L1',
+      requirement: 'FR-033',
+      skip: forAction('activate'),
+      run: () => precondition('L1', 'FR-033', statePrecondition(workload, 'activate')),
+    },
+    {
+      id: 'L2',
+      requirement: 'FR-032',
+      skip: forAction('complete'),
+      run: () => precondition('L2', 'FR-032', statePrecondition(workload, 'complete')),
+    },
+    {
+      // L3 runs whatever L2 said — deliberately unlike L8, which needs L7's
+      // deferral window to exist before it has anything to scan. Reading check
+      // runs has no precondition, and FR-034's "list the unmet items when
+      // refusing" is most useful when a single refusal carries BOTH the wrong
+      // state and the outstanding targets, rather than making the operator fix
+      // one to discover the other.
+      id: 'L3',
+      requirement: 'FR-034',
+      skip: forAction('complete'),
+      run: () => checkL3Completion(gh, repo, input.slug),
+    },
+    {
+      id: 'L4',
+      requirement: 'FR-038',
+      skip: forAction('cancel'),
+      run: () => {
+        // One contract row, two conditions: legal from-state (proposed/active/
+        // deferred per the amended FR-038) AND a non-empty recorded reason.
+        const problems: string[] = [];
+        const unmet = statePrecondition(workload, 'cancel');
+        if (unmet) problems.push(unmet);
+        if (!input.reason?.trim()) problems.push('a non-empty cancellation reason must be supplied');
+        return precondition('L4', 'FR-038', problems.length > 0 ? problems.join('; ') : null);
+      },
+    },
+    {
+      id: 'L5',
+      requirement: 'FR-032',
+      skip: forAction('defer'),
+      run: () => precondition('L5', 'FR-032', statePrecondition(workload, 'defer')),
+    },
+    {
+      id: 'L6',
+      requirement: 'FR-039',
+      skip: forAction('defer'),
+      run: () =>
+        precondition('L6', 'FR-039', input.revisit?.trim() ? null : 'a revisit condition or date must be supplied'),
+    },
+    {
+      id: 'L7',
+      requirement: 'FR-040',
+      skip: forAction('reactivate'),
+      run: () => precondition('L7', 'FR-040', reactivateUnmet),
+    },
+    {
+      // L8 scans an actual deferral WINDOW, so it needs L7 to hold before it has
+      // anything to scan — on an L7 failure the report is already red and performs
+      // nothing. That is a second, narrower reason for not applying, and it says so
+      // rather than sharing L7's wording.
+      id: 'L8',
+      requirement: 'FR-040',
+      skip: () =>
+        input.action !== 'reactivate'
+          ? `this gate applies to reactivate, and this transition is ${input.action}`
+          : reactivateUnmet !== null || !workload
+            ? 'the workload is not in a deferred state (L7), so there is no deferral window to scan'
+            : null,
+      run: async () => {
+        const scan = await scanDeferralContradictions(gh, repo, workload!);
+        requiresReview = scan.contradicted;
+        return {
+          id: 'L8',
+          status: 'pass', // never blocks the transition — it routes it back to review
+          requirement: 'FR-040',
+          detail: scan.contradicted
+            ? `contradicting evidence during deferral — plan re-opens for review: ${scan.findings.join('; ')}`
+            : 'no contradicting evidence recorded during the deferral window',
+        };
+      },
+    },
+    {
+      // Terminal-only (FR-041) — and which states are terminal comes from
+      // WORKLOAD_TRANSITIONS.archive.from via statePrecondition, so the refusal
+      // text follows the matrix automatically. Archiving is close + lock, never
+      // deletion (FR-042): the record stays searchable afterwards (FR-043).
+      id: 'L9',
+      requirement: 'FR-041',
+      skip: forAction('archive'),
+      run: () => precondition('L9', 'FR-041', statePrecondition(workload, 'archive')),
+    },
+    {
+      // L10 last: L2/L3 answer about the official version, L10 about anything still
+      // in flight beside it. All three ship in one report so a refusal names every
+      // reason at once.
+      id: 'L10',
+      requirement: 'FR-036',
+      skip: forAction('complete'),
+      run: () => checkL10NoLiveReview(gh, repo, input.slug),
+    },
+  ]);
 
-  if (input.action === 'complete') {
-    const unmet = statePrecondition(workload, 'complete');
-    checks.push(
-      unmet
-        ? { id: 'L2', status: 'fail', requirement: 'FR-032', detail: unmet }
-        : { id: 'L2', status: 'pass', requirement: 'FR-032' },
-    );
-    // L3 runs whatever L2 said — deliberately unlike L8, which needs L7's
-    // deferral window to exist before it has anything to scan. Reading check
-    // runs has no precondition, and FR-034's "list the unmet items when
-    // refusing" is most useful when a single refusal carries BOTH the wrong
-    // state and the outstanding targets, rather than making the operator fix
-    // one to discover the other.
-    checks.push(await checkL3Completion(gh, repo, input.slug));
-    // L10 last: L2/L3 answer about the official version, L10 about anything still
-    // in flight beside it. All three ship in one report so a refusal names every
-    // reason at once.
-    checks.push(await checkL10NoLiveReview(gh, repo, input.slug));
-  }
-
-  if (input.action === 'cancel') {
-    // One contract row, two conditions: legal from-state (proposed/active/
-    // deferred per the amended FR-038) AND a non-empty recorded reason.
-    const problems: string[] = [];
-    const unmet = statePrecondition(workload, 'cancel');
-    if (unmet) problems.push(unmet);
-    if (!input.reason?.trim()) problems.push('a non-empty cancellation reason must be supplied');
-    checks.push(
-      problems.length > 0
-        ? { id: 'L4', status: 'fail', requirement: 'FR-038', detail: problems.join('; ') }
-        : { id: 'L4', status: 'pass', requirement: 'FR-038' },
-    );
-  }
-
-  if (input.action === 'defer') {
-    const unmet = statePrecondition(workload, 'defer');
-    checks.push(
-      unmet
-        ? { id: 'L5', status: 'fail', requirement: 'FR-032', detail: unmet }
-        : { id: 'L5', status: 'pass', requirement: 'FR-032' },
-    );
-    checks.push(
-      input.revisit?.trim()
-        ? { id: 'L6', status: 'pass', requirement: 'FR-039' }
-        : { id: 'L6', status: 'fail', requirement: 'FR-039', detail: 'a revisit condition or date must be supplied' },
-    );
-  }
-
-  if (input.action === 'reactivate') {
-    const unmet = statePrecondition(workload, 'reactivate');
-    checks.push(
-      unmet
-        ? { id: 'L7', status: 'fail', requirement: 'FR-040', detail: unmet }
-        : { id: 'L7', status: 'pass', requirement: 'FR-040' },
-    );
-    // L8 runs only against an actually-deferred workload (a defined deferral
-    // window); on an L7 failure the report is already red and performs nothing.
-    if (!unmet && workload) {
-      const scan = await scanDeferralContradictions(gh, repo, workload);
-      requiresReview = scan.contradicted;
-      checks.push({
-        id: 'L8',
-        status: 'pass', // never blocks the transition — it routes it back to review
-        requirement: 'FR-040',
-        detail: scan.contradicted
-          ? `contradicting evidence during deferral — plan re-opens for review: ${scan.findings.join('; ')}`
-          : 'no contradicting evidence recorded during the deferral window',
-      });
-    }
-  }
-
-  if (input.action === 'archive') {
-    // Terminal-only (FR-041) — and which states are terminal comes from
-    // WORKLOAD_TRANSITIONS.archive.from via statePrecondition, so the refusal
-    // text follows the matrix automatically. Archiving is close + lock, never
-    // deletion (FR-042): the record stays searchable afterwards (FR-043).
-    const unmet = statePrecondition(workload, 'archive');
-    checks.push(
-      unmet
-        ? { id: 'L9', status: 'fail', requirement: 'FR-041', detail: unmet }
-        : { id: 'L9', status: 'pass', requirement: 'FR-041' },
-    );
-  }
-
-  const report = await runGates(`${input.slug}:${input.action}`, checks.map((c) => () => c));
   return {
     subject: `${input.slug}:${input.action}`,
     result: report.result,

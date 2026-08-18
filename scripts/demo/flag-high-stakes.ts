@@ -4,8 +4,8 @@ import { commitPlanUpdate, maxPlanVersion, planBranch, readPlanAtRef, tagExists 
 import { createChunk } from '../../dashboard/lib/github/chunks';
 import { errorMessage, errorStatus } from '../../dashboard/lib/github/errors';
 import { checkG6HighStakesAuthority } from '../gates/lib/checks-highstakes';
-import { confirmationPath } from '../gates/lib/checks-preflight';
-import { printReport, type GateReport, type GateResult } from '../gates/lib/runner';
+import { confirmationPath, stepDigest } from '../gates/lib/checks-preflight';
+import { printReport, reportResult, type GateReport, type GateResult } from '../gates/lib/runner';
 import { buildPreflight } from '../gates/build-preflight';
 import { ConfirmationRecord } from '../../schemas/confirmation';
 import { proposeDemoPlan } from './propose-plan';
@@ -28,7 +28,7 @@ import { proposeDemoPlan } from './propose-plan';
  *     result — and on the same plan with the route stripped out, so the teeth show.
  *   … you approve and merge the plan (quickstart §4.5); the freeze cuts the tag …
  *   act 2 — the tag exists: run build-preflight (B5 FAILS, no record), commit
- *     confirmations/<step-id>.json to the default branch, run build-preflight again
+ *     confirmations/<workload>/<step-id>.json to the default branch, run build-preflight again
  *     (green — same tag, same plan, no re-approval).
  *
  * In production the flag comes from the review page's high-stakes panel and the
@@ -215,11 +215,17 @@ async function confirmStep(
 
   const { data: repoInfo } = await gh.repos.get({ ...repo });
   const branch = repoInfo.default_branch;
-  const path = confirmationPath(step.id);
+  const path = confirmationPath(input.slug, step.id);
   // Validated here, exactly as B5 will validate it after the write — a demo that
   // committed a record its own gate rejects would be teaching the wrong shape.
   const record = ConfirmationRecord.parse({
     step_id: step.id,
+    // The binding (GHI #95): which workload, and a fingerprint of the step as
+    // frozen. Derived from the plan the demo just read, which is the same source
+    // B5 recomputes from — so a demo record stays valid exactly as long as the
+    // step it confirms is unchanged, which is the behaviour being demonstrated.
+    workload: input.slug,
+    step_digest: stepDigest(step),
     authority,
     confirmer: {
       // Named as a stand-in when the demo has no real external authority to ask:
@@ -347,10 +353,10 @@ if (isMain) {
         );
         console.log('');
         console.log('plan-gate G6 on the flagged plan:');
-        printReport({ plan: r.planRef, result: r.g6.status, gates: [r.g6] }, false);
+        printReport({ plan: r.planRef, result: reportResult([r.g6]), gates: [r.g6] }, false);
         console.log('');
         console.log('plan-gate G6 on the same plan with the authority removed — what FR-023 refuses:');
-        printReport({ plan: r.planRef, result: r.g6Unrouted.status, gates: [r.g6Unrouted] }, false);
+        printReport({ plan: r.planRef, result: reportResult([r.g6Unrouted]), gates: [r.g6Unrouted] }, false);
         console.log('');
         console.log(`next         approve and merge ${r.planRef} (quickstart §4.5), then re-run this command —`);
         console.log('             the freeze cuts the tag, and the build half of US6 runs against it');

@@ -21,6 +21,18 @@ export const PlanStep = z
     high_stakes: z.boolean(),
     authority: z.enum(['customer', 'clinical', 'legal']).nullable().optional(),
     depends_on: z.array(stepId),
+    /**
+     * The BACKLOG CHUNK issue this step delivers — one field, one meaning
+     * (clarified 2026-08-17, GHI #101). It is simultaneously the FR-025 mirror for
+     * linkability and the FR-017 build binding, because in this system the issue
+     * that represents a step's work IS its backlog chunk; the alternative, a second
+     * `chunk_issue` field, was rejected because all three existing readers already
+     * assume that meaning (B3's build binding, confirm-record's `confirmed:*`
+     * label, the portfolio's conflict attribution).
+     *
+     * At most one step per issue: B3 asks whether ANY step tracks the named chunk,
+     * so two would make "which step is this build for?" unanswerable.
+     */
     tracking_issue: z.number().int().min(1).nullable().optional(),
   })
   .strict()
