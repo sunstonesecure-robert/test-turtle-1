@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { getAndon } from './andon';
 import { errorMessage } from './errors';
+import { mergeRecheck } from './read-after-write';
 import {
   parseCorrectionMarker,
   serializeCorrectionMarker,
@@ -145,23 +146,20 @@ export async function listCorrections(
     }
   }
 
-  for (const issueNumber of new Set(opts.recheck ?? [])) {
-    let live: Correction;
-    try {
-      live = await getCorrection(gh, repo, issueNumber);
-    } catch {
-      continue; // not a correction, or gone — the list is the only truth we have
-    }
-    if (live.andonIssue !== andonIssue) continue; // belongs to another review
-    const at = corrections.findIndex((c) => c.issueNumber === issueNumber);
-    // Replace in place when the list already carried it (a STALE row: the write
-    // changed labels the list has not caught up with), append when it did not
-    // (a MISSING row: the write created it). Position is preserved so a re-render
-    // never reshuffles the corrections under the operator's cursor.
-    if (at >= 0) corrections[at] = live;
-    else corrections.push(live);
-  }
-  return corrections;
+  // A correction belonging to ANOTHER review is declined, not merged: the hint is
+  // a URL parameter away from the browser, so it must not be a way to pull a
+  // foreign record into this review (FR-046).
+  return mergeRecheck(
+    corrections,
+    opts.recheck,
+    async (issueNumber) => {
+      const live = await getCorrection(gh, repo, issueNumber);
+      // `null`, never `'absent'`: a correction belonging to another review is not
+      // ours to remove, and corrections never leave this list (state: 'all').
+      return live.andonIssue === andonIssue ? { item: live } : null;
+    },
+    (c) => c.issueNumber,
+  );
 }
 
 /** Only the OPEN corrections for this break — one filtered call (label + state),

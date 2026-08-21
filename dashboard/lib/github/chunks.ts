@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { errorStatus } from './errors';
 import { parseIntentConfirmed, serializeIntentConfirmed } from './markers';
+import { mergeRecheck } from './read-after-write';
 
 /**
  * Chunks module (T082, FR-016–FR-018): the just-in-time elaboration backlog.
@@ -96,24 +97,77 @@ function toChunk(issue: IssueLike): Chunk | null {
   };
 }
 
-export async function listChunks(gh: Octokit, repo: RepoRef): Promise<Chunk[]> {
+/**
+ * The backlog.
+ *
+ * `recheck` names chunks the caller KNOWS the current state of because it just
+ * wrote them, and whose state therefore comes from the single-issue GET instead
+ * of the LIST. GitHub's LIST endpoints are not read-after-write consistent
+ * (PB-003 finding B — the same lag `listCorrections` already guards), so the
+ * render immediately after `createChunk` can miss the chunk it just created and
+ * draw the page exactly as it looked before the click. The operator adds a
+ * title-only chunk, the issue is created correctly, and nothing appears until
+ * they refresh the browser — a write that succeeds but renders as a no-op is
+ * indistinguishable from a broken button.
+ *
+ * Unknown, foreign, or non-chunk numbers are ignored rather than trusted: the
+ * hint reaches this seam from a URL parameter, so it must not be a way to pull
+ * an arbitrary issue into the backlog (FR-046) or to crash the page.
+ */
+export async function listChunks(gh: Octokit, repo: RepoRef, opts: { recheck?: number[] } = {}): Promise<Chunk[]> {
   // Two exact-label queries instead of one unfiltered scan: chunk:* labels are
   // mutually exclusive (FR-025), so the union is complete and disjoint.
   const [titleOnly, ready] = await Promise.all([
     gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'chunk:title-only', state: 'open', per_page: 100 }),
     gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'chunk:ready', state: 'open', per_page: 100 }),
   ]);
-  return [...titleOnly, ...ready]
+  const chunks = [...titleOnly, ...ready]
     .filter((issue) => !issue.pull_request)
     .map((issue) => toChunk(issue))
-    .filter((c): c is Chunk => c !== null)
-    .sort((a, b) => a.issueNumber - b.issueNumber);
+    .filter((c): c is Chunk => c !== null);
+
+  // The backlog is OPEN issues by contract (both queries filter `state: 'open'`,
+  // and work-items.tsx depends on that being what `listChunks` means), so a closed
+  // chunk is declined here rather than merged. `?just=` survives in the browser
+  // URL, so without this a chunk closed after the redirect would keep its card on
+  // the page indefinitely, re-read by number and re-appended on every later render
+  // (PR #118 bot review). Absent is what the unhinted list already says.
+  const merged = await mergeRecheck(
+    chunks,
+    opts.recheck,
+    async (issueNumber) => {
+      const { chunk, closed } = await readChunkIssue(gh, repo, issueNumber);
+      if (chunk === null) return null; // a PR, or no chunk:* label — not ours to judge
+      // `'absent'`, not `null`: this read is authoritative, so a closed chunk is
+      // REMOVED from a lagging list rather than merely not appended to it (#122).
+      return closed ? 'absent' : { item: chunk };
+    },
+    (c) => c.issueNumber,
+  );
+  return merged.sort((a, b) => a.issueNumber - b.issueNumber);
 }
 
-export async function getChunk(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<Chunk | null> {
+/**
+ * One issue read, reporting BOTH the chunk and whether the issue is closed.
+ *
+ * The two callers want different things and both are right: `getChunk` must keep
+ * ignoring issue state, because B3 and the Andon work-items panel deliberately
+ * resolve a closed-but-ready chunk (work-items.tsx's `resolveAsGateWould`), while
+ * the backlog is open-only and must not readmit a closed one through `recheck`.
+ */
+async function readChunkIssue(
+  gh: Octokit,
+  repo: RepoRef,
+  issueNumber: number,
+): Promise<{ chunk: Chunk | null; closed: boolean }> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
-  if (issue.pull_request) return null;
-  return toChunk(issue);
+  if (issue.pull_request) return { chunk: null, closed: false };
+  return { chunk: toChunk(issue), closed: issue.state === 'closed' };
+}
+
+/** The chunk as the BUILD GATE resolves it — by label alone, open or closed. */
+export async function getChunk(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<Chunk | null> {
+  return (await readChunkIssue(gh, repo, issueNumber)).chunk;
 }
 
 /** A one-line title is a complete, valid backlog item (FR-016). */

@@ -1,8 +1,8 @@
 # confirm-record — validates committed high-stakes confirmations and lights the
 # board (deterministic, no LLM — plain Actions YAML by design, substrate split:
 # an authority's answer is recorded by a human and merely CHECKED here).
-# Runs when a confirmation record lands OR when the official plan set changes — the
-# two inputs it reconciles (GHI #112).
+# Runs when a confirmation record lands OR when a freeze changes the official plan
+# set — the two inputs it reconciles (GHI #112).
 # Every confirmations/<workload>/<step-id>.json is validated against schemas/confirmation.ts
 # (the same parse build-preflight's B5 makes), and each valid record applies
 # `confirmed:<authority>` to the tracking issue of the step it names
@@ -24,19 +24,19 @@ on:
     branches: [main]
     paths:
       - 'confirmations/**.json'
-      # The OFFICIAL PLAN SET is the other input this sweep reconciles against, and
-      # until now nothing re-ran it when that set changed (GHI #112). An approval
-      # merge touches this path and only this path, so a freeze that moved a step's
-      # tracking_issue used to leave `confirmed:<authority>` on the OLD work item —
-      # correctly identified as stale by clearOrphanedLabels, which simply never ran.
-      # Note the window opens at the FREEZE, not at the edit: while the plan is under
-      # review the official version still names the old item, so the label is right
-      # until the moment it is not.
-      #
-      # Firing on a non-approval commit to a plan document is harmless: the run
-      # rescans the whole tree by design and a reconciliation with nothing to fix is
-      # a no-op.
-      - 'plans/**/plan.json'
+  # AFTER THE FREEZE, not on the merge that precedes it (PR #113 review). The other
+  # input this sweep reconciles against is the OFFICIAL PLAN SET, and `resolveCurrent`
+  # derives that from the newest frozen TAG. An approval merge and the freeze are two
+  # different events: triggering on the merge's push to plans/**/plan.json raced
+  # plan-post-merge and could resolve the OLD tag, reconcile against a superseded
+  # plan, and leave exactly the stale labels this was added to clear — with no later
+  # sweep, since tag creation matches no path filter.
+  #
+  # workflow_run on the freeze's completion is the same linkage vt-report uses, needs
+  # no extra scope, and fires only once the tag exists (GHI #112).
+  workflow_run:
+    workflows: ["plan-post-merge"]
+    types: [completed]
   # Re-runnable by hand: the validator scans the whole directory rather than a
   # push diff, so a dispatch reconciles every record — after a label was removed,
   # or once a plan freezes and its steps become labelable.

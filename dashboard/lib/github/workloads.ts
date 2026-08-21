@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { errorMessage, errorStatus } from './errors';
+import { mergeRecheck } from './read-after-write';
 import {
   parseWorkloadHeader,
   serializeWorkloadHeader,
@@ -28,12 +29,27 @@ export interface Workload {
 
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/;
 
-export async function listWorkloads(gh: Octokit, repo: RepoRef): Promise<Workload[]> {
+/**
+ * Every workload.
+ *
+ * `recheck` names the issues a caller just wrote, re-read through the
+ * read-after-write-consistent single-issue GET and merged over the list — the
+ * contract's list-lag rule (`contracts/dashboard-github-api.md`). The portfolio
+ * and the archive view both render from here immediately after their own writes:
+ * without the hint a just-introduced workload is missing from the page that was
+ * supposed to show it, and a just-activated one still reads `proposed`. Both are
+ * the shape of failure the operator reads as "the button did nothing".
+ */
+export async function listWorkloads(
+  gh: Octokit,
+  repo: RepoRef,
+  opts: { recheck?: number[] } = {},
+): Promise<Workload[]> {
   // Paginated: workload issues are never deleted (FR-042), so this list only
   // grows — a single page would silently drop older workloads (slug uniqueness,
   // lifecycle gate L0, portfolio) once the repo passes 100 issues+PRs.
   const data = await gh.paginate(gh.issues.listForRepo, { ...repo, state: 'all', per_page: 100 });
-  return data
+  const listed = data
     .filter((issue) => !issue.pull_request) // the issues API returns PRs too — never workloads
     .map((issue) => {
       const header = parseWorkloadHeader(issue.body ?? '');
@@ -47,6 +63,19 @@ export async function listWorkloads(gh: Octokit, repo: RepoRef): Promise<Workloa
       };
     })
     .filter((w): w is Workload => w !== null);
+  // `getWorkloadByIssue` already declines a PR number and an issue with no
+  // workload header, which is what makes an untrusted URL hint safe here.
+  // Never `'absent'`: this list is `state: 'all'` and workloads are never deleted
+  // (FR-042), so nothing ever leaves it — only a non-workload number is declined.
+  return mergeRecheck(
+    listed,
+    opts.recheck,
+    async (n) => {
+      const workload = await getWorkloadByIssue(gh, repo, n);
+      return workload ? { item: workload } : null;
+    },
+    (w) => w.issueNumber,
+  );
 }
 
 export async function getWorkload(gh: Octokit, repo: RepoRef, slug: string): Promise<Workload | null> {

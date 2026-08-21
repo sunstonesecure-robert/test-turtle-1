@@ -1,5 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
+import { mergeRecheck } from './read-after-write';
 import { errorStatus } from './errors';
 import { CONTRADICTION_LABEL } from './labels';
 import { parseWorkloadEvent } from './markers';
@@ -199,24 +200,71 @@ export async function recordEvidenceBatch(
   return { issueNumber: issue.number, path };
 }
 
+export interface EvidenceBatchRef {
+  issueNumber: number;
+  date: string;
+  path: string;
+}
+
+/** One batch by issue number, through the read-after-write-consistent GET.
+ *  `null` for a PR number, an issue that is not a batch, or a title the batch
+ *  grammar does not match — which is what makes an untrusted URL hint safe. */
+async function getEvidenceBatchRef(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<EvidenceBatchRef | null> {
+  const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+  if (issue.pull_request) return null;
+  // The SAME membership the list query enforces (`labels: 'evidence:batch'`), or
+  // the direct read is the weaker of the two and the hint becomes a way in. The
+  // hint is untrusted URL input: without this, any issue merely TITLED
+  // `Evidence YYYY-MM-DD` is accepted, and since `path` is derived from the date,
+  // a crafted `?just=` could pin a foreign issue number onto a real batch's
+  // committed JSON — or add a second row for a date that already has one, on a
+  // record type whose date IS its identity (PR #123 bot review).
+  const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+  if (!labels.includes('evidence:batch')) return null;
+  const m = BATCH_TITLE_RE.exec(issue.title);
+  return m ? { issueNumber: issue.number, date: m[1]!, path: batchPath(m[1]!) } : null;
+}
+
+/**
+ * Every dated evidence batch.
+ *
+ * `recheck` names the issues a caller just wrote (the contract's list-lag rule in
+ * `contracts/dashboard-github-api.md`): the Evidence page renders from here
+ * immediately after recording a batch, and without the hint the batch the
+ * operator just recorded is absent from the list that was supposed to confirm it.
+ * A batch is append-only and its date is its identity, so a re-render that shows
+ * nothing invites a second attempt on the same date — which is refused, leaving
+ * the operator with a refusal about a record they cannot see.
+ */
 export async function listEvidenceBatches(
   gh: Octokit,
   repo: RepoRef,
-): Promise<{ issueNumber: number; date: string; path: string }[]> {
+  opts: { recheck?: number[] } = {},
+): Promise<EvidenceBatchRef[]> {
   const issues = await gh.paginate(gh.issues.listForRepo, {
     ...repo,
     labels: 'evidence:batch',
     state: 'all',
     per_page: 100,
   });
-  return issues
+  const listed = issues
     .filter((issue) => !issue.pull_request)
     .map((issue) => {
       const m = BATCH_TITLE_RE.exec(issue.title);
       return m ? { issueNumber: issue.number, date: m[1]!, path: batchPath(m[1]!) } : null;
     })
-    .filter((b): b is { issueNumber: number; date: string; path: string } => b !== null)
-    .sort((a, b) => a.date.localeCompare(b.date) || a.issueNumber - b.issueNumber);
+    .filter((b): b is EvidenceBatchRef => b !== null);
+  const merged = await mergeRecheck(
+    listed,
+    opts.recheck,
+    // Never `'absent'`: batches are append-only records read `state: 'all'`.
+    async (n) => {
+      const ref = await getEvidenceBatchRef(gh, repo, n);
+      return ref ? { item: ref } : null;
+    },
+    (b) => b.issueNumber,
+  );
+  return merged.sort((a, b) => a.date.localeCompare(b.date) || a.issueNumber - b.issueNumber);
 }
 
 export async function readEvidenceBatch(gh: Octokit, repo: RepoRef, date: string): Promise<EvidenceBatch> {

@@ -5,7 +5,9 @@
 # L0/L1, US10's L2/L3 (complete: active, and every MUST-mapped verification
 # target's latest vt-* check run on the frozen plan SHA concluded success),
 # US12's L4–L8, and US13's L9 (archive: completed/canceled only). A red gate
-# reports unmet items and performs nothing. Step 2 applies
+# reports unmet items and performs nothing — and step 3 is what "reports" means
+# on this path: it comments the unmet items on the workload issue, because a
+# refused dispatch otherwise told its caller nothing (GHI #127). Step 2 applies
 # the transition: flips the workload:* label, appends the workload-event:v1
 # comment, close+locks on archive — and for cancel also cancels the workload's
 # in-flight runs (REST cancel endpoint, SC-014) and closes its live Andon breaks
@@ -86,6 +88,26 @@ jobs:
           --actor "$WL_ACTOR"
           --reason "$WL_REASON"
           --revisit "$WL_REVISIT"
+          --gate-report "$RUNNER_TEMP/lifecycle-gate.json"
+          --repo ${{ github.repository }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The refusal half (GHI #127). A red gate exits 1, pipefail fails the gate
+      # step, and the apply step above — no `if:`, so `success()` — is skipped:
+      # without this step a refused dispatch wrote NOTHING to the workload issue
+      # and the caller got only a failed run. The report is already on disk (tee
+      # wrote it before pipefail failed the step), so nothing re-runs.
+      # `if: failure()` is broader than "the gate refused" — a crashed npm ci or
+      # a green-gate/failed-apply run reaches it too — so the script posts ONLY
+      # when the report parses AND carries blocking gates, and exits 0 either way
+      # so this reporter never replaces the gate's failure with its own.
+      - name: report the refusal on the workload issue (red gate only)
+        if: failure()
+        run: >-
+          npx tsx scripts/lifecycle-refuse.ts
+          --workload "$WL_WORKLOAD"
+          --action "$WL_ACTION"
+          --actor "$WL_ACTOR"
           --gate-report "$RUNNER_TEMP/lifecycle-gate.json"
           --repo ${{ github.repository }}
         env:

@@ -1,4 +1,5 @@
 import { appendFileSync } from 'node:fs';
+import type { DeclaredGate } from './catalogue';
 import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 
 /**
@@ -37,17 +38,17 @@ export interface GateResult {
 }
 
 /**
- * One gate as the CATALOGUE declares it — what SHOULD be reported, independent of
- * what the caller happens to hand the runner.
+ * One gate's IMPLEMENTATION, as a CLI wires it up. What SHOULD be reported is the
+ * declared catalogue (`catalogue.ts`), which lives apart from every call site —
+ * a spec carries no `requirement` precisely so the declaration is the only place
+ * that answers "what does this family promise?".
  *
- * `run` returns null when the gate does not apply to this invocation, which is how
- * a deliberate skip becomes `not-applicable` WITH ITS REASON rather than a silent
- * omission. A catalogue entry whose `run` is absent altogether is `absent`: the
- * gate is declared but the code that ran does not implement it.
+ * `skip` returns why the gate does not apply to THIS invocation, which is how a
+ * deliberate omission becomes `not-applicable` with its reason rather than a
+ * silent gap. A gate the catalogue declares with no spec wired to it is `absent`.
  */
 export interface GateSpec {
   id: string;
-  requirement: string;
   /** why this gate does not apply, when it does not; null/undefined means it does */
   skip?: () => string | null;
   run: GateCheck;
@@ -80,6 +81,60 @@ export interface GateReport {
    *  plan so the workload returns to review first (FR-040). */
   requires_review?: boolean;
   gates: GateResult[];
+}
+
+/* ------------------------------------------------------------------------- *
+ * THE REFUSAL TEXT — one formatter, because a refusal explained twice is a
+ * refusal explained differently (GHI #127).
+ *
+ * Four surfaces phrase a red report for a human: the dashboard's lifecycle
+ * throw, the dashboard's build/scope previews, and now the dispatch path's
+ * refusal comment. They must say the SAME thing about the same report — a gate
+ * and a screen disagreeing about why something was refused is the drift this
+ * repo forbids everywhere else, and the reason `gate-preview` reuses the real
+ * check functions rather than restating them.
+ *
+ * Extracting it found a live bug. Three of those call sites filtered
+ * `status === 'fail'` while `reportResult` fails a report on `fail` OR
+ * `absent` — so an ABSENT gate produced a failed report with an EMPTY
+ * explanation, and `actions.ts` threw `new Error('')`. The one surface that had
+ * it right (`gate-preview`'s build preview) is the one whose rule survives here.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The gates that BLOCK — stated as the exact complement of `reportResult`'s
+ * passing predicate rather than as its own list of statuses.
+ *
+ * That is deliberate and it is the fix. Enumerating `fail || absent` here would
+ * be a second copy of a rule that already lives in `reportResult`, and the two
+ * copies had already diverged once: a status the verdict blocks on but this
+ * filter omits is a refusal with nothing to say. As the complement, a fifth
+ * status added tomorrow is reported by whichever half of the pair blocks on it,
+ * and silence remains impossible.
+ */
+export function blockingGates(gates: GateResult[]): GateResult[] {
+  return gates.filter((g) => g.status !== 'pass' && g.status !== 'not-applicable');
+}
+
+/**
+ * One blocking gate as a reader meets it: the gate's OWN sentence, never a
+ * paraphrase. `absent` has no `detail` of its own when synthesized outside
+ * `runGateCatalogue`, so it gets the only wording that is true of it — the gate
+ * did not run, which is not the same as failing.
+ */
+export function phraseGate(gate: GateResult): string {
+  return `${gate.id}: ${gate.detail ?? (gate.status === 'absent' ? 'not implemented by the gate code that ran' : 'failed')}`;
+}
+
+/**
+ * Every blocking gate in one sentence — the shared refusal text.
+ *
+ * Invariant, and worth stating because it is what the callers rely on: this is
+ * non-empty for exactly the reports `reportResult` calls `fail`. A refused
+ * transition can therefore never reach an operator as a blank message.
+ */
+export function refusalDetail(gates: GateResult[], separator = ' · '): string {
+  return blockingGates(gates).map(phraseGate).join(separator);
 }
 
 export class ApiUnavailableError extends Error {
@@ -117,22 +172,58 @@ export function reportResult(gates: GateResult[]): 'pass' | 'fail' {
 }
 
 /**
- * Run a DECLARED gate catalogue and reconcile the outcome against it (GHI #108).
+ * Run a gate family and RECONCILE the outcome against its declared catalogue
+ * (GHI #108; corrected in the PR #113 review).
  *
  * The difference from `runGates` is the whole point: that one reports whatever the
- * caller handed it, so a caller that forgot a gate — or a copy of the code in which
- * the gate does not exist — produced a shorter report and nothing said so. This one
- * is handed the catalogue for the gate family and reports EVERY entry, so the
+ * caller handed it, so a caller that forgot a gate produced a shorter report and
+ * nothing said so. This one iterates the DECLARATION — which lives in
+ * `catalogue.ts`, apart from every call site — and reports every entry, so the
  * report's shape is a property of the contract rather than of the call site.
  *
+ * The first attempt took one array as both the declaration and the
+ * implementations, which reconciled nothing: dropping a gate shortened the loop and
+ * still passed, and `absent` was unreachable outside a test that synthesized it by
+ * hand. Iterating `declared` is what makes the status real.
+ *
  * Order is catalogue order, which is the order the contract documents.
+ *
+ * A spec for a gate the catalogue does NOT declare throws rather than being
+ * reported: it can only arise from a code edit, it means the two halves have
+ * genuinely diverged, and silently accepting it would be the same class of miss
+ * this function exists to end.
  */
-export async function runGateCatalogue(subject: string, specs: GateSpec[]): Promise<GateReport> {
+export async function runGateCatalogue(
+  subject: string,
+  declared: readonly DeclaredGate[],
+  specs: GateSpec[],
+): Promise<GateReport> {
+  const byId = new Map(specs.map((spec) => [spec.id, spec]));
+  const undeclared = specs.filter((spec) => !declared.some((d) => d.id === spec.id)).map((s) => s.id);
+  if (undeclared.length > 0) {
+    throw new Error(
+      `gate(s) ${undeclared.join(', ')} are implemented but not declared in the catalogue — ` +
+        `the contract and the code have diverged, and a report cannot be reconciled against a set that omits them`,
+    );
+  }
+
   const gates: GateResult[] = [];
-  for (const spec of specs) {
+  for (const { id, requirement } of declared) {
+    const spec = byId.get(id);
+    if (!spec) {
+      // Declared and not wired. The build cannot be said to have been gated, so
+      // this fails the report — the one status that had no production path before.
+      gates.push({
+        id,
+        status: 'absent',
+        requirement,
+        detail: `declared by the contract and not implemented by the gate code that ran — ${requirement} went unchecked`,
+      });
+      continue;
+    }
     const skipped = spec.skip?.() ?? null;
     if (skipped !== null) {
-      gates.push({ id: spec.id, status: 'not-applicable', requirement: spec.requirement, detail: skipped });
+      gates.push({ id, status: 'not-applicable', requirement, detail: skipped });
       continue;
     }
     gates.push(await spec.run());

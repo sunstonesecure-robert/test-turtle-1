@@ -9,6 +9,7 @@ import { parseAndonHeader, parseCorrectionMarker } from './markers';
 // header and the build gate must all resolve a ref to the SAME workload (FR-044/FR-046).
 import { resolveCurrent, slugFromPlanRef, tryReadPlanAtRef } from './plans';
 import { listWorkloads, type Workload } from './workloads';
+import { mergeRecheck } from './read-after-write';
 import { listXLinks } from './xlinks';
 import { buildRunMonitorSnapshot, type RunMonitorRow } from '../../app/runs/snapshot';
 // The gate functions' own verdict on whether a workload's official plan could pass
@@ -49,6 +50,10 @@ import { scanBuildability } from '../../../scripts/gates/lib/buildability';
 
 export interface PortfolioRow {
   slug: string;
+  /** the workload issue's number — posted back by the lifecycle forms so the gate
+   *  can resolve through the read-after-write-consistent single-issue GET rather
+   *  than the lagging list (PR #123 bot review) */
+  issueNumber: number;
   title: string;
   /** null = the issue does not carry exactly one workload:* label (SC-011 violation) */
   state: WorkloadState | null;
@@ -99,7 +104,7 @@ export interface PortfolioInput {
    * nothing anywhere reported: the operator found out by dispatching a build and
    * reading a failed Actions run, while this very view called the workload healthy.
    */
-  unbuildable: { slug: string; reasons: string[] }[];
+  unbuildable: { slug: string; reasons: string[]; andonIssue: number | null }[];
 }
 
 /** One slug's issue-shaped signals, deduped by issue number and issue-ordered. Deduping
@@ -161,6 +166,7 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
     .filter((w) => w.state !== 'archived')
     .map((w) => {
       const reasons: string[] = [];
+      const issueNumber = w.issueNumber;
 
       if (w.state === null) {
         reasons.push(
@@ -188,7 +194,8 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
       }
       // Before the run signals: a plan that cannot be built at all is upstream of
       // every run reason below it — there will never BE a run to stall.
-      for (const reason of input.unbuildable.filter((u) => u.slug === w.slug).flatMap((u) => u.reasons)) {
+      const unbuildable = input.unbuildable.filter((u) => u.slug === w.slug);
+      for (const reason of unbuildable.flatMap((u) => u.reasons)) {
         reasons.push(reason);
       }
       let runNeedsOperator = false;
@@ -200,15 +207,27 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
         }
       }
 
-      // The review beats the run monitor: /andon/<n> is where a judgment is MADE,
-      // /runs is only where a run is watched. A row with neither has no single
-      // destination — the view falls back to the workload's own card rather than
-      // inventing one (a link that lands nowhere useful is worse than no link).
+      // WHERE the operator acts, most specific first. A live break is where a
+      // judgment is MADE; an unbuildable plan is repaired by re-opening it, which
+      // is offered on the review that approved it; a run is only somewhere to
+      // watch. A row with none of those has no single destination and says null —
+      // the view must then not invent one, which is the defect this ordering was
+      // extended to fix: the buildability reason (GHI #109) arrived with no
+      // destination, and the card rendered a button to the Inbox, where nothing
+      // was waiting (live finding, 2026-08-18 — demo2).
+      const unbuildableReview = unbuildable.find((u) => u.andonIssue !== null)?.andonIssue ?? null;
       const actionHref =
-        liveBreaks.length > 0 ? `/andon/${liveBreaks[0]!.issueNumber}` : runNeedsOperator ? '/runs' : null;
+        liveBreaks.length > 0
+          ? `/andon/${liveBreaks[0]!.issueNumber}`
+          : unbuildableReview !== null
+            ? `/andon/${unbuildableReview}`
+            : runNeedsOperator
+              ? '/runs'
+              : null;
 
       return {
         slug: w.slug,
+        issueNumber,
         title: w.title,
         state: w.state,
         actionRequired: reasons.length > 0,
@@ -231,10 +250,31 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
 /** Every issue carrying conflict:open. `state:'all'` and the PR filter for the same two
  *  reasons propagateConflictFlags uses them: a step issue can be CLOSED while still
  *  flagged (records are never deleted, FR-042), and the issues endpoint answers with PRs
- *  too. Ascending and deduped so the rollup's reason order is deterministic. */
-async function listConflictFlagged(gh: Octokit, repo: RepoRef): Promise<number[]> {
+ *  too. Ascending and deduped so the rollup's reason order is deterministic.
+ *
+ *  `recheck` matters MORE here than on any other list, and in the opposite direction
+ *  (GHI #122). This is a membership set, and `propagateConflictFlags` both adds the
+ *  label and removes it — so a lagging list makes the portfolio OVER-report: it keeps
+ *  asserting a cross-workload conflict the operator just resolved, Action Required chip
+ *  and all, and the natural response is to resolve an already-resolved record. Every
+ *  other instance of the list-lag bug under-reports. Removal is why `mergeRecheck`
+ *  needed an `'absent'` verdict at all. */
+async function listConflictFlagged(gh: Octokit, repo: RepoRef, recheck?: number[]): Promise<number[]> {
   const issues = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: CONFLICT_LABEL, state: 'all', per_page: 100 });
-  return [...new Set(issues.filter((issue) => !issue.pull_request).map((issue) => issue.number))].sort((a, b) => a - b);
+  const listed = [...new Set(issues.filter((issue) => !issue.pull_request).map((issue) => issue.number))];
+  const merged = await mergeRecheck(
+    listed,
+    recheck,
+    async (issueNumber) => {
+      const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+      // A PR number is not a flaggable record — declined, never removed.
+      if (issue.pull_request) return null;
+      const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+      return labels.includes(CONFLICT_LABEL) ? { item: issueNumber } : 'absent';
+    },
+    (issueNumber) => issueNumber,
+  );
+  return merged.sort((a, b) => a - b);
 }
 
 /** The tracking issues of a workload's OFFICIAL (frozen) plan steps — the same
@@ -358,11 +398,15 @@ async function attributeCorrections(
  * portfolio's "open Andon break" set is the monitor's live-break index, at no extra read
  * and with no second query to drift from it.
  */
-export async function loadPortfolio(gh: Octokit, repo: RepoRef): Promise<PortfolioRow[]> {
+export async function loadPortfolio(
+  gh: Octokit,
+  repo: RepoRef,
+  opts: { recheck?: number[] } = {},
+): Promise<PortfolioRow[]> {
   const [workloads, snapshot, flagged] = await Promise.all([
-    listWorkloads(gh, repo),
+    listWorkloads(gh, repo, { ...(opts.recheck ? { recheck: opts.recheck } : {}) }),
     buildRunMonitorSnapshot(gh, repo),
-    listConflictFlagged(gh, repo),
+    listConflictFlagged(gh, repo, opts.recheck),
   ]);
 
   const runs: PortfolioInput['runs'] = [];
@@ -401,6 +445,8 @@ export async function loadPortfolio(gh: Octokit, repo: RepoRef): Promise<Portfol
     corrections,
     conflicts,
     runs,
-    unbuildable: buildability.filter((v) => !v.buildable).map(({ slug, reasons }) => ({ slug, reasons })),
+    unbuildable: buildability
+      .filter((v) => !v.buildable)
+      .map(({ slug, reasons, andonIssue }) => ({ slug, reasons, andonIssue })),
   });
 }

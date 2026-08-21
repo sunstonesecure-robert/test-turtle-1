@@ -2,11 +2,16 @@ import { readFile } from 'node:fs/promises';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { cliMain, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
+import { PLAN_CATALOGUE } from './lib/catalogue';
 import { checkG1Schema, checkG7NoOpenCorrections, checkG8AllJudged, checkG9VersionMonotonic, checkG10Acyclic, checkG11QuestionsAnswered } from './lib/checks-core';
 import { checkG2ExactlyOnePriority, checkG3MustCoverage, checkG4SinglePassFail } from './lib/checks-scope';
 import { checkG5EvidenceTags } from './lib/checks-evidence';
 import { checkG6HighStakesAuthority } from './lib/checks-highstakes';
-import { checkG13WorkItemUniqueInPlan, checkG14WorkItemUnclaimedElsewhere } from './lib/checks-binding';
+import {
+  checkG13WorkItemUniqueInPlan,
+  checkG14WorkItemUnclaimedElsewhere,
+  checkG15NoUnaddressedContradiction,
+} from './lib/checks-binding';
 
 /**
  * plan-gate (T035 + T057 + T093 + T107) — required status check on every approval PR.
@@ -15,7 +20,8 @@ import { checkG13WorkItemUniqueInPlan, checkG14WorkItemUnclaimedElsewhere } from
  * its confirming authority, G7 no open corrections, G8 all boundary cases judged,
  * G9 version monotonic + tag absent, G10 acyclic deps, G11 every question answered,
  * G13 no two steps of this plan claim one work item, G14 no step claims a work item
- * another workload's official plan already claims (GHI #102).
+ * another workload's official plan already claims (GHI #102), G15 no work item this
+ * plan delivers carries contradicting evidence raised after the plan was written.
  *
  * G12 is NOT in the set and its number is not reused: the intent-drift gate is
  * deferred to GHI #28 with its detection mechanism unsettled, and two gates sharing
@@ -43,22 +49,23 @@ export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, pla
   const unparsed = (): string | null =>
     plan ? null : 'the plan does not parse as a plan document (G1), so there is nothing for this check to read';
 
-  const report = await runGateCatalogue(planLabel, [
-    { id: 'G1', requirement: 'integrity', run: () => g1.result },
-    { id: 'G2', requirement: 'FR-009', run: () => checkG2ExactlyOnePriority(rawPlan) },
-    { id: 'G3', requirement: 'FR-012', skip: unparsed, run: () => checkG3MustCoverage(plan!) },
-    { id: 'G4', requirement: 'FR-011', skip: unparsed, run: () => checkG4SinglePassFail(plan!) },
-    { id: 'G5', requirement: 'FR-019', run: () => checkG5EvidenceTags(rawPlan) },
-    { id: 'G6', requirement: 'FR-023', run: () => checkG6HighStakesAuthority(rawPlan) },
-    { id: 'G7', requirement: 'FR-005', skip: unparsed, run: () => checkG7NoOpenCorrections(gh, repo, plan!.andon_issue) },
-    { id: 'G8', requirement: 'FR-002', skip: unparsed, run: () => checkG8AllJudged(gh, repo, plan!) },
-    { id: 'G9', requirement: 'FR-027', skip: unparsed, run: () => checkG9VersionMonotonic(gh, repo, plan!) },
-    { id: 'G10', requirement: 'data integrity', skip: unparsed, run: () => checkG10Acyclic(plan!) },
-    { id: 'G11', requirement: 'FR-056', skip: unparsed, run: () => checkG11QuestionsAnswered(gh, repo, plan!) },
+  const report = await runGateCatalogue(planLabel, PLAN_CATALOGUE, [
+    { id: 'G1', run: () => g1.result },
+    { id: 'G2', run: () => checkG2ExactlyOnePriority(rawPlan) },
+    { id: 'G3', skip: unparsed, run: () => checkG3MustCoverage(plan!) },
+    { id: 'G4', skip: unparsed, run: () => checkG4SinglePassFail(plan!) },
+    { id: 'G5', run: () => checkG5EvidenceTags(rawPlan) },
+    { id: 'G6', run: () => checkG6HighStakesAuthority(rawPlan) },
+    { id: 'G7', skip: unparsed, run: () => checkG7NoOpenCorrections(gh, repo, plan!.andon_issue) },
+    { id: 'G8', skip: unparsed, run: () => checkG8AllJudged(gh, repo, plan!) },
+    { id: 'G9', skip: unparsed, run: () => checkG9VersionMonotonic(gh, repo, plan!) },
+    { id: 'G10', skip: unparsed, run: () => checkG10Acyclic(plan!) },
+    { id: 'G11', skip: unparsed, run: () => checkG11QuestionsAnswered(gh, repo, plan!) },
     // G12 is deferred (GHI #28) — the number is skipped, never reused, so one id
     // never means two different gates across the history.
-    { id: 'G13', requirement: 'FR-017', skip: unparsed, run: () => checkG13WorkItemUniqueInPlan(plan!) },
-    { id: 'G14', requirement: 'FR-046', skip: unparsed, run: () => checkG14WorkItemUnclaimedElsewhere(gh, repo, plan!) },
+    { id: 'G13', skip: unparsed, run: () => checkG13WorkItemUniqueInPlan(plan!) },
+    { id: 'G14', skip: unparsed, run: () => checkG14WorkItemUnclaimedElsewhere(gh, repo, plan!) },
+    { id: 'G15', skip: unparsed, run: () => checkG15NoUnaddressedContradiction(gh, repo, plan!) },
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };
 }

@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
-import { resolveCurrent, tryReadPlanAtRef } from '../../../dashboard/lib/github/plans';
+import { planBranch, resolveCurrent, tryReadPlanAtRef, unaddressedContradictions, workItemsOf } from '../../../dashboard/lib/github/plans';
 import { listWorkloads } from '../../../dashboard/lib/github/workloads';
 import type { PlanDoc } from '../../../schemas/plan';
 import type { GateResult } from './runner';
@@ -143,4 +143,65 @@ export async function checkG14WorkItemUnclaimedElsewhere(
         requirement: 'FR-046',
         detail: `${conflicts.join('; ')} — two workloads cannot deliver one work item: contradicting evidence in one would block builds in the other, and each would gate the item on its own approval. Give this step its own work item, or take the item off the other plan first`,
       };
+}
+
+/**
+ * G15 — no work item this plan delivers carries a contradiction the plan cannot
+ * have answered (GHI #75 follow-on; operator decision 2026-08-18).
+ *
+ * THE HOLE THIS CLOSES. When contradicting evidence arrives while a version is
+ * already under review, `markContradicted` reuses that review rather than cutting a
+ * newer version. So the plan in front of the operator was written before the
+ * contradiction and demonstrably does not address it — yet nothing stopped them
+ * approving it, and nothing on screen even said the contradiction existed. They
+ * would find out when a build was refused, long afterwards.
+ *
+ * WHERE THE BLOCK LANDS, and why here. Three places could stop this and they trade
+ * differently. Doing nothing leaves the work permanently unbuildable with no exit.
+ * Blocking only the BUILD (the freeze's clearing rule) is safe but tells the
+ * operator late, after they have approved something that reads as an endorsement.
+ * Restarting the review the moment new evidence lands is the strongest, and it
+ * throws away every judgment already made, costs an agent run per restart, and on a
+ * long review can restart indefinitely. Blocking the APPROVAL keeps every judgment,
+ * costs no runs, and moves the news to the moment it can still be acted on — the
+ * operator chooses when to re-open rather than having it forced (operator decision;
+ * research.md carries the full comparison).
+ *
+ * SHARES ITS RULE WITH THE FREEZE. `unaddressedContradictions` is the same function
+ * the post-merge freeze uses to decide which flags an approval may clear. A second
+ * implementation would let the gate refuse an approval for a contradiction the
+ * freeze then cleared, or accept one it then kept — a disagreement invisible from
+ * either side.
+ *
+ * A plan whose steps name no work item passes without an API call: there is nothing
+ * to be contradicted.
+ */
+export async function checkG15NoUnaddressedContradiction(
+  gh: Octokit,
+  repo: RepoRef,
+  plan: PlanDoc,
+): Promise<GateResult> {
+  const items = workItemsOf(plan);
+  if (items.length === 0) return { id: 'G15', status: 'pass', requirement: 'FR-022' };
+
+  // The ref is derived from the document, exactly as the version check derives it:
+  // the gate runs against a local file on the approval PR and has no ref of its own.
+  const ref = planBranch(plan.feature, plan.version);
+  const unaddressed = await unaddressedContradictions(gh, repo, { slug: plan.feature, ref, items });
+  if (unaddressed.length === 0) return { id: 'G15', status: 'pass', requirement: 'FR-022' };
+
+  // Named by ITEM and by the step that delivers it: the operator's next move is to
+  // re-open and have the agent address it, and they need to know which part of the
+  // plan that is — an issue number alone would send them to the tracker to work it out.
+  const byItem = new Map(plan.steps.filter((s) => typeof s.tracking_issue === 'number').map((s) => [s.tracking_issue!, s.id]));
+  const named = unaddressed.map((n) => `#${n} (${byItem.get(n) ?? 'unknown step'})`).join(', ');
+  return {
+    id: 'G15',
+    status: 'fail',
+    requirement: 'FR-022',
+    detail:
+      `contradicting evidence arrived after this version was written, against work item(s) ${named} — ` +
+      `this plan cannot have taken it into account, so approving it would record a judgment nobody made. ` +
+      `Re-open the plan so the agent can address the new evidence, then approve that version`,
+  };
 }

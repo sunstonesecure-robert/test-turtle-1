@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
-import { getWorkload, type Workload } from '../../dashboard/lib/github/workloads';
+import { getWorkload, getWorkloadByIssue, type Workload } from '../../dashboard/lib/github/workloads';
 import { scanDeferralContradictions } from '../../dashboard/lib/github/evidence';
 import { WORKLOAD_TRANSITIONS } from '../../dashboard/lib/github/labels';
 import { findLiveAndonsBySlug } from '../../dashboard/lib/github/andon';
@@ -8,6 +8,7 @@ import { resolveCurrent, tagTargetSha, tryReadPlanAtRef } from '../../dashboard/
 import { deriveCompletionStatus, listVtCheckRuns } from '../../dashboard/lib/github/checks';
 import { commitmentScope } from './lib/checks-scope';
 import { cliMain, runGateCatalogue, UsageError, type GateReport, type GateResult } from './lib/runner';
+import { LIFECYCLE_CATALOGUE } from './lib/catalogue';
 
 /**
  * lifecycle-gate (T137/T155/T167/T174) — precondition check for every workload
@@ -117,12 +118,26 @@ function precondition(id: string, requirement: string, unmet: string | null): Ga
 export async function lifecycleGate(
   gh: Octokit,
   repo: RepoRef,
-  input: { slug: string; action: string; reason?: string; revisit?: string },
+  input: { slug: string; action: string; reason?: string; revisit?: string; issueNumber?: number },
 ): Promise<GateReport> {
   if (!KNOWN_ACTIONS.includes(input.action)) {
     throw new UsageError(`unknown lifecycle action: ${input.action} (no delete exists — FR-042)`);
   }
-  const workload = await getWorkload(gh, repo, input.slug);
+  // Resolve by ISSUE NUMBER when the caller has one, because `getWorkload` reads
+  // the LIST endpoint and that is not read-after-write consistent. The dashboard
+  // now renders a just-introduced workload from the `?just=` hint, so the operator
+  // can see the card and click Activate while the list still has not caught up —
+  // and L0 would fail "no workload issue for slug X" about a card in front of them
+  // (PR #123 bot review). A gate refusing what the page offers is the
+  // preview-versus-enforcement drift this repo forbids everywhere else.
+  //
+  // The number arrives from a form, so it is checked, not trusted: a resolved
+  // workload whose slug disagrees is treated as absent, exactly as
+  // `applyLifecycleTransition` already does. That keeps a hand-crafted POST from
+  // running a transition against a workload it did not name.
+  const byIssue = input.issueNumber !== undefined ? await getWorkloadByIssue(gh, repo, input.issueNumber) : null;
+  const workload =
+    byIssue !== null && byIssue.slug === input.slug ? byIssue : await getWorkload(gh, repo, input.slug);
 
   const l0: GateResult = workload && workload.state !== null
     ? { id: 'L0', status: 'pass', requirement: 'FR-032' }
@@ -157,19 +172,17 @@ export async function lifecycleGate(
 
   let requiresReview: boolean | undefined;
 
-  const report = await runGateCatalogue(`${input.slug}:${input.action}`, [
+  const report = await runGateCatalogue(`${input.slug}:${input.action}`, LIFECYCLE_CATALOGUE, [
     // L0 is the only gate on every transition: a workload whose state cannot be
     // read has no legal transition at all.
-    { id: 'L0', requirement: 'FR-032', run: () => l0 },
+    { id: 'L0', run: () => l0 },
     {
       id: 'L1',
-      requirement: 'FR-033',
       skip: forAction('activate'),
       run: () => precondition('L1', 'FR-033', statePrecondition(workload, 'activate')),
     },
     {
       id: 'L2',
-      requirement: 'FR-032',
       skip: forAction('complete'),
       run: () => precondition('L2', 'FR-032', statePrecondition(workload, 'complete')),
     },
@@ -181,13 +194,11 @@ export async function lifecycleGate(
       // state and the outstanding targets, rather than making the operator fix
       // one to discover the other.
       id: 'L3',
-      requirement: 'FR-034',
       skip: forAction('complete'),
       run: () => checkL3Completion(gh, repo, input.slug),
     },
     {
       id: 'L4',
-      requirement: 'FR-038',
       skip: forAction('cancel'),
       run: () => {
         // One contract row, two conditions: legal from-state (proposed/active/
@@ -201,20 +212,17 @@ export async function lifecycleGate(
     },
     {
       id: 'L5',
-      requirement: 'FR-032',
       skip: forAction('defer'),
       run: () => precondition('L5', 'FR-032', statePrecondition(workload, 'defer')),
     },
     {
       id: 'L6',
-      requirement: 'FR-039',
       skip: forAction('defer'),
       run: () =>
         precondition('L6', 'FR-039', input.revisit?.trim() ? null : 'a revisit condition or date must be supplied'),
     },
     {
       id: 'L7',
-      requirement: 'FR-040',
       skip: forAction('reactivate'),
       run: () => precondition('L7', 'FR-040', reactivateUnmet),
     },
@@ -224,7 +232,6 @@ export async function lifecycleGate(
       // nothing. That is a second, narrower reason for not applying, and it says so
       // rather than sharing L7's wording.
       id: 'L8',
-      requirement: 'FR-040',
       skip: () =>
         input.action !== 'reactivate'
           ? `this gate applies to reactivate, and this transition is ${input.action}`
@@ -250,7 +257,6 @@ export async function lifecycleGate(
       // text follows the matrix automatically. Archiving is close + lock, never
       // deletion (FR-042): the record stays searchable afterwards (FR-043).
       id: 'L9',
-      requirement: 'FR-041',
       skip: forAction('archive'),
       run: () => precondition('L9', 'FR-041', statePrecondition(workload, 'archive')),
     },
@@ -259,7 +265,6 @@ export async function lifecycleGate(
       // in flight beside it. All three ship in one report so a refusal names every
       // reason at once.
       id: 'L10',
-      requirement: 'FR-036',
       skip: forAction('complete'),
       run: () => checkL10NoLiveReview(gh, repo, input.slug),
     },

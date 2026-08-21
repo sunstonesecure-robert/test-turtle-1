@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { errorStatus } from '../../../dashboard/lib/github/errors';
-import { resolveCurrent } from '../../../dashboard/lib/github/plans';
+import { resolveCurrent, tryReadPlanAtRef } from '../../../dashboard/lib/github/plans';
 import { checkB1FrozenCurrent, checkB2PlanRevalidates } from './checks-preflight';
 import type { GateResult } from './runner';
 
@@ -68,6 +68,16 @@ export interface BuildabilityVerdict {
   buildable: boolean;
   /** operator-facing, one per cause, each actionable on its own; empty when buildable */
   reasons: string[];
+  /**
+   * The review that approved this version — WHERE the recovery happens.
+   *
+   * A verdict without a destination is only half a report: the operator is told
+   * their approved plan cannot be built and left to find the place to fix it. The
+   * exit is a re-open, and a re-open is offered on the review that approved the
+   * current version, so that review is the answer to "where do I go?" (the
+   * runbook's step 1). Null when the plan could not be read to find it.
+   */
+  andonIssue: number | null;
   /** the structural gate results behind the verdict, in preflight order */
   gates: GateResult[];
 }
@@ -118,7 +128,7 @@ function frozenWorkflowReason(planRef: string, lock: string | null): string | nu
  */
 export async function checkOfficialPlanBuildable(gh: Octokit, repo: RepoRef, slug: string): Promise<BuildabilityVerdict> {
   const planRef = await resolveCurrent(gh, repo, slug);
-  if (planRef === null) return { slug, planRef: null, buildable: true, reasons: [], gates: [] };
+  if (planRef === null) return { slug, planRef: null, buildable: true, reasons: [], andonIssue: null, gates: [] };
 
   // The gate functions themselves, not a second opinion (gate-checks-cli.md
   // "Shared conventions"): what this scan calls unbuildable has to be what the
@@ -127,6 +137,11 @@ export async function checkOfficialPlanBuildable(gh: Octokit, repo: RepoRef, slu
     await checkB1FrozenCurrent(gh, repo, planRef, slug),
     await checkB2PlanRevalidates(gh, repo, planRef),
   ];
+  // Read from the FROZEN document, so the review named is the one that approved
+  // the version being complained about. An unreadable plan yields null rather than
+  // a guess — that is one of the causes below, and pointing somewhere wrong would
+  // be worse than pointing nowhere.
+  const { plan } = await tryReadPlanAtRef(gh, repo, planRef);
   const reasons = gates
     .filter((g) => g.status === 'fail')
     .map((g) =>
@@ -138,7 +153,7 @@ export async function checkOfficialPlanBuildable(gh: Octokit, repo: RepoRef, slu
   const workflowReason = frozenWorkflowReason(planRef, await readTextAtRef(gh, repo, BUILD_WORKFLOW_PATH, planRef));
   if (workflowReason !== null) reasons.push(workflowReason);
 
-  return { slug, planRef, buildable: reasons.length === 0, reasons, gates };
+  return { slug, planRef, buildable: reasons.length === 0, reasons, andonIssue: plan?.andon_issue ?? null, gates };
 }
 
 /** Every named workload's verdict, concurrently — one workload's reads touch only

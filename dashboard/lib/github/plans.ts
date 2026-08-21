@@ -515,7 +515,7 @@ export async function freezeApprovedPlan(
   // The corrected plan is approved, so the contradictions it answers are answered
   // (GHI #75). Before the break is closed, because a failure here should leave a
   // retryable freeze rather than a resolved review with work still blocked.
-  await clearContradictionFlags(gh, repo, tagRef);
+  await clearContradictionFlags(gh, repo, input.slug, tagRef);
 
   // Terminal label BEFORE the live ones are dropped (GHI #48, the
   // withdrawProposal ordering): a partial failure never leaves the break with
@@ -554,30 +554,177 @@ export async function freezeApprovedPlan(
  * contradiction and silently clearing it would be the freeze asserting something
  * nobody said.
  *
+ * AND ONLY CONTRADICTIONS THIS VERSION COULD HAVE ANSWERED (PR #113 review). A flag
+ * raised AFTER the plan document was last written cannot have been addressed by it.
+ * That is reachable, not theoretical: `markContradicted` reuses a review that is
+ * already live rather than cutting a new version, so a second contradiction can
+ * arrive while the operator is mid-judgment on a plan written before it — and the
+ * approval that follows says nothing about it. Clearing there would remove B6's
+ * block on a work item nobody has answered for, which is worse than not clearing at
+ * all. The boundary is the plan branch's last write to the document, not the merge:
+ * an operator can merge minutes after a flag arrives without having touched the
+ * plan.
+ *
+ * Both unknowns FAIL CLOSED — the flag stays. If the plan's history cannot be read,
+ * or the issue's timeline does not show when the flag arrived, there is no basis for
+ * saying this version answered it. A flag wrongly left standing blocks a build until
+ * someone looks; a flag wrongly cleared silently removes the block on contradicted
+ * work, which is the harm this guard exists to prevent.
+ *
  * Runs on EVERY freeze, not only on a re-approval. A v1 can carry a flag too — a
  * work item may be contradicted before any plan is approved against it — and
  * scoping this to `supersedes >= 1` would leave exactly that case stuck forever.
  * Clearing an absent label is a 404 and a no-op, so the cost of the general case is
  * one tolerated request per item.
  */
-async function clearContradictionFlags(gh: Octokit, repo: RepoRef, tagRef: string): Promise<void> {
+async function clearContradictionFlags(gh: Octokit, repo: RepoRef, slug: string, tagRef: string): Promise<void> {
   // Read at the TAG, which is the version just approved — reading the branch would
   // pick up any commit that landed after the merge.
   const { plan } = await tryReadPlanAtRef(gh, repo, tagRef);
   if (!plan) return; // an unreadable frozen plan is the plan gate's business, not the freeze's
-  const items = [...new Set(plan.steps.map((s) => s.tracking_issue).filter((n): n is number => typeof n === 'number'))].sort(
-    (a, b) => a - b,
-  );
+  const items = workItemsOf(plan);
+  if (items.length === 0) return;
+
+  // The SAME rule the approval gate applies, from the same function: an approval
+  // that was refused for an unaddressed contradiction and an approval that clears
+  // one must never disagree about which contradictions this version answered.
+  const unaddressed = new Set(await unaddressedContradictions(gh, repo, { slug, ref: tagRef, items }));
+
   for (const issueNumber of items) {
+    if (unaddressed.has(issueNumber)) continue; // this version cannot have answered it
     try {
       await gh.issues.removeLabel({ ...repo, issue_number: issueNumber, name: CONTRADICTION_LABEL });
     } catch (error: unknown) {
-      // 404 = the item was never flagged, or a concurrent clear won. Both are the
-      // outcome we wanted. Anything else is loud: a swallowed 5xx would report an
-      // approval that silently left the work unbuildable (the andon.ts stance).
+      // 404 = not flagged, or a concurrent clear won — the outcome we wanted either
+      // way. Anything else is loud: a swallowed 5xx would report an approval that
+      // silently left the work unbuildable (the andon.ts stance).
       if (errorStatus(error) !== 404) throw error;
     }
   }
+}
+
+/** The work items a plan's steps name, deduped and ordered — the set both the
+ *  approval gate and the freeze ask their question about. */
+export function workItemsOf(plan: PlanDoc): number[] {
+  return [...new Set(plan.steps.map((s) => s.tracking_issue).filter((n): n is number => typeof n === 'number'))].sort(
+    (a, b) => a - b,
+  );
+}
+
+/**
+ * Which of these work items carry a contradiction THIS VERSION CANNOT HAVE ANSWERED
+ * — because the contradiction was raised after the plan was last written.
+ *
+ * ONE RULE, TWO ENFORCEMENT POINTS. The approval gate refuses a plan that leaves one
+ * of these standing, and the freeze declines to clear exactly these. Written twice,
+ * the two would eventually disagree, and the disagreement would be silent in the
+ * worst direction: an approval refused for a contradiction the freeze then cleared,
+ * or accepted for one it then kept.
+ *
+ * WHY THIS CASE EXISTS AT ALL. When contradicting evidence arrives while a version
+ * is already under review, `markContradicted` reuses that review rather than cutting
+ * a newer version — so the plan in front of the operator was written before the
+ * contradiction and cannot address it. Approving it would say the operator judged
+ * something they never saw.
+ *
+ * THE BOUNDARY IS THE LAST WRITE, not the approval. An operator can approve minutes
+ * after a contradiction arrives without having touched the plan; using the approval
+ * moment would treat that as an answer.
+ *
+ * EVERY UNKNOWN FAILS CLOSED — the item counts as unaddressed. If the plan's history
+ * cannot be read, or the item is flagged but its timeline will not say when, there is
+ * no basis for saying this version answered anything. An approval refused in error is
+ * visible and recoverable; one wrongly allowed removes a build block silently.
+ */
+export async function unaddressedContradictions(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { slug: string; ref: string; items: number[] },
+): Promise<number[]> {
+  if (input.items.length === 0) return [];
+
+  // ONE label query first, and in the ordinary case it ends here. This runs on every
+  // render of a live review, and the expensive reads below — a commit history and an
+  // issue timeline apiece — would otherwise be paid on every page load to answer
+  // "nothing is flagged" (the answer almost always). `state: 'all'` because a work
+  // item can be closed and still flagged; records are never deleted.
+  const flaggedIssues = await gh.paginate(gh.issues.listForRepo, {
+    ...repo,
+    labels: CONTRADICTION_LABEL,
+    state: 'all',
+    per_page: 100,
+  });
+  const flagged = new Set(flaggedIssues.filter((i) => !i.pull_request).map((i) => i.number));
+  const candidates = input.items.filter((n) => flagged.has(n));
+  if (candidates.length === 0) return [];
+
+  const writtenAt = await planLastWrittenAt(gh, repo, input.slug, input.ref);
+  const unaddressed: number[] = [];
+  for (const issueNumber of candidates) {
+    const raisedAt = await contradictionRaisedAt(gh, repo, issueNumber);
+    // The LIST said flagged and the timeline cannot say when: fail closed, the same
+    // stance as an unreadable plan history below.
+    if (raisedAt === null || writtenAt === null || raisedAt > writtenAt) unaddressed.push(issueNumber);
+  }
+  return unaddressed;
+}
+
+/**
+ * When this version's plan document was last written — the moment after which a
+ * contradiction cannot have been addressed by it.
+ *
+ * The plan branch's last commit to the document, not the merge: an operator can
+ * merge an approval PR minutes after a flag arrives without having touched the
+ * plan, and using the merge time would clear a flag the approved content never
+ * answered. Null when the history cannot be read, which disables the guard rather
+ * than the clearing — see the caller.
+ */
+async function planLastWrittenAt(gh: Octokit, repo: RepoRef, slug: string, tagRef: string): Promise<number | null> {
+  try {
+    // The tag DEREFERENCED to its commit: `listCommits` takes a ref, but an
+    // annotated tag's object is the tag, not the commit, and this repo's freezes
+    // are always annotated (tagTargetSha exists for exactly that reason).
+    const commit = (await tagTargetSha(gh, repo, tagRef)) ?? tagRef;
+    const { data } = await gh.repos.listCommits({ ...repo, sha: commit, path: planPath(slug), per_page: 1 });
+    const at = data[0]?.commit.committer?.date ?? data[0]?.commit.author?.date;
+    return at ? Date.parse(at) : null;
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
+    throw error;
+  }
+}
+
+/**
+ * When `flagged:wrong-assumption` was most recently applied to an issue, or null
+ * when it is not currently flagged.
+ *
+ * The issue's own timeline is the record — the label carries no timestamp of its
+ * own. The LATEST application wins: a work item flagged, reconciled, and flagged
+ * again is answered by the newest contradiction, not the oldest.
+ */
+async function contradictionRaisedAt(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<number | null> {
+  let events;
+  try {
+    events = await gh.paginate(gh.issues.listEvents, { ...repo, issue_number: issueNumber, per_page: 100 });
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
+    throw error;
+  }
+  let latest: number | null = null;
+  let flagged = false;
+  for (const event of events) {
+    const name = (event as { label?: { name?: string } }).label?.name;
+    if (name !== CONTRADICTION_LABEL) continue;
+    if (event.event === 'labeled') {
+      flagged = true;
+      const at = event.created_at ? Date.parse(event.created_at) : null;
+      if (at !== null) latest = at;
+    } else if (event.event === 'unlabeled') {
+      flagged = false;
+      latest = null;
+    }
+  }
+  return flagged ? latest : null;
 }
 
 export interface ReopenResult {

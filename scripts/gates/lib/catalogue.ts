@@ -1,0 +1,90 @@
+/**
+ * THE DECLARED GATE SETS — what each family PROMISES, independent of what any CLI
+ * happens to wire up (PR #113 review, Codex P1).
+ *
+ * This file exists because the first attempt at GHI #108 did not actually close it.
+ * `runGateCatalogue` was handed one array that served as both the expected set and
+ * the implementations, so a CLI that omitted a gate simply produced a shorter loop
+ * and still passed — the exact shape the issue is about, one level up. `absent` was
+ * unreachable in production: every entry carried a `run`, so nothing could be
+ * declared-but-missing, and the test that "proved" it synthesized an absent row by
+ * hand. The reviewer was right that a catalogue which lives in the same expression
+ * as the implementations reconciles nothing.
+ *
+ * So the declaration lives HERE, apart from every call site, and the runner
+ * iterates THIS rather than the specs. A gate declared here with no implementation
+ * wired to it is reported `absent`, and `absent` fails the report.
+ *
+ * WHAT THIS CATCHES, stated honestly. It is not a defence against a stale checkout
+ * — after GHI #107 the gate code and this file come from the same current ref, so a
+ * stale copy would carry a stale catalogue too. What it catches is DRIFT WITHIN a
+ * checkout: a gate added to the contract and never wired, a gate dropped from one
+ * CLI while another still declares it, a preview that reconciles against a
+ * different set from the enforcement point. Those are the reachable failures now
+ * that #107 removed the other one, and they were previously invisible.
+ *
+ * Kept in CONTRACT ORDER (gate-checks-cli.md), because that is the order every
+ * report is read in, and the runner takes its ordering from here.
+ */
+
+export interface DeclaredGate {
+  id: string;
+  /** the requirement the gate enforces — reported even when the gate is absent,
+   *  since "which promise went unchecked" is the useful half of that news */
+  requirement: string;
+}
+
+/** §2 `build-preflight`. B8 last: pure, reads no API, and its failure is the most
+ *  structural of the set. */
+export const PREFLIGHT_CATALOGUE: readonly DeclaredGate[] = [
+  { id: 'B1', requirement: 'FR-007' },
+  { id: 'B2', requirement: 'integrity' },
+  { id: 'B3', requirement: 'FR-017' },
+  { id: 'B4', requirement: 'FR-018' },
+  { id: 'B5', requirement: 'FR-024' },
+  { id: 'B6', requirement: 'FR-022' },
+  { id: 'B7', requirement: 'FR-033' },
+  { id: 'B8', requirement: 'FR-007' },
+];
+
+/**
+ * §1 `plan-gate`.
+ *
+ * G12 IS ABSENT ON PURPOSE and its number is never reused: the unacknowledged
+ * intent-drift gate is deferred with its detection mechanism unsettled (GHI #28).
+ * It is not declared here because a declared gate with no implementation is
+ * `absent`, which would fail every approval — "deferred" and "missing" are
+ * different things, and only the second should block.
+ */
+export const PLAN_CATALOGUE: readonly DeclaredGate[] = [
+  { id: 'G1', requirement: 'integrity' },
+  { id: 'G2', requirement: 'FR-009' },
+  { id: 'G3', requirement: 'FR-012' },
+  { id: 'G4', requirement: 'FR-011' },
+  { id: 'G5', requirement: 'FR-019' },
+  { id: 'G6', requirement: 'FR-023' },
+  { id: 'G7', requirement: 'FR-005' },
+  { id: 'G8', requirement: 'FR-002' },
+  { id: 'G9', requirement: 'FR-027' },
+  { id: 'G10', requirement: 'data integrity' },
+  { id: 'G11', requirement: 'FR-056' },
+  { id: 'G13', requirement: 'FR-017' },
+  { id: 'G14', requirement: 'FR-046' },
+  { id: 'G15', requirement: 'FR-022' },
+];
+
+/** §3 `lifecycle-gate`. Every transition reports all of these; which ones apply is
+ *  the CLI's business, which ones EXIST is this file's. */
+export const LIFECYCLE_CATALOGUE: readonly DeclaredGate[] = [
+  { id: 'L0', requirement: 'FR-032' },
+  { id: 'L1', requirement: 'FR-033' },
+  { id: 'L2', requirement: 'FR-032' },
+  { id: 'L3', requirement: 'FR-034' },
+  { id: 'L4', requirement: 'FR-038' },
+  { id: 'L5', requirement: 'FR-032' },
+  { id: 'L6', requirement: 'FR-039' },
+  { id: 'L7', requirement: 'FR-040' },
+  { id: 'L8', requirement: 'FR-040' },
+  { id: 'L9', requirement: 'FR-041' },
+  { id: 'L10', requirement: 'FR-036' },
+];

@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { cliMain, runGateCatalogue, UsageError, type GateReport, type GateSetRef } from './lib/runner';
+import { PREFLIGHT_CATALOGUE } from './lib/catalogue';
 import {
   checkB1FrozenCurrent,
   checkB2PlanRevalidates,
@@ -85,13 +86,12 @@ export async function buildPreflight(
   // legible; anything the catalogue declares and the code cannot run is `absent`,
   // and `absent` fails the report.
   const noChunk = () => (input.chunk === undefined ? 'no --chunk: this build names no work item' : null);
-  const report = await runGateCatalogue(input.planRef, [
-    { id: 'B1', requirement: 'FR-007', run: () => checkB1FrozenCurrent(gh, repo, input.planRef, input.workload) },
-    { id: 'B2', requirement: 'integrity', run: () => checkB2PlanRevalidates(gh, repo, input.planRef) },
-    { id: 'B3', requirement: 'FR-017', skip: noChunk, run: () => checkB3ChunkReady(gh, repo, input.chunk!, input.planRef) },
+  const report = await runGateCatalogue(input.planRef, PREFLIGHT_CATALOGUE, [
+    { id: 'B1', run: () => checkB1FrozenCurrent(gh, repo, input.planRef, input.workload) },
+    { id: 'B2', run: () => checkB2PlanRevalidates(gh, repo, input.planRef) },
+    { id: 'B3', skip: noChunk, run: () => checkB3ChunkReady(gh, repo, input.chunk!, input.planRef) },
     {
       id: 'B4',
-      requirement: 'FR-018',
       // Two distinct reasons, reported apart: an attended run does not need the
       // confirmation at all, whereas a chunkless one could not carry it.
       skip: () =>
@@ -104,13 +104,13 @@ export async function buildPreflight(
     },
     // B5 runs on every build, chunked or not: a high-stakes step is gated by the
     // plan that flagged it, not by whether this build happens to name a chunk.
-    { id: 'B5', requirement: 'FR-024', run: () => checkB5ConfirmationRecorded(gh, repo, input.planRef, steps) },
-    { id: 'B6', requirement: 'FR-022', skip: noChunk, run: () => checkB6NotFlagged(gh, repo, input.chunk!) },
-    { id: 'B7', requirement: 'FR-033', run: () => checkB7WorkloadActive(gh, repo, input.workload) },
+    { id: 'B5', run: () => checkB5ConfirmationRecorded(gh, repo, input.planRef, steps) },
+    { id: 'B6', skip: noChunk, run: () => checkB6NotFlagged(gh, repo, input.chunk!) },
+    { id: 'B7', run: () => checkB7WorkloadActive(gh, repo, input.workload) },
     // B8 is pure and reads no API, so it runs last and costs nothing — but its
     // failure is the most structural of the set: the run is building the wrong
     // worktree entirely (GHI #72 option A).
-    { id: 'B8', requirement: 'FR-007', run: () => checkB8DispatchedOnFrozenRef(input.planRef, input.githubRef) },
+    { id: 'B8', run: () => checkB8DispatchedOnFrozenRef(input.planRef, input.githubRef) },
   ]);
   return {
     plan: input.planRef,

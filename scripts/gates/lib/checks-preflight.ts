@@ -159,7 +159,16 @@ export async function checkB3ChunkReady(
       detail: `chunk #${chunkIssue} is claimed by ${claiming.map((s) => s.id).join(' and ')} in ${planRef} — one work item delivers one step, so this build cannot say which step it is for. Re-open the plan and give each step its own work item`,
     };
   }
-  return { id: 'B3', status: 'pass', requirement: 'FR-017' };
+  // Name the claimant on the way through. B3 is the gate that answers "which step
+  // is this build for?" — it computes exactly that above and used to discard it on
+  // success, leaving a bare green where the one fact the operator came for was
+  // already in hand (PR #118 bot review). Same reason B5 explains its own pass.
+  return {
+    id: 'B3',
+    status: 'pass',
+    requirement: 'FR-017',
+    detail: `chunk #${chunkIssue} is delivered by ${claiming[0]!.id} in ${planRef}`,
+  };
 }
 
 /**
