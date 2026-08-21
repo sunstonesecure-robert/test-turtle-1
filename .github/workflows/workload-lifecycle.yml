@@ -72,8 +72,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # No git credentials in .git/config: every write here goes through
+          # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - run: npm ci
@@ -87,7 +91,7 @@ jobs:
           --action "$WL_ACTION"
           --reason "$WL_REASON"
           --revisit "$WL_REVISIT"
-          --repo ${{ github.repository }} --json
+          --repo "$GITHUB_REPOSITORY" --json
           | tee "$RUNNER_TEMP/lifecycle-gate.json"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,7 +104,7 @@ jobs:
           --reason "$WL_REASON"
           --revisit "$WL_REVISIT"
           --gate-report "$RUNNER_TEMP/lifecycle-gate.json"
-          --repo ${{ github.repository }}
+          --repo "$GITHUB_REPOSITORY"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # The refusal half (GHI #127). A red gate exits 1, pipefail fails the gate
@@ -120,6 +124,6 @@ jobs:
           --action "$WL_ACTION"
           --actor "$WL_ACTOR"
           --gate-report "$RUNNER_TEMP/lifecycle-gate.json"
-          --repo ${{ github.repository }}
+          --repo "$GITHUB_REPOSITORY"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

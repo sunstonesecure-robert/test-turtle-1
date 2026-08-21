@@ -25,17 +25,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # No git credentials in .git/config: every write here goes through
+          # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - run: npm ci
       - name: normalize intake (marker + introduced event; refusal comments + delabels)
-        run: >-
-          npx tsx scripts/intake-normalize.ts
-          --issue ${{ github.event.issue.number }}
-          --repo ${{ github.repository }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WI_ISSUE: ${{ github.event.issue.number }}
           # Per-file context-size ceiling (MB); unset → the script's 5 MB default (PB-004 hang guard).
           CONTEXT_MAX_FILE_MB: ${{ vars.CONTEXT_MAX_FILE_MB }}
+        run: >-
+          npx tsx scripts/intake-normalize.ts
+          --issue "$WI_ISSUE"
+          --repo "$GITHUB_REPOSITORY"

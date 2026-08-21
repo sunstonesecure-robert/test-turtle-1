@@ -28,16 +28,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # No git credentials in .git/config: every write here goes through
+          # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - run: npm ci
       - name: record dated evidence batch (FR-021)
-        run: >-
-          npx tsx scripts/evidence-collect.ts
-          --source "${{ inputs.source || 'scheduled' }}"
-          --kind "${{ inputs.kind || 'feedback' }}"
-          --repo ${{ github.repository }}
+        # Dispatch inputs arrive as env vars, not as `${{ }}` inside `run:` (GHI #130).
+        # These two are typed by the operator and were interpolated inside double
+        # quotes, which a value containing `"` closes — the same defect as
+        # reconcile.yml with a smaller reach (a dispatch already needs write access,
+        # and the values label a batch rather than name a ref). Read as "$EC_*" they
+        # are data, and the schedule's defaults still apply because the `||` runs in
+        # the expression, before the value ever becomes an environment variable.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EC_SOURCE: ${{ inputs.source || 'scheduled' }}
+          EC_KIND: ${{ inputs.kind || 'feedback' }}
+        run: >-
+          npx tsx scripts/evidence-collect.ts
+          --source "$EC_SOURCE"
+          --kind "$EC_KIND"
+          --repo "$GITHUB_REPOSITORY"

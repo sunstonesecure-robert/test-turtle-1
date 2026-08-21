@@ -44,7 +44,14 @@
 # PB-002) — tests/unit/workflow-linkage.test.ts guards the name below.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: vt-report
-on:
+# `workflow_run` is flagged by zizmor as a dangerous trigger — accepted here for the
+# reason documented at length above: the build agent is read-only by design and this
+# job performs the privileged write. The artifact is parsed as UNTRUSTED
+# agent-authored input and every field is validated BEFORE the first check run is
+# created, and the provenance binding (`--expect-sha` = the triggering run's own
+# `head_sha`, the one signal the agent cannot author) is what stops a build for
+# workload A reporting against workload B's plan.
+on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     # MUST match build-template.lock.yml's compiled `name:` exactly.
     workflows: ["build-template — dispatched agent build, gated by preflight"]
@@ -61,22 +68,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # No git credentials in .git/config: every write here goes through
+          # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - run: npm ci
       - name: download the build run's verification results artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}/vt-artifacts
       - name: report vt-<id> check runs on the frozen plan SHA
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: >-
           npx tsx scripts/vt-report.ts
           --dir "$RUNNER_TEMP/vt-artifacts"
-          --expect-sha ${{ github.event.workflow_run.head_sha }}
-          --repo ${{ github.repository }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          --expect-sha "$VT_HEAD_SHA"
+          --repo "$GITHUB_REPOSITORY"
