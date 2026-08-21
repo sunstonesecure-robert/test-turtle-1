@@ -53,7 +53,18 @@ concurrency:
 env:
   WL_WORKLOAD: ${{ github.event.client_payload.workload || inputs.workload }}
   WL_ACTION: ${{ github.event.client_payload.action || inputs.action }}
-  WL_ACTOR: ${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.client_payload.actor }}
+  # `by` FIRST, because that is the field the contract documents
+  # (dashboard-github-api.md: client_payload {workload, action, by, reason?, revisit?})
+  # and the `by:@login` convention every marker in this repo already uses. Reading
+  # only `actor` meant a caller that followed the contract arrived with WL_ACTOR
+  # empty, and BOTH consumers default an absent actor to `workload-lifecycle[bot]`
+  # — so the operator's own transition was recorded as the bot's, in the
+  # workload-event:v1 comment that IS the attributed audit record (FR-035), not
+  # just in the refusal comment. `actor` is kept as a compatibility fallback for
+  # ad-hoc callers that copied the reconcile dispatch's shape (PB-011).
+  # Found by the PR #129 Codex review, which spotted it on the refusal path; the
+  # apply path had the same defect and is fixed by the same line.
+  WL_ACTOR: ${{ github.event_name == 'workflow_dispatch' && github.actor || github.event.client_payload.by || github.event.client_payload.actor }}
   WL_REASON: ${{ github.event.client_payload.reason || inputs.reason }}
   WL_REVISIT: ${{ github.event.client_payload.revisit || inputs.revisit }}
 jobs:
