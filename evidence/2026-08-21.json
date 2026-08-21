@@ -1,0 +1,12 @@
+{
+  "source": "live-playbook",
+  "kind": "feedback",
+  "items": [
+    {
+      "summary": "trial users give up at the clock step",
+      "relates_to": [
+        "step-clock"
+      ]
+    }
+  ]
+}
