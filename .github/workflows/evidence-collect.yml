@@ -1,9 +1,18 @@
-# evidence-collect — scheduled dated evidence batches (deterministic, no LLM —
-# plain Actions YAML by design, substrate split). Opens the dated
-# `evidence:batch` issue and commits `evidence/<date>.json` (FR-021). The
+# evidence-collect — scheduled evidence batches (deterministic, no LLM — plain
+# Actions YAML by design, substrate split). Opens the `evidence:batch` issue and
+# commits `evidence/<date>-<source>.json` to the `evidence` branch (FR-021). The
 # operator reviews batches on the dashboard's Evidence page and marks
 # contradictions there — judgment stays human (constitution:
 # Deterministic-First); this workflow only records.
+#
+# The record goes to the `evidence` branch, NOT the default branch (GHI #134).
+# Every write this job attempted to the default branch was refused 409 — init
+# installs a required `plan-gate` check there whose only bypass is the repo-admin
+# role, and a direct push can never carry that check run. This is the only
+# workflow that pushed a file to the DEFAULT branch — the other writers touch
+# tags or plan/** branches, which that ruleset does not cover — so it is the only
+# one the rule ever refused. The record store carries its own append-only ruleset
+# instead (no force-push, no deletion).
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: evidence-collect
 on:
@@ -19,7 +28,7 @@ on:
         required: true
         default: feedback
 permissions:
-  contents: write # evidence/<date>.json — dated, append-only records
+  contents: write # the record on the `evidence` branch — append-only, created here if absent
   issues: write # the evidence:batch issue
 concurrency:
   group: evidence-collect

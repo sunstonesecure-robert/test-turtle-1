@@ -3,7 +3,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { getAndon } from './andon';
 import { listOpenCorrections } from './corrections';
-import { errorStatus } from './errors';
+import { errorStatus, Refusal } from './errors';
 import { parseAnswer, parseAnswerText, serializeAnswer, checkJudgmentItem } from './markers';
 import {
   violatesSpecialFolderRules,
@@ -120,27 +120,27 @@ export async function recordAnswer(
   input: { andonIssue: number; itemId: string; by: string; at: string; text: string; references?: string[] },
 ): Promise<void> {
   if (!input.itemId.startsWith('q-')) {
-    throw new Error(`item ${input.itemId} is not a question — answers attach only to q- items (FR-055); use ✓/✗ judgment`);
+    throw new Refusal(`item ${input.itemId} is not a question — answers attach only to q- items (FR-055); use ✓/✗ judgment`);
   }
   const andon = await getAndon(gh, repo, input.andonIssue);
   const item = andon.items.find((i) => i.id === input.itemId);
-  if (!item) throw new Error(`question item ${input.itemId} not found on Andon #${input.andonIssue}`);
+  if (!item) throw new Refusal(`question item ${input.itemId} not found on Andon #${input.andonIssue}`);
 
   // CRLF-normalize before comparing: browser form submissions canonicalize
   // textarea content to \r\n while listAnswers round-trips through
   // parseAnswerText's LF join — without this, the idempotent double submit of
   // any multi-line answer would misread as a DIFFERENT answer and be refused.
   const text = input.text.replace(/\r\n?/g, '\n').trim();
-  if (text.length === 0) throw new Error('answer refused: the answer text must not be blank (FR-055)');
+  if (text.length === 0) throw new Refusal('answer refused: the answer text must not be blank (FR-055)');
 
   const references = (input.references ?? []).map((r) => r.trim()).filter((r) => r.length > 0);
   const problems = await answerReferenceProblems(gh, repo, references);
-  if (problems.length > 0) throw new Error(`answer refused — invalid context reference(s): ${problems.join('; ')}`);
+  if (problems.length > 0) throw new Refusal(`answer refused — invalid context reference(s): ${problems.join('; ')}`);
 
   const rendered = renderAnswerText(text, references);
   const existing = (await listAnswers(gh, repo, input.andonIssue)).find((a) => a.itemId === input.itemId);
   if (existing && existing.text !== rendered) {
-    throw new Error(
+    throw new Refusal(
       `question ${input.itemId} already carries an answer by @${existing.by} at ${existing.at} — answers are permanent records; ` +
         `if the plan is wrong, flag the item ✗ with a correction instead (FR-055)`,
     );

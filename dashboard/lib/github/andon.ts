@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import type { PlanDoc } from '../../../schemas/plan';
-import { errorMessage, errorStatus } from './errors';
+import { errorMessage, errorStatus, Refusal } from './errors';
 // Static import that closes an import cycle: corrections.ts statically imports
 // getAndon from here, so andon.ts ↔ corrections.ts is circular. The cycle is
 // safe because neither binding is touched at module-evaluation time — both are
@@ -75,7 +75,7 @@ export async function createAndonIssue(
 export async function getAndon(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<AndonBreak> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const header = parseAndonHeader(issue.body ?? '');
-  if (!header) throw new Error(`issue #${issueNumber} has no andon:v1 header`);
+  if (!header) throw new Refusal(`issue #${issueNumber} has no andon:v1 header`);
   return {
     issueNumber,
     runId: header.runId,
@@ -114,7 +114,7 @@ export async function openAndon(gh: Octokit, repo: RepoRef, issueNumber: number)
     return;
   }
   if (!labels.includes('andon:open')) {
-    throw new Error(`Andon #${issueNumber} is not open for review (labels: ${labels.join(', ') || 'none'})`);
+    throw new Refusal(`Andon #${issueNumber} is not open for review (labels: ${labels.join(', ') || 'none'})`);
   }
   await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: ['andon:under-review'] });
   try {
@@ -133,11 +133,11 @@ export async function openAndon(gh: Octokit, repo: RepoRef, issueNumber: number)
  *  allJudged and open an approval PR that plan-gate G11 then fails). */
 export async function judgeItem(gh: Octokit, repo: RepoRef, issueNumber: number, itemId: string): Promise<void> {
   if (itemId.startsWith('q-')) {
-    throw new Error(`question item ${itemId} is answered, not judged ✓ — record an answer instead (FR-055)`);
+    throw new Refusal(`question item ${itemId} is answered, not judged ✓ — record an answer instead (FR-055)`);
   }
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const updated = checkJudgmentItem(issue.body ?? '', itemId);
-  if (updated === null) throw new Error(`judgment item ${itemId} not found on Andon #${issueNumber}`);
+  if (updated === null) throw new Refusal(`judgment item ${itemId} not found on Andon #${issueNumber}`);
   await gh.issues.update({ ...repo, issue_number: issueNumber, body: updated });
 }
 
@@ -209,7 +209,7 @@ export async function withdrawProposal(
 ): Promise<number[]> {
   const cause = input.cause.trim();
   if (cause.length === 0) {
-    throw new Error('withdrawal refused: a cause must be recorded (issue-tracker-contract.md §Andon Break)');
+    throw new Refusal('withdrawal refused: a cause must be recorded (issue-tracker-contract.md §Andon Break)');
   }
   const andon = await getAndon(gh, repo, issueNumber); // throws if the issue is not an Andon break
   if (andon.labels.includes('andon:superseded')) {
@@ -221,12 +221,12 @@ export async function withdrawProposal(
     return []; // the cascade already ran on the attempt that superseded it
   }
   if (andon.labels.includes('andon:resolved')) {
-    throw new Error(
+    throw new Refusal(
       `Andon #${issueNumber} is resolved (approved) — a frozen plan changes only through an open re-open, not withdrawal (FR-008)`,
     );
   }
   if (!andon.labels.includes('andon:open') && !andon.labels.includes('andon:under-review')) {
-    throw new Error(`Andon #${issueNumber} is not a live break (labels: ${andon.labels.join(', ') || 'none'}) — nothing to withdraw`);
+    throw new Refusal(`Andon #${issueNumber} is not a live break (labels: ${andon.labels.join(', ') || 'none'}) — nothing to withdraw`);
   }
 
   // Cascade first: no correction:open may outlive its break (data-model "Correction").

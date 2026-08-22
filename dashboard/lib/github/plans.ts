@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { PlanDoc } from '../../../schemas/plan';
-import { errorMessage, errorStatus } from './errors';
+import { errorMessage, errorStatus, Refusal } from './errors';
 import { createAndonIssue, dropLiveLabelsAndClose } from './andon';
 import { CONTRADICTION_LABEL } from './labels';
 
@@ -88,7 +88,7 @@ async function getFileAtRef(
     throw error;
   }
   if (Array.isArray(data) || data.type !== 'file' || !('content' in data)) {
-    throw new Error(`${path} is not a file at ref ${ref}`);
+    throw new Refusal(`${path} is not a file at ref ${ref}`);
   }
   return { raw: Buffer.from(data.content, 'base64').toString('utf8'), sha: data.sha };
 }
@@ -134,7 +134,7 @@ export async function alignLegacyPlanFileWithBase(
   input: { planRef: string; base: string; actor?: string },
 ): Promise<LegacyPlanFileOutcome> {
   if (!/^plan\/[a-z0-9-]+\/v\d+$/.test(input.planRef)) {
-    throw new Error(`refusing to write: "${input.planRef}" is not a plan branch`);
+    throw new Refusal(`refusing to write: "${input.planRef}" is not a plan branch`);
   }
   const onBranch = await getFileAtRef(gh, repo, LEGACY_PLAN_PATH, input.planRef);
   // Every branch published after #79 leaves the root path alone — one 404 and done.
@@ -197,8 +197,8 @@ export async function readPlanFileAtRef(gh: Octokit, repo: RepoRef, ref: string)
   if (legacy && (slug === null || (declaredFeature(legacy.raw) ?? slug) === slug)) {
     return { path: LEGACY_PLAN_PATH, ...legacy };
   }
-  if (slug === null) throw new Error(`no plan document at ref ${ref}: ${LEGACY_PLAN_PATH} is absent`);
-  throw new Error(
+  if (slug === null) throw new Refusal(`no plan document at ref ${ref}: ${LEGACY_PLAN_PATH} is absent`);
+  throw new Refusal(
     `no plan document at ref ${ref}: ${planPath(slug)} is absent and the root ${LEGACY_PLAN_PATH} ` +
       (legacy
         ? `belongs to "${declaredFeature(legacy.raw)}", not "${slug}"`
@@ -261,10 +261,10 @@ export async function commitPlanUpdate(
   input: { planRef: string; message: (updated: PlanDoc) => string; mutate: (plan: PlanDoc) => PlanDoc },
 ): Promise<PlanDoc> {
   if (!/^plan\/[a-z0-9-]+\/v\d+$/.test(input.planRef)) {
-    throw new Error(`refusing to write: "${input.planRef}" is not a plan branch`);
+    throw new Refusal(`refusing to write: "${input.planRef}" is not a plan branch`);
   }
   if (await tagExists(gh, repo, input.planRef)) {
-    throw new Error(
+    throw new Refusal(
       `refusing to write: ${input.planRef} is frozen — genuine change is an open re-open, not an edit (FR-007/FR-008)`,
     );
   }
@@ -281,7 +281,7 @@ export async function commitPlanUpdate(
     head: `${repo.owner}:${input.planRef}`,
   });
   if (closedPrs.some((pr) => pr.merged_at !== null)) {
-    throw new Error(
+    throw new Refusal(
       `refusing to write: the approval PR for ${input.planRef} is merged — the go-ahead happened and the freeze is imminent; an edit now would not be part of the official version (FR-007)`,
     );
   }
@@ -507,7 +507,7 @@ export async function freezeApprovedPlan(
       if (errorStatus(error) !== 422 || (await tagTargetSha(gh, repo, tagRef)) !== input.mergeSha) throw error;
     }
   } else if (existingTarget !== input.mergeSha) {
-    throw new Error(
+    throw new Refusal(
       `refusing to freeze ${tagRef}: tag already exists at ${existingTarget}, not merge ${input.mergeSha} — exactly one official version (SC-008)`,
     );
   }
@@ -749,7 +749,7 @@ export async function reopenPlan(
 ): Promise<ReopenResult> {
   const current = await resolveCurrent(gh, repo, input.slug);
   if (!current) {
-    throw new Error(`nothing to re-open: no frozen plan for "${input.slug}" (no plan/${input.slug}/v* tag exists)`);
+    throw new Refusal(`nothing to re-open: no frozen plan for "${input.slug}" (no plan/${input.slug}/v* tag exists)`);
   }
   // Derived refs are well-formed by construction; the parse is an invariant guard.
   const m = /^plan\/[a-z0-9-]+\/v(\d+)$/.exec(current);
@@ -761,13 +761,13 @@ export async function reopenPlan(
   // the review.
   const maxExisting = await maxPlanVersion(gh, repo, input.slug);
   if (maxExisting > currentVersion) {
-    throw new Error(`already re-opened: ${planBranch(input.slug, maxExisting)} is awaiting review — judge or withdraw it first`);
+    throw new Refusal(`already re-opened: ${planBranch(input.slug, maxExisting)} is awaiting review — judge or withdraw it first`);
   }
   const version = maxExisting + 1;
   const planRef = planBranch(input.slug, version);
 
   const frozenSha = await tagTargetSha(gh, repo, current);
-  if (!frozenSha) throw new Error(`official version ${current} resolved but its tag vanished — refusing to re-open against it`);
+  if (!frozenSha) throw new Refusal(`official version ${current} resolved but its tag vanished — refusing to re-open against it`);
   const prior = await readPlanAtRef(gh, repo, current);
 
   try {
@@ -775,7 +775,7 @@ export async function reopenPlan(
   } catch (error: unknown) {
     // TOCTOU with the in-flight check above: a concurrent re-open won.
     if (errorStatus(error) !== 422) throw error;
-    throw new Error(`already re-opened: branch ${planRef} exists`);
+    throw new Refusal(`already re-opened: branch ${planRef} exists`);
   }
 
   const seed: PlanDoc = {

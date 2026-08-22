@@ -7,7 +7,12 @@
 # plan's Andon issue + close it (FR-006/FR-007; closed, not locked — the break stays
 # a searchable record). The tag IS the official version (derived — 2026-07-11,
 # GHI #44): nothing is pushed to main, so GITHUB_TOKEN needs no ruleset bypass on
-# any repo type.
+# any repo type. That claim is about THIS workflow and was read for years as
+# though it covered all of them: evidence-collect did push a file to the default
+# branch, and was refused 409 on every run in every initialized repository until
+# GHI #134 moved the record to the `evidence` branch. No machine credential has a
+# bypass on the default branch, and none should — the fix moved the write, not
+# the boundary.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: plan-post-merge
 on:

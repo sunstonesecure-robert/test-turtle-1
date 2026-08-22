@@ -1,13 +1,22 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { ALL_LABELS } from '../../../dashboard/lib/github/labels';
+import { EVIDENCE_BRANCH } from '../../../dashboard/lib/github/evidence-store';
 import type { GateResult } from './runner';
 import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 
 /**
- * Readiness checks I1–I6 (gate-checks-cli.md §4) — a pure function of live repo
- * state, never a stored flag. Shared by `init --verify` and the dashboard's
+ * Readiness checks (gate-checks-cli.md §4) — a pure function of live repo state,
+ * never a stored flag. Shared by `init --verify` and the dashboard's
  * intake-refusal banner (FR-029), so UX preview and enforcement cannot drift.
+ *
+ * The set is I1–I6 and I8. **I7 is deliberately absent, not missing**: it is
+ * specified (gate-checks-cli.md §4, task T222) as the deliverable-path check —
+ * the US18 workflows installed AND `deliverable-gate` registered as a required
+ * check — and it has not been built yet. The evidence record store took I8
+ * rather than the free-looking I7 because a readiness id, once written into the
+ * contract, is a stable identifier: reusing it would make two different checks
+ * answer to one name in the record.
  */
 
 /** Agentic workflows: gh-aw markdown compiled to pinned .lock.yml. */
@@ -98,6 +107,11 @@ export const PLAN_RULESET = 'oversight: protect plan branches';
  *  init can DELETE a stale instance on reconcile; nothing requires it. */
 export const CURRENT_RULESET = 'oversight: protect CURRENT pointers';
 export const MAIN_RULESET = 'oversight: require plan-gate on main';
+/** The evidence record store's own protection (GHI #134): the branch every batch
+ *  is committed to is append-only — no force-push, no deletion. Records moved off
+ *  the default branch because its required-check rule refused every machine
+ *  write; this ruleset is what keeps the move from weakening the record. */
+export const EVIDENCE_RULESET = 'oversight: protect the evidence branch';
 
 export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateResult[]> {
   const results: GateResult[] = [];
@@ -203,6 +217,35 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     status: operator ? 'pass' : 'fail',
     requirement: 'FR-029',
     ...(operator ? {} : { detail: 'authenticated actor not resolvable' }),
+  });
+
+  // I8 — the evidence record store: the `evidence` branch exists AND is
+  // protected (GHI #134). Both halves matter and they fail differently. Without
+  // the BRANCH the scheduled collector has nowhere to write — though it creates
+  // it itself rather than losing a record, which is why this reports rather than
+  // blocks. Without the RULESET the records are writable history: a force-push
+  // could rewrite an append-only record, which is the property the whole move
+  // off the default branch was made to keep.
+  let hasEvidenceBranch = false;
+  try {
+    await gh.git.getRef({ ...repo, ref: `heads/${EVIDENCE_BRANCH}` });
+    hasEvidenceBranch = true;
+  } catch (error: unknown) {
+    if (errorStatus(error) !== 404) throw error;
+  }
+  const evidenceUnmet = [
+    ...(hasEvidenceBranch ? [] : [`missing branch: ${EVIDENCE_BRANCH} (the evidence record store)`]),
+    ...(planLimitDetail
+      ? [planLimitDetail]
+      : rulesetNames?.has(EVIDENCE_RULESET)
+        ? []
+        : [`missing ruleset: ${EVIDENCE_RULESET} (append-only records)`]),
+  ];
+  results.push({
+    id: 'I8',
+    status: evidenceUnmet.length === 0 ? 'pass' : 'fail',
+    requirement: 'FR-021',
+    ...(evidenceUnmet.length ? { detail: evidenceUnmet.join(' · ') } : {}),
   });
 
   return results;

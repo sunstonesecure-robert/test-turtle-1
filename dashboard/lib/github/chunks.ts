@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
-import { errorStatus } from './errors';
+import { errorStatus, Refusal } from './errors';
 import { parseIntentConfirmed, serializeIntentConfirmed } from './markers';
 import { mergeRecheck } from './read-after-write';
 
@@ -172,7 +172,7 @@ export async function getChunk(gh: Octokit, repo: RepoRef, issueNumber: number):
 
 /** A one-line title is a complete, valid backlog item (FR-016). */
 export async function createChunk(gh: Octokit, repo: RepoRef, input: { title: string }): Promise<Chunk> {
-  if (input.title.trim().length === 0) throw new Error('a chunk needs at least a title');
+  if (input.title.trim().length === 0) throw new Refusal('a chunk needs at least a title');
   const { data: issue } = await gh.issues.create({
     ...repo,
     title: input.title,
@@ -193,7 +193,7 @@ export async function promoteChunk(
 ): Promise<Chunk> {
   const missing = (['intent', 'outcomeMetric', 'acceptance'] as const).filter((f) => input[f].trim().length === 0);
   if (missing.length > 0) {
-    throw new Error(`promotion refused — empty field(s): ${missing.join(', ')} (FR-017 needs the full requirement)`);
+    throw new Refusal(`promotion refused — empty field(s): ${missing.join(', ')} (FR-017 needs the full requirement)`);
   }
   await gh.issues.update({
     ...repo,
@@ -218,7 +218,7 @@ export async function promoteChunk(
 export async function demoteChunk(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<Chunk> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   if (issue.assignee) {
-    throw new Error(`demotion refused — chunk #${issueNumber} is assigned to @${issue.assignee.login}; demotion is only allowed while unassigned`);
+    throw new Refusal(`demotion refused — chunk #${issueNumber} is assigned to @${issue.assignee.login}; demotion is only allowed while unassigned`);
   }
   // A demoted chunk has no requirement to have confirmed intent about (FR-018):
   // revoke the label so a later re-promotion cannot ride the old confirmation.

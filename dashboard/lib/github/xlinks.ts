@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
-import { errorStatus } from './errors';
+import { errorStatus, Refusal } from './errors';
 // The flag name comes from the taxonomy module, so the writer here and the reader in
 // portfolio.ts cannot drift apart from it or from each other (issue-tracker-contract.md).
 import { CONFLICT_LABEL } from './labels';
@@ -176,7 +176,7 @@ export async function listXLinks(gh: Octokit, repo: RepoRef, slug: string): Prom
  *  written into the marker and then silently fail every propagation attempt against it. */
 function validateItems(items: number[]): number[] {
   for (const item of items) {
-    if (!Number.isInteger(item) || item <= 0) throw new Error(`invalid item reference: ${item} (issue numbers are positive integers)`);
+    if (!Number.isInteger(item) || item <= 0) throw new Refusal(`invalid item reference: ${item} (issue numbers are positive integers)`);
   }
   return [...new Set(items)].sort((a, b) => a - b);
 }
@@ -185,7 +185,7 @@ function validateItems(items: number[]): number[] {
  *  never silently half-recorded. */
 function requireEnd(workloads: Map<string, Workload>, slug: string): Workload {
   const workload = workloads.get(slug);
-  if (!workload) throw new Error(`workload not found: ${slug}`);
+  if (!workload) throw new Refusal(`workload not found: ${slug}`);
   return workload;
 }
 
@@ -197,7 +197,7 @@ function requireEnd(workloads: Map<string, Workload>, slug: string): Workload {
 function requireWritableEnd(workloads: Map<string, Workload>, slug: string): Workload {
   const workload = requireEnd(workloads, slug);
   if (workload.state === 'archived') {
-    throw new Error(`workload ${slug} is archived (locked read-only) — a cross-workload link cannot be recorded on it`);
+    throw new Refusal(`workload ${slug} is archived (locked read-only) — a cross-workload link cannot be recorded on it`);
   }
   return workload;
 }
@@ -249,7 +249,7 @@ export async function recordXLink(
   input: { fromSlug: string; toSlug: string; type: XLinkType; items: number[] },
 ): Promise<XLink[]> {
   if (input.fromSlug === input.toSlug) {
-    throw new Error(`self-link refused: ${input.fromSlug} — a cross-workload link relates two DIFFERENT workloads (FR-047)`);
+    throw new Refusal(`self-link refused: ${input.fromSlug} — a cross-workload link relates two DIFFERENT workloads (FR-047)`);
   }
   const items = validateItems(input.items);
   const workloads = await loadWorkloads(gh, repo);
@@ -274,7 +274,7 @@ export async function recordXLink(
     (a, b) => a - b,
   );
   if (dropped.length > 0) {
-    throw new Error(
+    throw new Refusal(
       `the open conflicts-with between ${input.fromSlug} and ${input.toSlug} names ${dropped.map((n) => `#${n}`).join(', ')}, ` +
         `which this record drops — record the resolution first (FR-047: conflict:open clears only when the operator's ` +
         `resolution is recorded), then record the new conflict`,
@@ -328,13 +328,13 @@ export async function resolveXLink(
   input: { fromSlug: string; toSlug: string; type: XLinkType; resolution: string },
 ): Promise<XLink[]> {
   if (input.fromSlug === input.toSlug) {
-    throw new Error(`self-link refused: ${input.fromSlug} — a cross-workload link relates two DIFFERENT workloads (FR-047)`);
+    throw new Refusal(`self-link refused: ${input.fromSlug} — a cross-workload link relates two DIFFERENT workloads (FR-047)`);
   }
   const resolution = input.resolution.trim();
   if (resolution.length === 0) {
     // FR-047: "the resolution is recorded" — clearing the flags without saying why would
     // erase the operator's judgment from the audit trail (withdrawProposal's cause rule).
-    throw new Error('resolution refused: the resolution must be recorded (FR-047)');
+    throw new Refusal('resolution refused: the resolution must be recorded (FR-047)');
   }
   const workloads = await loadWorkloads(gh, repo);
   const from = requireEnd(workloads, input.fromSlug);
@@ -346,7 +346,7 @@ export async function resolveXLink(
   ];
   const writable = ends.filter((end) => end.workload.state !== 'archived');
   if (writable.length === 0) {
-    throw new Error(
+    throw new Refusal(
       `both ${input.fromSlug} and ${input.toSlug} are archived (locked read-only) — the resolution cannot be recorded on either timeline (FR-043)`,
     );
   }

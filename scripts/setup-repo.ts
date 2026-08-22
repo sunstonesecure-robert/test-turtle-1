@@ -1,7 +1,8 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, repoFromEnv, type RepoRef } from '../dashboard/lib/github/client';
 import { ALL_LABELS } from '../dashboard/lib/github/labels';
-import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET } from './gates/lib/readiness';
+import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET, EVIDENCE_RULESET } from './gates/lib/readiness';
+import { EVIDENCE_BRANCH, ensureEvidenceBranch } from '../dashboard/lib/github/evidence-store';
 import { runGates, printReport } from './gates/lib/runner';
 import { installOversightFiles } from './install';
 import { apiMessage, errorMessage, errorStatus } from '../dashboard/lib/github/errors';
@@ -91,7 +92,28 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         ],
       },
     },
+    {
+      name: EVIDENCE_RULESET,
+      payload: {
+        name: EVIDENCE_RULESET,
+        target: 'branch',
+        enforcement: 'active',
+        conditions: { ref_name: { include: [`refs/heads/${EVIDENCE_BRANCH}`], exclude: [] } },
+        // The same two rules the plan branches carry, for the same reason: an
+        // evidence batch is an append-only record, so its branch may only ever
+        // grow. No bypass actor — nobody has a reason to rewrite a record, and
+        // the records live here precisely BECAUSE the default branch's
+        // required-check rule refused every machine write (GHI #134).
+        rules: [{ type: 'non_fast_forward' }, { type: 'deletion' }],
+      },
+    },
   ];
+  const missingContentsScope = (error: unknown): never => {
+    throw new Error(
+      'the credential cannot write to this repository — creating the evidence record store needs a ' +
+        `token with "Contents: Read and write" (quickstart §0). API said: ${apiMessage(error)}`,
+    );
+  };
   const missingAdminScope = (error: unknown): never => {
     throw new Error(
       'the credential cannot administer this repository — init needs a token with ' +
@@ -99,6 +121,14 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         `init only). API said: ${apiMessage(error)}`,
     );
   };
+  // The evidence record store (GHI #134). Created BEFORE its ruleset so the
+  // protection lands on a branch that exists. Idempotent: an existing branch is
+  // left exactly as it is — this never touches a record.
+  const evidenceBranch = await ensureEvidenceBranch(gh, repo).catch((error: unknown) =>
+    errorStatus(error) === 403 ? missingContentsScope(error) : Promise.reject(error),
+  );
+  if (evidenceBranch.created) changed.push(`branch ${EVIDENCE_BRANCH} (the evidence record store)`);
+
   for (const { name, payload } of wanted) {
     if (!rulesetNames.has(name)) {
       try {

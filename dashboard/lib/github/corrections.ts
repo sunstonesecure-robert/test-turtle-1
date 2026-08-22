@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { getAndon } from './andon';
-import { errorMessage } from './errors';
+import { errorMessage, Refusal } from './errors';
 import { mergeRecheck } from './read-after-write';
 import {
   parseCorrectionMarker,
@@ -108,7 +108,7 @@ function toCorrection(issue: { number: number; body?: string | null; labels?: un
 export async function getCorrection(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<Correction> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const correction = toCorrection(issue);
-  if (!correction) throw new Error(`issue #${issueNumber} is not a correction (no correction:v1 marker or correction:* label)`);
+  if (!correction) throw new Refusal(`issue #${issueNumber} is not a correction (no correction:v1 marker or correction:* label)`);
   return correction;
 }
 
@@ -182,7 +182,7 @@ export async function sendCorrection(
   input: { andonIssue: number; itemId?: string; instruction: string; supersedes?: number },
 ): Promise<number> {
   const problems = instructionProblems(input.instruction);
-  if (problems.length > 0) throw new Error(`correction refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
+  if (problems.length > 0) throw new Refusal(`correction refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
 
   // An absent itemId is a BREAK-LEVEL correction: the request is about the proposal
   // as a whole, not one of its judgment items (US11 scope requests — GHI #73 option
@@ -191,7 +191,7 @@ export async function sendCorrection(
   const itemId = input.itemId ?? null;
   const andon = await getAndon(gh, repo, input.andonIssue);
   if (itemId !== null && !andon.items.some((i) => i.id === itemId)) {
-    throw new Error(`judgment item ${itemId} not found on Andon #${input.andonIssue}`);
+    throw new Refusal(`judgment item ${itemId} not found on Andon #${input.andonIssue}`);
   }
   const item = itemId === null ? undefined : andon.items.find((i) => i.id === itemId);
 
@@ -208,12 +208,12 @@ export async function sendCorrection(
     // issue, and only trust the hint when it confirms the withdrawal.
     const live = await getCorrection(gh, repo, open.issueNumber);
     if (live.state === 'open') {
-      throw new Error(
+      throw new Refusal(
         `correction #${open.issueNumber} is still open — supersedes may only name a correction that was just withdrawn`,
       );
     }
   } else if (open) {
-    throw new Error(
+    throw new Refusal(
       itemId === null
         ? `Andon #${input.andonIssue} already has an open break-level correction (#${open.issueNumber}) — revise or withdraw it before sending another`
         : `item ${itemId} already has an open correction (#${open.issueNumber}) — revise or withdraw it before sending another`,
@@ -323,7 +323,7 @@ export async function rejudgeItem(
   const itemId = input.itemId ?? null;
   const open = (await listOpenCorrections(gh, repo, input.andonIssue)).find((c) => c.itemId === itemId);
   if (!open) {
-    throw new Error(
+    throw new Refusal(
       itemId === null
         ? `no open break-level correction on Andon #${input.andonIssue} — nothing to re-judge`
         : `no open correction for item ${itemId} on Andon #${input.andonIssue} — use the plain ✓ judgment`,
@@ -332,7 +332,7 @@ export async function rejudgeItem(
 
   const andon = await getAndon(gh, repo, input.andonIssue);
   if (!(await revisionCites(gh, repo, andon.planRef, open.issueNumber))) {
-    throw new Error(
+    throw new Refusal(
       `re-judge refused: no revision commit on ${andon.planRef} cites correction #${open.issueNumber} ` +
         `(the agent must commit with "addresses: correction #${open.issueNumber}") — the item stays open (FR-004)`,
     );
@@ -360,11 +360,11 @@ export async function withdrawCorrection(
   issueNumber: number,
   input: { by: string; at: string; cause: string },
 ): Promise<void> {
-  if (input.cause.trim().length === 0) throw new Error('withdrawal refused: a cause must be recorded (data-model "Correction")');
+  if (input.cause.trim().length === 0) throw new Refusal('withdrawal refused: a cause must be recorded (data-model "Correction")');
   const correction = await getCorrection(gh, repo, issueNumber);
   if (correction.state === 'withdrawn') return;
   if (correction.state === 'addressed') {
-    throw new Error(`correction #${issueNumber} is already addressed — the round-trip is closed; it cannot be withdrawn`);
+    throw new Refusal(`correction #${issueNumber} is already addressed — the round-trip is closed; it cannot be withdrawn`);
   }
   await closeCorrection(gh, repo, issueNumber, 'withdrawn', input);
 }
@@ -389,14 +389,14 @@ export async function reviseCorrection(
 ): Promise<number> {
   const problems = instructionProblems(input.instruction);
   if (problems.length > 0) {
-    throw new Error(`revision refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
+    throw new Refusal(`revision refused — exactly one actionable instruction (FR-004): ${problems.join('; ')}`);
   }
   const correction = await getCorrection(gh, repo, correctionIssue);
   if (correction.state !== 'open') {
-    throw new Error(`correction #${correctionIssue} is ${correction.state} — only an open correction can be revised`);
+    throw new Refusal(`correction #${correctionIssue} is ${correction.state} — only an open correction can be revised`);
   }
   if (correction.itemId !== input.itemId) {
-    throw new Error(`correction #${correctionIssue} belongs to ${correction.itemId ?? 'the whole proposal'}, not ${input.itemId}`);
+    throw new Refusal(`correction #${correctionIssue} belongs to ${correction.itemId ?? 'the whole proposal'}, not ${input.itemId}`);
   }
   await withdrawCorrection(gh, repo, correctionIssue, {
     by: input.by,

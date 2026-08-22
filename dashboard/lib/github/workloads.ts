@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
-import { errorMessage, errorStatus } from './errors';
+import { errorMessage, errorStatus, Refusal } from './errors';
 import { mergeRecheck } from './read-after-write';
 import {
   parseWorkloadHeader,
@@ -115,9 +115,9 @@ export async function introduceWorkload(
   repo: RepoRef,
   input: { slug: string; title: string; actor: string; at: string },
 ): Promise<Workload> {
-  if (!SLUG_RE.test(input.slug)) throw new Error(`invalid workload slug: ${input.slug}`);
+  if (!SLUG_RE.test(input.slug)) throw new Refusal(`invalid workload slug: ${input.slug}`);
   const existing = await getWorkload(gh, repo, input.slug);
-  if (existing) throw new Error(`workload slug already exists: ${input.slug} (issue #${existing.issueNumber})`);
+  if (existing) throw new Refusal(`workload slug already exists: ${input.slug} (issue #${existing.issueNumber})`);
 
   const { data: issue } = await gh.issues.create({
     ...repo,
@@ -157,12 +157,12 @@ export async function applyLifecycleTransition(
     input.issueNumber !== undefined
       ? await getWorkloadByIssue(gh, repo, input.issueNumber)
       : await getWorkload(gh, repo, input.slug);
-  if (!workload || workload.slug !== input.slug) throw new Error(`workload not found: ${input.slug}`);
+  if (!workload || workload.slug !== input.slug) throw new Refusal(`workload not found: ${input.slug}`);
   const transition = WORKLOAD_TRANSITIONS[normalizeAction(input.action)];
-  if (!transition) throw new Error(`unknown lifecycle action: ${input.action}`);
+  if (!transition) throw new Refusal(`unknown lifecycle action: ${input.action}`);
 
   if (!workload.state || !transition.from.includes(workload.state)) {
-    throw new Error(`illegal transition ${workload.state} → ${transition.to} for ${input.slug}`);
+    throw new Refusal(`illegal transition ${workload.state} → ${transition.to} for ${input.slug}`);
   }
 
   await gh.issues.removeLabel({ ...repo, issue_number: workload.issueNumber, name: `workload:${workload.state}` });
@@ -315,7 +315,7 @@ export function routeWorkloadEdit(input: { field: string; reclassifyAsMetadataOn
   const classification = classifyWorkloadEdit(input.field);
   const override = input.reclassifyAsMetadataOnly === true;
   if (classification === 'scope' && override) {
-    throw new Error(
+    throw new Refusal(
       `refusing the metadata-only override for "${input.field}": FR-036 grants the operator's reclassification only where the classification is AMBIGUOUS, and "${input.field}" is scope- or intent-affecting. Re-submit without the override and the change routes through re-plan — a new plan version enters review and takes effect on a fresh approval (FR-008).`,
     );
   }
@@ -440,7 +440,7 @@ export async function applyWorkloadEdit(
 ): Promise<WorkloadEditResult> {
   const summary = input.summary.trim();
   if (summary.length === 0) {
-    throw new Error(
+    throw new Refusal(
       `refusing to edit workload "${input.slug}": state what is changing — the request is recorded in the workload's history (FR-037), and an unstated one records nothing (SC-013)`,
     );
   }
@@ -457,7 +457,7 @@ export async function applyWorkloadEdit(
   if (routing.route === 're-plan') {
     const problems = instructionProblems(summary);
     if (problems.length > 0) {
-      throw new Error(
+      throw new Refusal(
         `refusing to route this scope edit: its summary becomes the instruction the agent must address ` +
           `on the re-opened plan, so it must be exactly one actionable instruction (FR-004) — ${problems.join('; ')}`,
       );
@@ -468,22 +468,22 @@ export async function applyWorkloadEdit(
     input.issueNumber !== undefined
       ? await getWorkloadByIssue(gh, repo, input.issueNumber)
       : await getWorkload(gh, repo, input.slug);
-  if (!workload || workload.slug !== input.slug) throw new Error(`workload not found: ${input.slug}`);
+  if (!workload || workload.slug !== input.slug) throw new Refusal(`workload not found: ${input.slug}`);
 
   if (workload.state === null) {
-    throw new Error(
+    throw new Refusal(
       `refusing to edit workload "${input.slug}": its lifecycle state is unreadable — a workload issue must carry exactly one workload:* label (SC-011). Repair the labels on issue #${workload.issueNumber} first.`,
     );
   }
   if (!EDITABLE_WORKLOAD_STATES.includes(workload.state)) {
-    throw new Error(
+    throw new Refusal(
       `refusing to edit workload "${input.slug}": it is ${workload.state}, and an edit is an in-progress operation (US11) admitted only while ${EDITABLE_WORKLOAD_STATES.join(' or ')} — ${EDIT_REFUSAL_BY_STATE[workload.state] ?? 'no edit path exists from this state'}`,
     );
   }
 
   if (input.targetPlanRef !== undefined) {
     const frozen = await tagExists(gh, repo, input.targetPlanRef);
-    throw new Error(
+    throw new Refusal(
       frozen
         ? `refusing to modify ${input.targetPlanRef} directly: a frozen plan version is immutable (FR-007) — the plan/<slug>/v<N> tag IS the official version. Scope- or intent-affecting change goes through the open re-plan path (FR-036/FR-008): re-submit it as a scope edit of this workload and version N+1 enters review while N stays official until a fresh approval.`
         : `refusing to modify ${input.targetPlanRef} directly: a workload edit never writes a plan ref. That version is still under review — change it through its Andon break (a correction, then the agent's revision) or the scope-commitment editor on the review page (FR-009/FR-011).`,
@@ -500,7 +500,7 @@ export async function applyWorkloadEdit(
   if (routing.route === 'metadata') {
     if (input.field === 'title') {
       if (input.title === undefined || input.title.trim().length === 0) {
-        throw new Error(`refusing to edit workload "${input.slug}": field "title" needs the new title (a workload always has one — FR-031)`);
+        throw new Refusal(`refusing to edit workload "${input.slug}": field "title" needs the new title (a workload always has one — FR-031)`);
       }
       // Title-only PATCH: the body is not sent at all, so the workload:v1 header
       // cannot be disturbed by this path.
@@ -508,7 +508,7 @@ export async function applyWorkloadEdit(
       patched.title = input.title;
     } else if (input.field === 'description') {
       if (input.description === undefined) {
-        throw new Error(`refusing to edit workload "${input.slug}": field "description" needs the new description text`);
+        throw new Refusal(`refusing to edit workload "${input.slug}": field "description" needs the new description text`);
       }
       const body = await rewriteWorkloadDescription(gh, repo, workload.issueNumber, input.description);
       await gh.issues.update({ ...repo, issue_number: workload.issueNumber, body });
@@ -607,7 +607,7 @@ export async function applyWorkloadEdit(
         if (existing?.instruction.trim() === summary) {
           correctionIssue = existing.issueNumber;
         } else {
-          throw new Error(
+          throw new Refusal(
             `refusing this scope edit: Andon #${target} already carries an outstanding request ` +
               `(correction #${existing?.issueNumber ?? 'unknown'}: "${existing?.instruction ?? ''}") and only one may be ` +
               `open at a time, so this different request could not be made enforceable — address or withdraw that one ` +
@@ -687,7 +687,7 @@ async function rewriteWorkloadDescription(
 ): Promise<string> {
   const heading = description.split('\n').find((line) => HEADING_LINE_RE.test(line));
   if (heading !== undefined) {
-    throw new Error(
+    throw new Refusal(
       `refusing this description edit: it contains a markdown heading line ("${heading.trim()}"). A workload body's headings are structured contract sections — \`### Context\` designates the agent's input material (FR-053) — so a heading inside the description could not be told apart from one of those on the next read. Re-submit the description as prose.`,
     );
   }
@@ -709,7 +709,7 @@ async function rewriteWorkloadDescription(
     // text (both writers emit it alone). Refused rather than repaired: this seam
     // must not be the thing that decides what a workload's identity line looks
     // like, and repairing it would mean guessing which side is the description.
-    throw new Error(
+    throw new Refusal(
       `refusing to rewrite the body of issue #${issueNumber}: its workload:v1 header is not on a line of its own, so the rewrite could not preserve it byte-exact — and a body that loses the header orphans the workload from listWorkloads, the lifecycle gate and the portfolio. Put the header on its own line first.`,
     );
   }

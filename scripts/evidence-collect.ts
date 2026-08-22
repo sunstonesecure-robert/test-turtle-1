@@ -5,9 +5,14 @@ import { errorMessage } from '../dashboard/lib/github/errors';
 
 /**
  * evidence-collect CLI — invoked by the evidence-collect workflow (FR-021).
- * Records the dated batch shell (committed JSON + evidence:batch issue); the
- * operator reviews and marks contradictions on the dashboard. The date comes
- * from the runner's clock at collection time — that IS the interval record.
+ * Records the batch shell (committed JSON + evidence:batch issue); the operator
+ * reviews and marks contradictions on the dashboard. The date comes from the
+ * runner's clock at collection time — that IS the interval record.
+ *
+ * A batch is keyed by (date, source) since GHI #136, so a second run on one date
+ * from the SAME source appends to that record and a run from a different source
+ * opens its own. The record is committed to the `evidence` branch — the default
+ * branch refused every write this CLI ever attempted (GHI #134).
  */
 
 const KINDS: EvidenceKind[] = ['feedback', 'analytics', 'test-results'];
@@ -47,13 +52,20 @@ async function main(): Promise<void> {
     }
     items = parsed as EvidenceItem[];
   }
-  const { issueNumber, path } = await recordEvidenceBatch(createClient(), { owner, repo: repoName }, {
+  const recorded = await recordEvidenceBatch(createClient(), { owner, repo: repoName }, {
     date,
     source,
     kind,
     items,
   });
-  console.log(`evidence batch ${date}: ${path} · issue #${issueNumber} · ${items.length} item(s)`);
+  // Say which of the two happened: a run that appended to an existing record and
+  // a run that opened one are different facts about the interval, and the run log
+  // is the only place either is visible.
+  console.log(
+    recorded.created
+      ? `evidence batch ${date} (${source}) recorded: ${recorded.path} · issue #${recorded.issueNumber} · ${recorded.appended} item(s)`
+      : `evidence batch ${date} (${source}) already existed: appended ${recorded.appended} item(s) to ${recorded.path} · issue #${recorded.issueNumber}`,
+  );
 }
 
 main().catch((error) => {
