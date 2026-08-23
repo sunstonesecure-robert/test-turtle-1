@@ -1,0 +1,70 @@
+{
+  "feature": "demo7",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "32653065213",
+  "andon_issue": 42,
+  "steps": [
+    {
+      "id": "step-current-time",
+      "title": "Show the current time on the home page as an ISO 8601 string",
+      "intent": "On the home page, determine the current time and render it as a human-readable ISO 8601 date-time string in the operator's local timezone, current as of the moment it is shown.",
+      "acceptance": "The home page renders a non-empty ISO 8601 date-time string in the operator's local timezone whose value matches the operator's browser current time within 3 seconds; it is never empty, never a UNIX epoch or other non-ISO format, and never in the future or more than 3 seconds stale at the moment observed.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "ISO 8601 local-time representation with UTC offset at second precision, e.g. \"2026-08-23T16:50:09+01:00\" (no milliseconds); local timezone resolved from the browser per runbooks/domain-expert/common.md (\"Timestamps display in the operator's local timezone\") and issue #40. Pending q-iso-format and q-refresh.",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "tracking_issue": 40
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-not-empty",
+      "kind": "expected-output",
+      "check": "The rendered time string is non-empty.",
+      "maps_to": [
+        "step-current-time"
+      ]
+    },
+    {
+      "id": "vt-iso-format",
+      "kind": "expected-output",
+      "check": "The rendered string parses as a valid ISO 8601 date-time and is not a UNIX epoch integer or other non-ISO format.",
+      "maps_to": [
+        "step-current-time"
+      ]
+    },
+    {
+      "id": "vt-matches-browser",
+      "kind": "expected-output",
+      "check": "The parsed rendered time equals the operator's browser current time within a 3-second tolerance and is not in the future.",
+      "maps_to": [
+        "step-current-time"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-empty-source",
+      "description": "If the time source yields no value, the view must not render an empty string; it refuses with a setup hint instead.",
+      "step_id": "step-current-time"
+    },
+    {
+      "id": "bc-stale-render",
+      "description": "If the displayed value would be more than 3 seconds behind actual wall-clock at the moment observed, it is refreshed/re-rendered rather than shown stale (behavior depends on q-refresh).",
+      "step_id": "step-current-time"
+    },
+    {
+      "id": "bc-invalid-clock",
+      "description": "If the system/browser clock is unavailable or returns an invalid or future value, the view refuses with a hint rather than showing an invalid value or UNIX epoch.",
+      "step_id": "step-current-time"
+    },
+    {
+      "id": "bc-midnight-rollover",
+      "description": "At the day boundary the ISO date portion rolls over correctly (23:59:59 advances to the next day 00:00:00) in the local timezone.",
+      "step_id": "step-current-time"
+    }
+  ]
+}
