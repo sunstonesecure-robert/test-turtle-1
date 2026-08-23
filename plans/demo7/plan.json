@@ -8,11 +8,11 @@
     {
       "id": "step-current-time",
       "title": "Show the current time on the home page as an ISO 8601 string",
-      "intent": "On the home page, determine the current time and render it as a human-readable ISO 8601 date-time string in the operator's local timezone, current as of the moment it is shown.",
-      "acceptance": "The home page renders a non-empty ISO 8601 date-time string in the operator's local timezone whose value matches the operator's browser current time within 3 seconds; it is never empty, never a UNIX epoch or other non-ISO format, and never in the future or more than 3 seconds stale at the moment observed.",
+      "intent": "On the home page, determine the current time and render it as a human-readable ISO 8601 date-time string in the operator's local timezone, current as of the moment the page is rendered.",
+      "acceptance": "On page render the home page captures the current time once and renders it as a non-empty ISO 8601 date-time string in the operator's local timezone whose value matches the operator's browser current time within 3 seconds, evaluated only at render time; the displayed timestamp is not required to tick or update live. It is never a UNIX epoch or other non-ISO format and never in the future. If the clock is unavailable or yields no value or an invalid value, the page shows a generic error message (e.g. \"Error processing request\") rather than an empty string, a refusal, or a setup hint.",
       "priority": "MUST",
       "evidence_tag": "assumption",
-      "stand_in": "ISO 8601 local-time representation with UTC offset at second precision, e.g. \"2026-08-23T16:50:09+01:00\" (no milliseconds); local timezone resolved from the browser per runbooks/domain-expert/common.md (\"Timestamps display in the operator's local timezone\") and issue #40. Pending q-iso-format and q-refresh.",
+      "stand_in": "ISO 8601 local-time representation with UTC offset at second precision, e.g. \"2026-08-23T16:50:09+01:00\" (no milliseconds), confirmed by the operator's answer to q-iso-format; local timezone resolved from the browser per runbooks/domain-expert/common.md (\"Timestamps display in the operator's local timezone\") and issue #40. Per the operator's answer to q-refresh, the timestamp is captured once at render and the 3-second window is evaluated only at render time (no live ticking).",
       "high_stakes": false,
       "authority": null,
       "depends_on": [],
@@ -39,7 +39,7 @@
     {
       "id": "vt-matches-browser",
       "kind": "expected-output",
-      "check": "The parsed rendered time equals the operator's browser current time within a 3-second tolerance and is not in the future.",
+      "check": "The parsed rendered time equals the operator's browser current time within a 3-second tolerance at render time and is not in the future.",
       "maps_to": [
         "step-current-time"
       ]
@@ -48,17 +48,12 @@
   "boundary_cases": [
     {
       "id": "bc-empty-source",
-      "description": "If the time source yields no value, the view must not render an empty string; it refuses with a setup hint instead.",
-      "step_id": "step-current-time"
-    },
-    {
-      "id": "bc-stale-render",
-      "description": "If the displayed value would be more than 3 seconds behind actual wall-clock at the moment observed, it is refreshed/re-rendered rather than shown stale (behavior depends on q-refresh).",
+      "description": "If the time source yields no value, the view must not render an empty string; it shows a generic error message (e.g. \"Error processing request\") instead, not a refusal or a setup hint.",
       "step_id": "step-current-time"
     },
     {
       "id": "bc-invalid-clock",
-      "description": "If the system/browser clock is unavailable or returns an invalid or future value, the view refuses with a hint rather than showing an invalid value or UNIX epoch.",
+      "description": "If the system/browser clock is unavailable or returns an invalid or future value, the view shows a generic error message rather than a refusal, a hint, an invalid value, or a UNIX epoch.",
       "step_id": "step-current-time"
     },
     {
