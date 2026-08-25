@@ -7,6 +7,14 @@ import { runGates, printReport } from './gates/lib/runner';
 import { installOversightFiles } from './install';
 import { apiMessage, errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 
+/** The slice of a GitHub ruleset `init` actually asserts. Not the whole payload:
+ *  GitHub adds fields of its own to a stored ruleset, so comparing everything
+ *  compares its formatting rather than our intent. */
+interface RulesetShape {
+  rules?: { type: string; parameters?: { required_status_checks?: { context: string }[] } }[];
+  bypass_actors?: { actor_id: number; actor_type: string; bypass_mode: string }[];
+}
+
 /**
  * Day-1 `init` (T017/T126, FR-028/FR-030): reconcile the repository to the
  * desired oversight state — idempotent, reports `already_initialized` when a
@@ -181,10 +189,32 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         ...repo,
         ruleset_id: existing.id,
       });
-      const current = full as { rules?: unknown; bypass_actors?: unknown };
-      const same =
-        JSON.stringify(current.rules ?? []) === JSON.stringify(payload.rules ?? []) &&
-        JSON.stringify(current.bypass_actors ?? []) === JSON.stringify(payload.bypass_actors ?? []);
+      // COMPARED ON SEMANTICS, NOT ON THE PAYLOAD BYTES (found live, 2026-08-25).
+      //
+      // A deep JSON compare against what we sent is always unequal: GitHub
+      // normalizes a ruleset it stores and adds fields of its own — a
+      // required_status_checks rule comes back carrying
+      // `do_not_enforce_on_create: false`, which we never sent. So `init` reported
+      // "rules reconciled" on every single re-run and issued a pointless PUT,
+      // breaking the one property FR-030 promises: a no-op re-run says
+      // `already_initialized` and changes nothing.
+      //
+      // What we actually assert is narrower than the payload anyway: that the same
+      // rule TYPES are present, that the required-check contexts are exactly the set
+      // we demand, and that the bypass actors match. Comparing that is comparing the
+      // thing we care about; comparing the JSON was comparing GitHub's formatting.
+      const semantics = (r: RulesetShape): string => {
+        const types = (r.rules ?? []).map((rule) => rule.type).sort();
+        const contexts = (r.rules ?? [])
+          .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+          .map((c) => c.context)
+          .sort();
+        const bypass = (r.bypass_actors ?? [])
+          .map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`)
+          .sort();
+        return JSON.stringify({ types, contexts, bypass });
+      };
+      const same = semantics(full as RulesetShape) === semantics(payload as RulesetShape);
       if (!same) {
         await gh.request('PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
           ...repo,
