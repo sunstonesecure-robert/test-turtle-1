@@ -77,8 +77,95 @@ export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, pla
   return { plan: planLabel, result: report.result, gates: report.gates };
 }
 
+/** The check-run name IS the required-check context. */
+export const PLAN_CHECK_NAME = 'plan-gate';
+
+/**
+ * Record `plan-gate` as NOT APPLICABLE on every open pull request that carries no
+ * plan document (T240 follow-on, found live 2026-08-25).
+ *
+ * WHY THIS EXISTS, because it looks like a workaround and is not quite one.
+ *
+ * `plan-gate` is a required status check on the default branch, and its
+ * `pull_request` job skips itself on any head that is not `plan/**` — which
+ * produces a `skipped` check run, which satisfies the rule. That has worked since
+ * 2026-07-02 and still does, for pull requests a HUMAN opens.
+ *
+ * A DELIVERABLE pull request is opened by `build-publish` using `GITHUB_TOKEN`, and
+ * GitHub deliberately emits no workflow events for actions taken with that token. So
+ * `plan-gate.yml` never runs at all — not even to skip — and the head commit carries
+ * no `plan-gate` check run of any kind. The required check is then unsatisfiable and
+ * the deliverable is permanently unmergeable. Live: PR #54's merge was refused with
+ * *"Required status check plan-gate is expected"* while `deliverable-gate` sat green
+ * beside it.
+ *
+ * THE ALTERNATIVE WAS WORSE. `deliverable-gate`'s sweep could have written the
+ * `plan-gate` context while it was there — one fewer moving part. It is refused on
+ * purpose: a required check that can be satisfied by a DIFFERENT gate is not a
+ * required check any more, and the next person to read a green `plan-gate` would have
+ * no way to know which code produced it. Each gate writes its own context, or the
+ * contexts mean nothing.
+ *
+ * `skipped`, not `success`: this pull request was not gated, and saying it passed
+ * would be the absent-≠-success lie in the one place it would be hardest to notice
+ * (GHI #108). The summary says which pull request it was and why the gate does not
+ * apply.
+ */
+export async function sweepNonPlanPrs(gh: Octokit, repo: RepoRef): Promise<{ prNumber: number; wrote: boolean }[]> {
+  const open = await gh.paginate(gh.pulls.list, { ...repo, state: 'open', per_page: 100 });
+  const out: { prNumber: number; wrote: boolean }[] = [];
+  for (const pr of open) {
+    // An approval PR gates for real, through the pull_request job. Never touch one.
+    if (pr.head.ref.startsWith('plan/')) continue;
+    const { data: existing } = await gh.checks.listForRef({ ...repo, ref: pr.head.sha, check_name: PLAN_CHECK_NAME, per_page: 1 });
+    if (existing.total_count > 0) {
+      out.push({ prNumber: pr.number, wrote: false });
+      continue;
+    }
+    await gh.checks.create({
+      ...repo,
+      name: PLAN_CHECK_NAME,
+      head_sha: pr.head.sha,
+      status: 'completed',
+      conclusion: 'skipped',
+      output: {
+        title: 'not an approval pull request — no plan document to gate',
+        summary:
+          `Pull request #${pr.number} has head \`${pr.head.ref}\`, which is not a \`plan/<slug>/v<N>\` approval ` +
+          'branch, so it carries no plan document and there is nothing for G1-G16 to read.\n\n' +
+          'Recorded as `skipped` rather than `success` deliberately: this pull request was not gated, and a green ' +
+          '`plan-gate` here would claim it was. Whatever governs this pull request is its own required check — for a ' +
+          '`build/**` deliverable that is `deliverable-gate` (D1–D5).',
+      },
+    });
+    out.push({ prNumber: pr.number, wrote: true });
+  }
+  return out;
+}
+
 const isMain = process.argv[1]?.endsWith('plan-gate.ts');
-if (isMain) {
+if (isMain && process.argv.includes('--sweep-non-plan')) {
+  const argv = process.argv.slice(2);
+  const repoArg = argv[argv.indexOf('--repo') + 1] ?? '';
+  const [owner, repoName] = repoArg.split('/');
+  if (!owner || !repoName) {
+    console.error('usage: plan-gate --sweep-non-plan --repo <owner/repo>');
+    process.exit(2);
+  }
+  void sweepNonPlanPrs(createClient(), { owner, repo: repoName })
+    .then((results) => {
+      const wrote = results.filter((r) => r.wrote);
+      console.log(
+        wrote.length === 0
+          ? `no non-plan pull request needed a plan-gate verdict (${results.length} checked)`
+          : `recorded plan-gate=skipped on PR(s) ${wrote.map((r) => `#${r.prNumber}`).join(', ')}`,
+      );
+    })
+    .catch((error: unknown) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    });
+} else if (isMain) {
   void cliMain(async (args) => {
     const planPath = args.get('plan');
     const repoArg = args.get('repo');

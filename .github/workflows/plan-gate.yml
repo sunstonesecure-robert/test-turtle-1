@@ -4,23 +4,69 @@
 # go-ahead (merge) physically impossible (FR-005/FR-012). Exit codes: 0 green ·
 # 1 gate failure · 2 usage/IO · 3 API unavailable (fails closed and reruns).
 # cost ceiling: $0 per run (constitution: Cost & Observability)
+#
+# TWO TRIGGERS, and the second exists because of a platform fact (found live,
+# 2026-08-25). The `pull_request` job skips itself on a non-`plan/**` head, which
+# produces a `skipped` check run and satisfies the required-check rule — that has
+# worked since 2026-07-02 for pull requests a HUMAN opens. A DELIVERABLE pull request
+# is opened by `build-publish` using GITHUB_TOKEN, and GitHub emits no workflow events
+# for actions taken with that token, so this workflow never ran at all — not even to
+# skip — and the head carried no `plan-gate` check run of any kind. PR #54's merge was
+# refused with "Required status check plan-gate is expected" while deliverable-gate sat
+# green beside it: permanently unmergeable.
+#
+# So the `workflow_run` job below records `plan-gate` = **skipped** on any open pull
+# request with no plan document and no verdict yet. `skipped`, never `success`: that
+# pull request was not gated, and a green plan-gate would claim it was.
+#
+# WHY NOT LET deliverable-gate WRITE THIS CONTEXT while it is already sweeping? Because
+# a required check satisfiable by a DIFFERENT gate is not a required check any more,
+# and a reader of a green `plan-gate` would have no way to know which code produced it.
+# Each gate writes its own context.
 name: plan-gate
-on:
+# `workflow_run` is flagged by zizmor as a dangerous trigger. Accepted: the sweep job
+# reads open pull requests and writes one check run saying this gate does not apply.
+# It reads no artifact, judges no agent output, and merges nothing.
+on: # zizmor: ignore[dangerous-triggers]
   pull_request:
     branches: [main]
+  workflow_run:
+    workflows: ["build-publish"]
+    types: [completed]
 permissions:
   contents: read
   issues: read # G7/G11 read the Andon break's corrections and answers to judge the plan
   checks: write # the plan-gate check run this workflow reports — its only write
 concurrency:
-  group: plan-gate-${{ github.event.pull_request.number }}
+  # Keyed per pull request on the event path; one shared sweep otherwise, so two
+  # build-publish completions cannot race to write the same check run.
+  group: plan-gate-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'sweep' }}
   cancel-in-progress: true
 jobs:
+  # Deliberately NOT named `plan-gate`: this job WRITES a check run of that name
+  # rather than being one, and two things answering to one context is how a required
+  # check comes to be satisfied by the wrong run.
+  sweep-non-plan:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: record plan-gate=skipped on pull requests that carry no plan document
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx tsx scripts/gates/plan-gate.ts --sweep-non-plan --repo "$GITHUB_REPOSITORY"
   plan-gate:
     # Only approval PRs from plan/** branches carry a plan document to gate. Every
     # other PR reports "skipped", which satisfies the required-check rule — a plain
     # skip, never a fail, so ordinary development PRs are not blocked.
-    if: startsWith(github.event.pull_request.head.ref, 'plan/')
+    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'plan/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
