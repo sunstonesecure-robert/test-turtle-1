@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Current time</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 1.5rem;
+      box-sizing: border-box;
+      text-align: center;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 1rem;
+    }
+    #time {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: clamp(1.25rem, 5vw, 2.5rem);
+      font-variant-numeric: tabular-nums;
+      word-break: break-all;
+    }
+    .error { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>Current time</h1>
+  <p id="time" role="status" aria-live="polite">Reading the clock&hellip;</p>
+  <script>
+    // Capture a single timestamp from the browser clock at page render (no live
+    // ticking). Reloading re-runs this and re-reads the clock, so crossing the
+    // local midnight boundary yields the correct next-day date.
+    (function () {
+      var el = document.getElementById('time');
+
+      function pad(n) {
+        return String(n).padStart(2, '0');
+      }
+
+      // Format a Date as an ISO 8601 date-time in the viewer's local timezone,
+      // including the UTC offset at second precision, e.g. 2026-08-25T11:30:00-04:00.
+      function toLocalIso(d) {
+        var offsetMinutes = -d.getTimezoneOffset();
+        var sign = offsetMinutes >= 0 ? '+' : '-';
+        var abs = Math.abs(offsetMinutes);
+        var offset = sign + pad(Math.floor(abs / 60)) + ':' + pad(abs % 60);
+        return d.getFullYear() +
+          '-' + pad(d.getMonth() + 1) +
+          '-' + pad(d.getDate()) +
+          'T' + pad(d.getHours()) +
+          ':' + pad(d.getMinutes()) +
+          ':' + pad(d.getSeconds()) +
+          offset;
+      }
+
+      try {
+        var now = new Date();
+        // Guard against an unavailable or invalid clock: never render an empty
+        // string, a UNIX epoch, or a non-ISO value.
+        if (!(now instanceof Date) || isNaN(now.getTime())) {
+          throw new Error('invalid clock');
+        }
+        el.textContent = toLocalIso(now);
+      } catch (e) {
+        el.textContent = 'The current time is unavailable on this device.';
+        el.classList.add('error');
+      }
+    })();
+  </script>
+</body>
+</html>
