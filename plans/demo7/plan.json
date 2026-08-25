@@ -1,65 +1,80 @@
 {
   "feature": "demo7",
-  "version": 1,
-  "supersedes": null,
-  "run_id": "32653065213",
-  "andon_issue": 42,
+  "version": 2,
+  "supersedes": 1,
+  "run_id": "32864711174",
+  "andon_issue": 51,
   "steps": [
     {
-      "id": "step-current-time",
-      "title": "Show the current time on the home page as an ISO 8601 string",
-      "intent": "On the home page, determine the current time and render it as a human-readable ISO 8601 date-time string in the operator's local timezone, current as of the moment the page is rendered.",
-      "acceptance": "On page render the home page captures the current time once and renders it as a non-empty ISO 8601 date-time string in the operator's local timezone whose value matches the operator's browser current time within 3 seconds, evaluated only at render time; the displayed timestamp is not required to tick or update live. It is never a UNIX epoch or other non-ISO format and never in the future. If the clock is unavailable or yields no value or an invalid value, the page shows a generic error message (e.g. \"Error processing request\") rather than an empty string, a refusal, or a setup hint.",
+      "id": "step-clock-page",
+      "title": "Publish a standalone clock page at docs/index.html",
+      "intent": "Create a single self-contained static HTML page at docs/index.html that, when opened in a browser, computes the current time from the browser clock and renders it as an ISO 8601 date-time string under the exact heading \"Current time\". It is served as-is by GitHub Pages (main / docs) with no build step, bundler, or workflow. This is the operator's own product page, not the oversight dashboard or any installed machinery.",
+      "acceptance": "docs/index.html exists, starts with an HTML5 doctype, and contains the exact heading text \"Current time\". When loaded in a browser it computes the current time client-side from the system clock (not a hardcoded value) and renders it as a valid ISO 8601 date-time string that matches the viewer's clock at render time — never empty, a UNIX epoch, or a non-ISO format, and never in the future. The page is a single standalone file needing no build step, bundler, or workflow to serve, and nothing is written outside docs/.",
       "priority": "MUST",
       "evidence_tag": "assumption",
-      "stand_in": "ISO 8601 local-time representation with UTC offset at second precision, e.g. \"2026-08-23T16:50:09+01:00\" (no milliseconds), confirmed by the operator's answer to q-iso-format; local timezone resolved from the browser per runbooks/domain-expert/common.md (\"Timestamps display in the operator's local timezone\") and issue #40. Per the operator's answer to q-refresh, the timestamp is captured once at render and the 3-second window is evaluated only at render time (no live ticking).",
+      "stand_in": "ISO 8601 rendered from the browser Date API and displayed in the operator's local timezone with UTC offset at second precision (e.g. \"2026-08-25T11:30:00-04:00\"), grounded in runbooks/domain-expert/common.md (\"Timestamps display in the operator's local timezone\") and pending the operator's answer to q-iso-format (the alternative is UTC 'Z' via toISOString(), e.g. \"2026-08-25T15:30:00Z\"). A single timestamp is captured once at page render (no live ticking), which satisfies #40's \"at render time\" acceptance.",
       "high_stakes": false,
       "authority": null,
       "depends_on": [],
+      "scope": [
+        "docs/index.html"
+      ],
       "tracking_issue": 40
     }
   ],
   "verification_targets": [
     {
-      "id": "vt-not-empty",
+      "id": "vt-doctype",
       "kind": "expected-output",
-      "check": "The rendered time string is non-empty.",
+      "check": "docs/index.html exists and its first line is an HTML5 doctype (<!DOCTYPE html>, case-insensitive).",
+      "run": "test -f docs/index.html && head -n1 docs/index.html | grep -iqE '^[[:space:]]*<!doctype html>'",
       "maps_to": [
-        "step-current-time"
+        "step-clock-page"
       ]
     },
     {
-      "id": "vt-iso-format",
-      "kind": "expected-output",
-      "check": "The rendered string parses as a valid ISO 8601 date-time and is not a UNIX epoch integer or other non-ISO format.",
+      "id": "vt-heading",
+      "kind": "exact-copy",
+      "check": "docs/index.html contains the exact heading text \"Current time\".",
+      "run": "grep -qF 'Current time' docs/index.html",
       "maps_to": [
-        "step-current-time"
+        "step-clock-page"
       ]
     },
     {
-      "id": "vt-matches-browser",
+      "id": "vt-browser-clock",
       "kind": "expected-output",
-      "check": "The parsed rendered time equals the operator's browser current time within a 3-second tolerance at render time and is not in the future.",
+      "check": "The page computes the timestamp client-side from the browser clock (uses the JavaScript Date API at load) rather than embedding a fixed literal, guaranteeing the rendered value matches the viewer's clock at render time and is never a hardcoded UNIX epoch. The ISO 8601 shape of the rendered string is confirmed on render per q-iso-format.",
+      "run": "grep -q 'new Date' docs/index.html",
       "maps_to": [
-        "step-current-time"
+        "step-clock-page"
+      ]
+    },
+    {
+      "id": "vt-standalone",
+      "kind": "expected-output",
+      "check": "The page is a single self-contained file: docs/index.html embeds its clock logic inline in a <script> block, so GitHub Pages on main/docs serves it with no build step or bundler.",
+      "run": "test -f docs/index.html && grep -q '<script' docs/index.html",
+      "maps_to": [
+        "step-clock-page"
       ]
     }
   ],
   "boundary_cases": [
     {
-      "id": "bc-empty-source",
-      "description": "If the time source yields no value, the view must not render an empty string; it shows a generic error message (e.g. \"Error processing request\") instead, not a refusal or a setup hint.",
-      "step_id": "step-current-time"
-    },
-    {
       "id": "bc-invalid-clock",
-      "description": "If the system/browser clock is unavailable or returns an invalid or future value, the view shows a generic error message rather than a refusal, a hint, an invalid value, or a UNIX epoch.",
-      "step_id": "step-current-time"
+      "description": "If the browser Date API is unavailable or yields an invalid value, the page must not render an empty string, a UNIX epoch, or a non-ISO value; it shows a fallback message instead.",
+      "step_id": "step-clock-page"
     },
     {
-      "id": "bc-midnight-rollover",
-      "description": "At the day boundary the ISO date portion rolls over correctly (23:59:59 advances to the next day 00:00:00) in the local timezone.",
-      "step_id": "step-current-time"
+      "id": "bc-reload-midnight",
+      "description": "The timestamp is captured per page load; reloading across the local midnight boundary yields the correct next-day ISO date (no stale date carried over).",
+      "step_id": "step-clock-page"
+    },
+    {
+      "id": "bc-no-build",
+      "description": "Opened directly via GitHub Pages (main / docs) with no build step, bundler, or server-side rendering, the page still computes and displays the timestamp entirely client-side.",
+      "step_id": "step-clock-page"
     }
   ]
 }
