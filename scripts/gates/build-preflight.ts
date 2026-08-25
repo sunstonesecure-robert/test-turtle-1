@@ -19,8 +19,10 @@ import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
 /**
  * build-preflight (T040 + T140 + T107) — step 1 of every dispatched build workflow.
  * A non-zero exit fails the run before any agent step executes.
- * Set: B1, B2, B5, B7, B8 always; B3/B6 when the build names a chunk, B4 when it is
- * also unattended; B9 only on a VERIFY run, which carries --verify-commit (FR-063).
+ * Set: B1, B2, B7 always; B5/B8 on a BUILD run only; B3/B6 when the build names a
+ * chunk, B4 when it is also unattended; B9 on a VERIFY run only, which is the run that
+ * carries --verify-commit (FR-063). A verify run skips B5 and B8 with their reasons:
+ * both are questions about a build, and B9 is B8's analogue for a verification.
  *
  * The plan-ref → slug parse lives in plans.ts beside `planBranch` that builds it: this
  * gate and the portfolio view must agree on which workload a ref names.
@@ -91,6 +93,27 @@ export async function buildPreflight(
   // legible; anything the catalogue declares and the code cannot run is `absent`,
   // and `absent` fails the report.
   const noChunk = () => (input.chunk === undefined ? 'no --chunk: this build names no work item' : null);
+  // A VERIFY RUN IS NOT A BUILD, and two gates in this family are about a build
+  // specifically (found live, 2026-08-25 — both failed a legitimate verify run):
+  //
+  //   B5 asks whether every high-stakes step this BUILD covers carries its external
+  //      confirmation. On a verify run there is no build: the deliverable has already
+  //      been produced, gated (D3 owns that question on the delivery path) and merged.
+  //      Re-asking it here can only block verification of work that was already
+  //      correctly authorized.
+  //   B8 asks whether the run was DISPATCHED ON the frozen tag. A verify run runs on
+  //      the default branch by design — that is where the merged deliverable is — so
+  //      B8 would refuse every verify run that ever happens. **B9 is its analogue**:
+  //      the same "are you looking at approved code?" question, asked about the commit
+  //      being judged rather than the ref being built from.
+  //
+  // Skipped WITH THE REASON rather than dropped, because a report that simply omitted
+  // them would be shaped like a report where they passed (GHI #108).
+  const verifyRun = () =>
+    input.verifyCommit !== undefined
+      ? 'this is a VERIFY run, not a build: the deliverable was already produced, gated and merged, and this run only ' +
+        'judges the merged commit — B9 is the gate that asks whether that commit descends from the approved plan'
+      : null;
   const report = await runGateCatalogue(input.planRef, PREFLIGHT_CATALOGUE, [
     { id: 'B1', run: () => checkB1FrozenCurrent(gh, repo, input.planRef, input.workload) },
     { id: 'B2', run: () => checkB2PlanRevalidates(gh, repo, input.planRef) },
@@ -109,13 +132,13 @@ export async function buildPreflight(
     },
     // B5 runs on every build, chunked or not: a high-stakes step is gated by the
     // plan that flagged it, not by whether this build happens to name a chunk.
-    { id: 'B5', run: () => checkB5ConfirmationRecorded(gh, repo, input.planRef, steps) },
+    { id: 'B5', skip: verifyRun, run: () => checkB5ConfirmationRecorded(gh, repo, input.planRef, steps) },
     { id: 'B6', skip: noChunk, run: () => checkB6NotFlagged(gh, repo, input.chunk!) },
     { id: 'B7', run: () => checkB7WorkloadActive(gh, repo, input.workload) },
     // B8 is pure and reads no API, so it runs last and costs nothing — but its
     // failure is the most structural of the set: the run is building the wrong
     // worktree entirely (GHI #72 option A).
-    { id: 'B8', run: () => checkB8DispatchedOnFrozenRef(input.planRef, input.githubRef) },
+    { id: 'B8', skip: verifyRun, run: () => checkB8DispatchedOnFrozenRef(input.planRef, input.githubRef) },
     // B9 applies to VERIFY runs, which judge a merged commit. A build run has none
     // yet — and saying so by name is the point: a report that simply omitted B9 on
     // builds would be shaped like a report where it passed (GHI #108).

@@ -63,6 +63,10 @@ permissions:
   contents: read # read the frozen plan; the merged tree comes from the checkout
   pull-requests: read # find the deliverable pull request behind the commit
   checks: read # "has this merge been verified yet?" — asked of the check runs themselves
+  issues: read # preflight B7 reads the workload's lifecycle label off its ISSUE — omitted
+  #   at first, and the whole verify run failed with "workload not found: demo7"
+  #   (found live, 2026-08-25). A missing read scope reads exactly like a missing
+  #   workload, which is why the gate's own message could not point at the cause.
 concurrency:
   group: build-verify-${{ github.event_name }}-${{ github.sha }}
 jobs:
