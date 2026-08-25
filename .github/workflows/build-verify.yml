@@ -47,6 +47,18 @@ on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: ["build-merge"]
     types: [completed]
+  # RE-VERIFY ON DEMAND. Third entry point, and a real operator need rather than a
+  # test hook: verification is the one step whose result can go stale for reasons
+  # outside the deliverable (a flaky target, a runner outage, a target fixed by a plan
+  # re-open). It also covers the gap `workflow_run` cannot: GitHub emits no new
+  # workflow_run event when a workflow is RE-RUN, so a lost verify run could otherwise
+  # only be recovered by pushing something (found live, 2026-08-25).
+  #
+  # It takes no inputs on purpose. The subject is whatever the sweep finds — the
+  # newest merged deliverable with no `vt-*` check run — so an operator cannot
+  # accidentally point verification at a commit the approved plan never led to. B9
+  # would refuse that anyway; not offering the option is better than refusing it.
+  workflow_dispatch:
 permissions:
   contents: read # read the frozen plan; the merged tree comes from the checkout
   pull-requests: read # find the deliverable pull request behind the commit
@@ -55,7 +67,7 @@ concurrency:
   group: build-verify-${{ github.event_name }}-${{ github.sha }}
 jobs:
   verify:
-    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
