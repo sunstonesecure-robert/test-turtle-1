@@ -6,14 +6,18 @@
 # could produce anything else — so `vt-*` check runs described a commit that never
 # contained the work, and a completion could be earned on a lie (GHI #141).
 #
-# TRIGGERED BY A PUSH TO THE DEFAULT BRANCH, DELIBERATELY. The run's own `head_sha` is
-# then the merged commit, which is exactly what `vt-report` binds against and what the
-# check runs must land on — no artifact has to carry it and nothing has to be trusted
-# to report it correctly. Most pushes are not deliverable merges: the resolver asks the
-# pull request the commit closed for its `deliverable:v1` marker and exits reporting
-# NOTHING when there is none. It also means an OPERATOR'S OWN merge of an
-# operator-required deliverable triggers verification exactly like the pre-authorized
-# path does.
+# TWO TRIGGERS, and the second is the one the default path needs (found live,
+# 2026-08-25):
+#   push          a HUMAN merged the deliverable — the operator-checkpoint path. The
+#                 pushed commit is the subject.
+#   workflow_run  `build-merge` merged it. That merge is performed with GITHUB_TOKEN,
+#                 and GitHub emits no `push` event for actions taken with that token,
+#                 so on the DEFAULT pre-authorized path no push ever arrives. Without
+#                 this trigger a merged deliverable sat verified by nothing, silently
+#                 — the same hole GHI #141 was about, one step further along.
+# The subject resolver handles both: a pushed sha, or a sweep for the newest merged
+# deliverable whose merge commit carries no `vt-*` check run yet. A question asked of
+# repository state cannot miss an event.
 #
 # HOW A TARGET IS EXECUTED. `VerificationTarget.run` (the executable form the operator
 # approved alongside the prose `check`) is one shell command whose exit status is the
@@ -26,39 +30,77 @@
 # THE COMMANDS RUN WITHOUT CREDENTIALS: GITHUB_TOKEN and the agent keys are stripped
 # from the child environment before any target executes. Operator-approved is not the
 # same as trusted with the repository's write scope.
+#
+# IT ALWAYS UPLOADS AN ARTIFACT, even with nothing to verify — `subject.txt` says which
+# commit was judged, or is empty. That is what lets `vt-report` tell "this push was not
+# a deliverable merge" (fine) from "the artifact is missing" (loud), instead of
+# treating both as nothing to do.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: build-verify
-on:
+# `workflow_run` is flagged by zizmor as a dangerous trigger. Accepted: this job reads
+# the frozen plan and executes the verification commands the OPERATOR approved, in a
+# job with no write scope at all. It writes nothing to the repository; `vt-report`
+# holds the `checks: write` that records the verdict.
+on: # zizmor: ignore[dangerous-triggers]
   push:
     branches: [main]
+  workflow_run:
+    workflows: ["build-merge"]
+    types: [completed]
 permissions:
   contents: read # read the frozen plan; the merged tree comes from the checkout
-  pull-requests: read # find the deliverable pull request this commit closed
+  pull-requests: read # find the deliverable pull request behind the commit
+  checks: read # "has this merge been verified yet?" — asked of the check runs themselves
 concurrency:
-  group: build-verify-${{ github.sha }}
+  group: build-verify-${{ github.event_name }}-${{ github.sha }}
 jobs:
   verify:
+    if: github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          # The MERGED commit — the code that actually contains the deliverable.
-          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 20
       - run: npm ci
-      - name: is this commit a merged deliverable?
+      - name: which commit is this run about, and of which frozen plan?
         id: subject
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BV_SHA: ${{ github.sha }}
+          BV_EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          ref="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --commit "$BV_SHA")"
-          echo "plan_ref=$ref" >> "$GITHUB_OUTPUT"
+          if [ "$BV_EVENT" = "push" ]; then
+            out="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --commit "$BV_SHA")"
+          else
+            out="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --sweep)"
+          fi
+          echo "sha=$(printf '%s' "$out" | sed -n 1p)" >> "$GITHUB_OUTPUT"
+          echo "plan_ref=$(printf '%s' "$out" | sed -n 2p)" >> "$GITHUB_OUTPUT"
+      - name: prepare the results directory (always, so vt-report can tell absent from empty)
+        env:
+          BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
+          BV_SUBJECT_SHA: ${{ steps.subject.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/verify"
+          printf '%s\n' "$BV_PLAN_REF" > "$RUNNER_TEMP/verify/subject.txt"
+          printf '%s\n' "$BV_SUBJECT_SHA" > "$RUNNER_TEMP/verify/verified-commit.txt"
+      # THE MERGED COMMIT, checked out over the default-branch checkout above. The
+      # tree the targets are executed against must be the tree the results describe —
+      # verifying `main` and reporting on the merge commit is the same class of lie
+      # GHI #141 was about.
+      - name: check out the commit under verification
+        if: steps.subject.outputs.plan_ref != ''
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.subject.outputs.sha }}
+          path: subject
+          persist-credentials: false
       # PREFLIGHT B9 — the verified commit must DESCEND from the frozen plan tag
       # (FR-063). B8 asks the same family of question of a BUILD's dispatch ref; this
       # asks it of a VERIFICATION's subject, and neither substitutes for the other.
@@ -67,11 +109,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
-          BV_SHA: ${{ github.sha }}
+          BV_SUBJECT_SHA: ${{ steps.subject.outputs.sha }}
         run: >-
           npx tsx scripts/gates/build-preflight.ts
           --plan-ref "$BV_PLAN_REF"
-          --verify-commit "$BV_SHA"
+          --verify-commit "$BV_SUBJECT_SHA"
           --repo "$GITHUB_REPOSITORY" --json
       - name: execute every verification target with an executable form
         if: steps.subject.outputs.plan_ref != ''
@@ -82,11 +124,11 @@ jobs:
           npx tsx scripts/build-verify.ts
           --plan-ref "$BV_PLAN_REF"
           --repo "$GITHUB_REPOSITORY"
-          --out "$RUNNER_TEMP/vt-results.json"
+          --cwd "$GITHUB_WORKSPACE/subject"
+          --out "$RUNNER_TEMP/verify/vt-results.json"
       - name: upload the verification results for vt-report
-        if: steps.subject.outputs.plan_ref != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vt-results
-          path: ${{ runner.temp }}/vt-results.json
+          path: ${{ runner.temp }}/verify/
           if-no-files-found: error

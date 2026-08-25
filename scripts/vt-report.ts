@@ -320,6 +320,51 @@ export async function reportVtResults(
   return { planRef, headSha, reported: results };
 }
 
+/**
+ * Read the verify run's own statement of WHAT IT WAS ABOUT.
+ *
+ * `subject.txt` is written by `build-verify` on every run — the frozen plan ref it
+ * verified, or empty when the commit was not a deliverable merge at all. It exists so
+ * this reporter can tell three situations apart that would otherwise all look like
+ * "no results":
+ *
+ *   subject present, empty      → an ordinary push. Nothing to report, exit 0.
+ *   subject present, non-empty,
+ *     but no vt-results.json    → a deliverable merge whose verification produced
+ *                                 NOTHING. Loud failure: that is the absent-≠-success
+ *                                 case, and it must never be quiet.
+ *   subject absent              → the artifact itself is missing or malformed. Loud.
+ *
+ * Before this file existed the reporter treated all three as "no artifact, exit 1",
+ * which meant every ordinary push to the default branch produced a red vt-report run
+ * (live, 2026-08-25). A check that cries wolf on every commit is a check nobody reads.
+ */
+export function readVerifySubject(dir: string): { present: boolean; planRef: string; verifiedCommit: string } {
+  const subjectFile = findNamed(dir, 'subject.txt');
+  if (!subjectFile) return { present: false, planRef: '', verifiedCommit: '' };
+  const commitFile = findNamed(dir, 'verified-commit.txt');
+  return {
+    present: true,
+    planRef: readFileSync(subjectFile, 'utf8').trim(),
+    verifiedCommit: commitFile ? readFileSync(commitFile, 'utf8').trim() : '',
+  };
+}
+
+/** Locate a named file anywhere under the downloaded-artifacts directory. */
+function findNamed(dir: string, name: string): string | null {
+  if (!existsSync(dir)) return null;
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      const nested = findNamed(full, name);
+      if (nested) return nested;
+    } else if (entry === name) {
+      return full;
+    }
+  }
+  return null;
+}
+
 /** Locate vt-results.json anywhere under the downloaded-artifacts directory
  *  (download-artifact@v4 nests each artifact in its own subdirectory). */
 export function findVtResultsFile(dir: string): string | null {
@@ -355,15 +400,41 @@ if (isMain) {
     console.error('usage: vt-report --dir <artifacts-dir> --repo <owner/repo> [--expect-sha <sha>]');
     process.exit(2);
   }
+  // WHAT WAS THIS RUN ABOUT? Asked before anything else, because the answer decides
+  // whether "no results" is ordinary or alarming (see readVerifySubject).
+  const subject = readVerifySubject(dir);
+  if (subject.present && subject.planRef.length === 0) {
+    console.log('the verify run reported no subject — this commit was not a merged deliverable, so there is nothing to record');
+    process.exit(0);
+  }
   const resultsFile = findVtResultsFile(dir);
   if (!resultsFile) {
-    // Not silently green: a build that reported nothing leaves every target
-    // without a check run, and L3 refuses completion on exactly that (fail
-    // closed). Exit non-zero so the missing artifact is visible on the run.
-    console.error(`no vt-results.json found under ${dir} — the build run uploaded no verification-results artifact`);
+    // Not silently green: a verify run for a real deliverable that reported nothing
+    // leaves every target without a check run, and L3 refuses completion on exactly
+    // that (fail closed). Exit non-zero so it is visible on the run rather than
+    // discovered later as an unexplained refusal.
+    console.error(
+      subject.present
+        ? `no vt-results.json under ${dir}, but the verify run named ${subject.planRef} as its subject — a deliverable ` +
+            'was verified and produced no results. Nothing has been recorded, and completion will refuse.'
+        : `no vt-results.json and no subject.txt under ${dir} — the verify run uploaded no usable artifact`,
+    );
     process.exit(1);
   }
-  reportVtResults(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(resultsFile, 'utf8')), expectSha)
+  // The commit the verify run ACTUALLY executed against, when it says so.
+  //
+  // Preferred over `workflow_run.head_sha` because they can differ, and when they do
+  // the artifact is right: a `workflow_run`-triggered verify run reports the DEFAULT
+  // BRANCH as its head, while the commit it checked out and judged is the merge
+  // commit. Recording on head_sha would put the results on whatever main happened to
+  // be — the same class of misplacement GHI #141 was about.
+  //
+  // Trusted to the degree its producer is: `build-verify` is a deterministic workflow
+  // with no write scope, not an agent, and the value it reports is still required to
+  // be a DESCENDANT of the frozen tag below. So the worst a wrong value can be is a
+  // commit the approved plan led to.
+  const boundSha = subject.verifiedCommit.length > 0 ? subject.verifiedCommit : expectSha;
+  reportVtResults(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(resultsFile, 'utf8')), boundSha)
     .then((result) => {
       console.log(
         `reported ${result.reported.length} verification target(s) on ${result.planRef} (${result.headSha}): ` +
