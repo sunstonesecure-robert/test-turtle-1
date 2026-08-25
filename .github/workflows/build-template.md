@@ -96,7 +96,7 @@ steps:
       case "$DISPATCH_REF" in
         refs/tags/*) ;;
         *)
-          echo "::error::This build was dispatched on '$DISPATCH_REF', which is not a tag. A build may run ONLY from the frozen plan TAG (FR-007) — dispatched elsewhere the agent checks out code the operator never approved, the results cannot be bound to the build, and a cancel of the workload would not find the run. WATCH FOR THIS: the plan branch and the frozen tag have the SAME NAME, and GitHub's ref picker lists branches first. Re-run this build, open the 'Use workflow from' dropdown, switch to the Tags tab, and pick the tag."
+          echo "::error::This build was dispatched on '$DISPATCH_REF', which is not a tag. A build may run ONLY from the frozen plan TAG (FR-007) — dispatched elsewhere the agent checks out code the operator never approved, the results cannot be bound to the build, and a cancel of the workload would not find the run. WATCH FOR THIS: the plan branch and the frozen tag have the SAME NAME, so the name alone is ambiguous. IN THE UI: re-run, open the 'Use workflow from' dropdown, switch to the Tags tab, and pick the tag — the picker lists branches first, so the obvious entry is the wrong one. ON THE CLI: pass the ref fully qualified, 'gh workflow run build-template.lock.yml --ref refs/tags/<plan-ref>' — a bare '--ref <plan-ref>' resolves the ambiguous name to the BRANCH silently, with nothing to tell you a choice was made."
           exit 1
           ;;
       esac

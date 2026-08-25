@@ -121,9 +121,12 @@ export function checkB8DispatchedOnFrozenRef(planRef: string, githubRef: string 
       requirement: 'FR-007',
       detail:
         `dispatched on the BRANCH ${planRef}, not the frozen TAG of the same name — the plan branch ` +
-        `and the frozen tag are both called ${planRef}, and GitHub's ref picker lists branches first. ` +
-        `Re-run this build and switch to the Tags tab in the "Use workflow from" dropdown, then pick ` +
-        `${planRef} there. ${because}`,
+        `and the frozen tag are both called ${planRef}, so the name alone is ambiguous. ` +
+        `IN THE UI: re-run and switch to the Tags tab in the "Use workflow from" dropdown, because it ` +
+        `lists branches first. ON THE CLI: pass the ref FULLY QUALIFIED — ` +
+        `\`gh workflow run build-template.lock.yml --ref refs/tags/${planRef}\` — because ` +
+        `\`--ref ${planRef}\` resolves the ambiguous name to the BRANCH silently, with nothing to ` +
+        `tell you a choice was made. ${because}`,
     };
   }
   return {
@@ -131,9 +134,10 @@ export function checkB8DispatchedOnFrozenRef(planRef: string, githubRef: string 
     status: 'fail',
     requirement: 'FR-007',
     detail:
-      `dispatched on ${ref}, not the frozen tag ${planRef} — re-run this build selecting the TAG ` +
-      `${planRef} in the ref picker: open the Tags tab, because a plan BRANCH of the same name also ` +
-      `exists and the picker offers it first. ${because}`,
+      `dispatched on ${ref}, not the frozen tag ${planRef} — re-run selecting the TAG. IN THE UI: ` +
+      `open the Tags tab in the ref picker, because a plan BRANCH of the same name also exists and ` +
+      `the picker offers it first. ON THE CLI: \`--ref refs/tags/${planRef}\`, fully qualified — a ` +
+      `bare \`--ref ${planRef}\` resolves to the branch silently. ${because}`,
   };
 }
 
