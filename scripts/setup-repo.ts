@@ -199,6 +199,38 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     }
   }
 
+  // ACTIONS MUST BE ALLOWED TO OPEN PULL REQUESTS (found live, 2026-08-25).
+  //
+  // `build-publish` is the only writer of a deliverable pull request, and on a repo
+  // where this setting is off it gets as far as creating the branch and the commit
+  // before `POST /pulls` returns 403 "GitHub Actions is not permitted to create or
+  // approve pull requests". The whole deliverable path is then permanently dead in
+  // that target, and nothing before the first paid agent run says so.
+  //
+  // Set, not merely checked: `init`'s contract is to reconcile to a desired state
+  // (FR-028), and this is part of the desired state. Idempotent — only reported as a
+  // change when it was actually off.
+  //
+  // NOTE the endpoint's field name is `can_approve_pull_request_reviews`, which reads
+  // as being about REVIEWS. It is not: it is GitHub's single switch for "create and
+  // approve", and creation is what we need. Approval remains impossible for a
+  // different reason — the App token can never be `merged_by` (SC-003), and no gate
+  // accepts a review from the actor that produced the work.
+  try {
+    const { data: current } = await gh.request('GET /repos/{owner}/{repo}/actions/permissions/workflow', { ...repo });
+    if ((current as { can_approve_pull_request_reviews?: boolean }).can_approve_pull_request_reviews !== true) {
+      await gh.request('PUT /repos/{owner}/{repo}/actions/permissions/workflow', {
+        ...repo,
+        default_workflow_permissions: (current as { default_workflow_permissions?: 'read' | 'write' }).default_workflow_permissions ?? 'read',
+        can_approve_pull_request_reviews: true,
+      });
+      changed.push('Actions permitted to create pull requests (the deliverable path needs it)');
+    }
+  } catch (error: unknown) {
+    if (errorStatus(error) === 403) missingAdminScope(error);
+    throw error;
+  }
+
   // agent-build environment (PUT is idempotent, but only report a change when absent).
   let hasEnv = true;
   try {

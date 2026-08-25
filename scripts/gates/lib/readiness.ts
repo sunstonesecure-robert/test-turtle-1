@@ -279,9 +279,21 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
         ? []
         : [`missing ruleset: ${EVIDENCE_RULESET} (append-only records)`]),
   ];
-  // I7 — the deliverable path is INSTALLED and ENFORCED (T222, FR-028/FR-061/FR-062/FR-068).
+  // I7 — the deliverable path is INSTALLED, PERMITTED and ENFORCED
+  // (T222, FR-028/FR-060/FR-061/FR-062/FR-068).
   //
-  // TWO HALVES, because they fail differently and only one of them is visible.
+  // THREE HALVES, and the middle one was found the hard way (live, 2026-08-25):
+  // `build-publish` created the branch and the commit, then died on
+  // `POST /pulls` — "GitHub Actions is not permitted to create or approve pull
+  // requests". That is a repository setting
+  // (`can_approve_pull_request_reviews`, Settings → Actions → General →
+  // Workflow permissions), off by default on many repos, and with it off the
+  // deliverable path can NEVER complete: every build produces a branch nobody
+  // can review and no pull request at all. `init` now sets it, and readiness
+  // asserts it, because discovering it from a failed build after paying for an
+  // agent run is the expensive way to learn a boolean.
+  //
+  // The other two halves fail differently and only one of them is visible.
   // A missing workflow FILE means nothing can land: loud, and an operator notices the
   // first time a build produces no pull request. An unregistered required CHECK means
   // everything lands UNGATED — D2 scope containment and D5 the subject boundary both
@@ -324,8 +336,26 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     }
   }
   const unregistered = registered === null ? [] : REQUIRED_CHECK_CONTEXTS.filter((c) => !registered!.includes(c));
+  // Can Actions open a pull request at all? Without this, build-publish writes the
+  // branch and then 403s at POST /pulls — loud on the run, invisible everywhere else.
+  let canOpenPrs: boolean | null = null;
+  try {
+    const { data } = await gh.request('GET /repos/{owner}/{repo}/actions/permissions/workflow', { ...repo });
+    canOpenPrs = (data as { can_approve_pull_request_reviews?: boolean }).can_approve_pull_request_reviews ?? false;
+  } catch (error: unknown) {
+    if (errorStatus(error) === 403 || errorStatus(error) === 404) canOpenPrs = null;
+    else throw error;
+  }
   const deliverableUnmet = [
     ...(missingDeliverable.length ? [`missing deliverable-path workflows: ${missingDeliverable.join(', ')}`] : []),
+    ...(canOpenPrs === false
+      ? [
+          'GitHub Actions is NOT permitted to create pull requests on this repository — build-publish will write the ' +
+            'deliverable branch and then fail at POST /pulls, so no deliverable can ever be reviewed or merged. Enable ' +
+            'Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull ' +
+            'requests", or re-run `npm run init` with an admin-scoped token',
+        ]
+      : []),
     ...(planLimitDetail || registered === null
       ? [planLimitDetail ?? 'rulesets unreadable on this plan — the required-check registration cannot be verified']
       : unregistered.length

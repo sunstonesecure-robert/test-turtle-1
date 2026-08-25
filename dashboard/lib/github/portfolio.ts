@@ -105,6 +105,11 @@ export interface PortfolioInput {
    * reading a failed Actions run, while this very view called the workload healthy.
    */
   unbuildable: { slug: string; reasons: string[]; andonIssue: number | null }[];
+  /** Deliverable pull requests awaiting the OPERATOR'S OWN merge (US18, FR-064).
+   *  Only the operator-required ones: a pre-authorized PR waiting on the
+   *  deterministic merger is in progress, not blocked on a human, and flagging it
+   *  would teach the operator that action-required sometimes means "wait". */
+  deliverables?: { slug: string; prNumber: number; url: string; stepId: string }[];
 }
 
 /** One slug's issue-shaped signals, deduped by issue number and issue-ordered. Deduping
@@ -198,6 +203,20 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
       for (const reason of unbuildable.flatMap((u) => u.reasons)) {
         reasons.push(reason);
       }
+      // A deliverable waiting on the operator's own merge (FR-064). Placed AFTER the
+      // buildability reasons and BEFORE the run signals, which is where it belongs in
+      // the arc: the plan built fine, so nothing upstream is broken, and the run that
+      // produced it has already finished — what is left is a decision only the
+      // operator can make.
+      let deliverableAwaitingOperator: number | null = null;
+      for (const d of (input.deliverables ?? []).filter((x) => x.slug === w.slug)) {
+        reasons.push(
+          `deliverable pull request #${d.prNumber} for ${d.stepId} is waiting on YOUR merge — this step needs an ` +
+            'operator checkpoint (a configured checkpoint, or an external authority\'s confirmation the merge cannot ' +
+            'be pre-authorized past)',
+        );
+        deliverableAwaitingOperator ??= d.prNumber;
+      }
       let runNeedsOperator = false;
       for (const row of runsForSlug(input.runs, w.slug)) {
         const reason = runReason(row);
@@ -221,9 +240,16 @@ export function portfolioRollup(input: PortfolioInput): PortfolioRow[] {
           ? `/andon/${liveBreaks[0]!.issueNumber}`
           : unbuildableReview !== null
             ? `/andon/${unbuildableReview}`
-            : runNeedsOperator
-              ? '/runs'
-              : null;
+            : // A deliverable awaiting the operator's merge has a REAL destination and
+              // ranks above a run: the run is somewhere to watch, the pull request is
+              // somewhere to act. Sending them to /runs instead — which is what an
+              // un-extended ordering would do — is the GHI #109 defect repeated, a
+              // button to a page where nothing is waiting.
+              deliverableAwaitingOperator !== null
+              ? '/builds'
+              : runNeedsOperator
+                ? '/runs'
+                : null;
 
       return {
         slug: w.slug,
