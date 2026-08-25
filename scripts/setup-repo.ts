@@ -11,6 +11,10 @@ import { apiMessage, errorMessage, errorStatus } from '../dashboard/lib/github/e
  *  GitHub adds fields of its own to a stored ruleset, so comparing everything
  *  compares its formatting rather than our intent. */
 interface RulesetShape {
+  /** `active` | `evaluate` | `disabled`. **Compared, and this is not cosmetic**: a ruleset
+   *  flipped to `evaluate` or `disabled` keeps its name, its rules and its registered
+   *  contexts, so every check by NAME still passes while nothing is enforced at all. */
+  enforcement?: string;
   rules?: { type: string; parameters?: { required_status_checks?: { context: string }[] } }[];
   bypass_actors?: { actor_id: number; actor_type: string; bypass_mode: string }[];
 }
@@ -204,6 +208,19 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
       // we demand, and that the bypass actors match. Comparing that is comparing the
       // thing we care about; comparing the JSON was comparing GitHub's formatting.
       const semantics = (r: RulesetShape): string => {
+        // ENFORCEMENT IS PART OF THE SEMANTICS, and leaving it out was a hole big enough
+        // to swallow every gate (found reviewing this wave, 2026-08-25). A ruleset can be
+        // flipped to `evaluate` (dry run) or `disabled` from Settings → Rules in one click.
+        // It keeps its name, its rule types and its required-check contexts — so `init`'s
+        // reconcile saw no difference, and readiness, which checks the ruleset by NAME and
+        // reads the contexts back, reported every item green. Meanwhile `plan-gate` and
+        // `deliverable-gate` enforced nothing: they ran, reported, and blocked no merge.
+        //
+        // That is precisely the failure this project refuses everywhere else — a control
+        // that is present, reporting, and inert (GHI #108) — reached from the one direction
+        // nothing was looking at. Comparing it here means `init` puts it back; asserting it
+        // in readiness means an operator finds out before a deliverable lands ungated.
+        const enforcement = r.enforcement ?? 'active';
         const types = (r.rules ?? []).map((rule) => rule.type).sort();
         const contexts = (r.rules ?? [])
           .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
@@ -212,7 +229,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         const bypass = (r.bypass_actors ?? [])
           .map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`)
           .sort();
-        return JSON.stringify({ types, contexts, bypass });
+        return JSON.stringify({ enforcement, types, contexts, bypass });
       };
       const same = semantics(full as RulesetShape) === semantics(payload as RulesetShape);
       if (!same) {

@@ -172,34 +172,54 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   // below GitHub Pro / paid org plans — that is an unmet readiness item to
   // report, not a crash.
   let rulesetNames: Set<string> | null = null;
+  /** name → enforcement. **PRESENT IS NOT ENFORCING** (found reviewing the US18 wave,
+   *  2026-08-25): a ruleset flipped to `evaluate` (dry run) or `disabled` from
+   *  Settings → Rules keeps its name, its rules and its registered check contexts — so
+   *  every readiness item that asked "does a ruleset by this name exist?" reported green
+   *  while nothing was enforced at all, and `init`'s reconcile saw no difference either.
+   *  Every gate in the product ran, reported, and blocked no merge. That is the
+   *  present-reporting-and-inert failure this project refuses everywhere else (GHI #108),
+   *  reached from the one direction nothing was looking at. */
+  let rulesetEnforcement: Map<string, string> | null = null;
   let planLimitDetail: string | null = null;
   try {
     const { data: rulesets } = await gh.request('GET /repos/{owner}/{repo}/rulesets', { ...repo });
-    rulesetNames = new Set((rulesets as { name: string }[]).map((r) => r.name));
+    const listed = rulesets as { name: string; enforcement?: string }[];
+    rulesetNames = new Set(listed.map((r) => r.name));
+    rulesetEnforcement = new Map(listed.map((r) => [r.name, r.enforcement ?? 'unknown']));
   } catch (error: unknown) {
     if (errorStatus(error) !== 403) throw error;
     planLimitDetail = `rulesets unavailable on this plan (${apiMessage(error)}) — upgrade to GitHub Pro / a paid org plan or make the repository public`;
   }
-  results.push({
-    id: 'I2',
-    status: rulesetNames?.has(PLAN_RULESET) ? 'pass' : 'fail',
-    requirement: 'FR-028',
-    ...(planLimitDetail
-      ? { detail: planLimitDetail }
-      : rulesetNames?.has(PLAN_RULESET)
-        ? {}
-        : { detail: `missing ruleset: ${PLAN_RULESET}` }),
-  });
-  results.push({
-    id: 'I3',
-    status: rulesetNames?.has(MAIN_RULESET) ? 'pass' : 'fail',
-    requirement: 'FR-028',
-    ...(planLimitDetail
-      ? { detail: planLimitDetail }
-      : rulesetNames?.has(MAIN_RULESET)
-        ? {}
-        : { detail: `missing ruleset: ${MAIN_RULESET} (required plan-gate check)` }),
-  });
+
+  /**
+   * One ruleset's verdict: it must EXIST and be ENFORCING.
+   *
+   * Two states, reported apart, because they need different actions from the operator: a
+   * missing ruleset is a re-run of `init`, while a disabled one is a deliberate change
+   * somebody made in the UI and `init` will put back. Saying "missing" for a disabled
+   * ruleset would send them looking for something that is sitting right there.
+   */
+  const rulesetVerdict = (name: string, missingDetail: string): { status: 'pass' | 'fail'; detail?: string } => {
+    if (planLimitDetail) return { status: 'fail', detail: planLimitDetail };
+    if (!rulesetNames?.has(name)) return { status: 'fail', detail: missingDetail };
+    const enforcement = rulesetEnforcement?.get(name) ?? 'unknown';
+    if (enforcement !== 'active') {
+      return {
+        status: 'fail',
+        detail:
+          `ruleset "${name}" EXISTS but its enforcement is "${enforcement}", not "active" — it reports and blocks ` +
+          'nothing, so every required check on this path is advisory. Re-run `npm run init` (it reconciles ' +
+          'enforcement), or set it back under Settings → Rules → Rulesets',
+      };
+    }
+    return { status: 'pass' };
+  };
+
+  const i2 = rulesetVerdict(PLAN_RULESET, `missing ruleset: ${PLAN_RULESET}`);
+  results.push({ id: 'I2', status: i2.status, requirement: 'FR-028', ...(i2.detail ? { detail: i2.detail } : {}) });
+  const i3 = rulesetVerdict(MAIN_RULESET, `missing ruleset: ${MAIN_RULESET} (required plan-gate check)`);
+  results.push({ id: 'I3', status: i3.status, requirement: 'FR-028', ...(i3.detail ? { detail: i3.detail } : {}) });
 
   // I4 — agent-build environment exists (environments are also plan-gated on private repos)
   let hasEnv = false;
@@ -271,13 +291,14 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   } catch (error: unknown) {
     if (errorStatus(error) !== 404) throw error;
   }
+  const evidenceRuleset = rulesetVerdict(EVIDENCE_RULESET, `missing ruleset: ${EVIDENCE_RULESET} (append-only records)`);
   const evidenceUnmet = [
     ...(hasEvidenceBranch ? [] : [`missing branch: ${EVIDENCE_BRANCH} (the evidence record store)`]),
-    ...(planLimitDetail
-      ? [planLimitDetail]
-      : rulesetNames?.has(EVIDENCE_RULESET)
-        ? []
-        : [`missing ruleset: ${EVIDENCE_RULESET} (append-only records)`]),
+    // Enforcement matters here for the same reason it matters on the other two, and
+    // arguably more: a disabled evidence ruleset means the append-only record can be
+    // force-pushed, which is the one property the whole move off the default branch
+    // existed to keep (GHI #134).
+    ...(evidenceRuleset.detail ? [evidenceRuleset.detail] : []),
   ];
   // I7 — the deliverable path is INSTALLED, PERMITTED and ENFORCED
   // (T222, FR-028/FR-060/FR-061/FR-062/FR-068).
@@ -336,6 +357,10 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     }
   }
   const unregistered = registered === null ? [] : REQUIRED_CHECK_CONTEXTS.filter((c) => !registered!.includes(c));
+  // A registered context on a ruleset that is not ENFORCING is a required check in name
+  // only — and this is the gate family where that matters most, because D5 going advisory
+  // is how a deliverable touching the oversight machinery lands (FR-068).
+  const mainEnforcement = rulesetVerdict(MAIN_RULESET, `missing ruleset: ${MAIN_RULESET}`);
   // Can Actions open a pull request at all? Without this, build-publish writes the
   // branch and then 403s at POST /pulls — loud on the run, invisible everywhere else.
   let canOpenPrs: boolean | null = null;
@@ -356,6 +381,7 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
             'requests", or re-run `npm run init` with an admin-scoped token',
         ]
       : []),
+    ...(mainEnforcement.status === 'fail' && mainEnforcement.detail && !planLimitDetail ? [mainEnforcement.detail] : []),
     ...(planLimitDetail || registered === null
       ? [planLimitDetail ?? 'rulesets unreadable on this plan — the required-check registration cannot be verified']
       : unregistered.length

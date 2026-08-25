@@ -39,6 +39,15 @@ on: # zizmor: ignore[dangerous-triggers]
   pull_request:
     types: [closed]
     branches: [main]
+  # RECOVERY, and it is not a test hook. A sweep that dies mid-loop leaves some pull
+  # requests judged and some not, and nothing retries — the only recoveries were
+  # re-running `build-publish` or pushing to the branch, neither of which is a thing an
+  # operator looking at a stuck pull request would think to do. `build-verify` was given
+  # this and these two were not, which was an inconsistency rather than a decision.
+  #
+  # No inputs, deliberately: the sweep decides its own subjects from repository state, so
+  # there is nothing for an operator to point at the wrong thing.
+  workflow_dispatch:
 permissions:
   contents: write # perform the merge
   pull-requests: write # merge the pull request
@@ -55,7 +64,7 @@ jobs:
     # `build/**`. Asking "which pre-authorized deliverables are green and unmerged?"
     # needs no event archaeology and is self-healing: a merge whose run was lost is
     # picked up on the next sweep.
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

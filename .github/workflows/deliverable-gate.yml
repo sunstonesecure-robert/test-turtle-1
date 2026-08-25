@@ -39,19 +39,28 @@ on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: ["build-publish"]
     types: [completed]
+  # RECOVERY, and it is not a test hook. A sweep that dies mid-loop leaves some pull
+  # requests judged and some not, and nothing retries — the only recoveries were
+  # re-running `build-publish` or pushing to the branch, neither of which is a thing an
+  # operator looking at a stuck pull request would think to do. `build-verify` was given
+  # this and these two were not, which was an inconsistency rather than a decision.
+  #
+  # No inputs, deliberately: the sweep decides its own subjects from repository state, so
+  # there is nothing for an operator to point at the wrong thing.
+  workflow_dispatch:
 permissions:
   contents: read # read the frozen plan and compare commits for D1's descendancy check
   pull-requests: read # the PR body's deliverable:v1 marker and its changed file list
   checks: write # the deliverable-gate check run this workflow reports — its only write
 concurrency:
-  group: deliverable-gate-${{ github.event.pull_request.number }}
+  group: deliverable-gate-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'sweep' }}
   cancel-in-progress: true
 jobs:
   # The sweep. Named `deliverable-gate` too? No — deliberately not: this job WRITES a
   # check run of that name rather than being one, and two things answering to one
   # context is how a required check comes to be satisfied by the wrong run.
   sweep:
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
