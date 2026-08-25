@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
-import { cliMain, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
+import { cliMain, printReport, refusalDetail, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
 import { DELIVERABLE_CATALOGUE } from './lib/catalogue';
 import {
   checkD1Provenance,
@@ -26,7 +26,29 @@ import {
  * nothing — D2 and D5 become advisory, silently, with a green-looking PR. So the
  * CLI, the workflow, and `setup-repo.ts`'s ruleset registration are one change, and
  * readiness item I7 asserts the registration independently.
+ *
+ * AND THE `pull_request` TRIGGER IS NOT ENOUGH — found live, 2026-08-25. A
+ * deliverable pull request is opened by `build-publish` using `GITHUB_TOKEN`, and
+ * GitHub deliberately does not fire workflow events for actions taken with that
+ * token (it exists to stop runaway recursion). So on the one pull request this gate
+ * exists for, the `pull_request` event NEVER ARRIVES: PR #54 sat with
+ * `build:awaiting-merge`, no checks at all, and a required check that could never be
+ * satisfied. Permanently unmergeable, and green-looking.
+ *
+ * The fix is a SWEEP, not a cleverer event payload. `deliverable-gate.yml` also runs
+ * on `build-publish`'s completion and asks a different question — "which open
+ * deliverable pull requests have no verdict?" — then writes the `deliverable-gate`
+ * check run onto each head commit itself. Deliberately broader than the event that
+ * prompted it, and self-healing for the same reason: a gate whose run was lost, or
+ * whose PR predates the gate, is picked up on the next sweep rather than waiting for
+ * an event that already happened.
  */
+
+/** The check-run name IS the required-check context. One constant, because the
+ *  ruleset registration (`REQUIRED_CHECK_CONTEXTS`) and this must be the same
+ *  string or the gate reports a verdict nothing is waiting for. */
+export const DELIVERABLE_CHECK_NAME = 'deliverable-gate';
+
 export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: number): Promise<GateReport> {
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
   // Every path the diff touches — added, modified, removed, renamed. `previous_filename`
@@ -78,12 +100,81 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
   return { subject: report.subject, result: report.result, gates: report.gates };
 }
 
+/**
+ * Gate every open deliverable pull request and record the verdict as a check run.
+ *
+ * Returns the reports so the caller can exit non-zero on a red one — but a red gate
+ * here is NOT a failed sweep: the check run is the product, and it has been written.
+ */
+export async function sweepDeliverablePrs(
+  gh: Octokit,
+  repo: RepoRef,
+  opts: { write?: boolean } = {},
+): Promise<{ prNumber: number; report: GateReport }[]> {
+  const open = await gh.paginate(gh.pulls.list, { ...repo, state: 'open', per_page: 100 });
+  const out: { prNumber: number; report: GateReport }[] = [];
+  for (const pr of open) {
+    if (!pr.head.ref.startsWith('build/')) continue;
+    // The marker, not the branch name, is what makes this a deliverable: only the
+    // deterministic writer emits one, and it holds a write scope no executor has.
+    if (!/<!--\s*deliverable:v1\s/.test(pr.body ?? '')) continue;
+    const report = await deliverableGate(gh, repo, pr.number);
+    if (opts.write !== false) {
+      await gh.checks.create({
+        ...repo,
+        name: DELIVERABLE_CHECK_NAME,
+        head_sha: pr.head.sha,
+        status: 'completed',
+        conclusion: report.result === 'pass' ? 'success' : 'failure',
+        output: {
+          title: report.result === 'pass' ? 'D1–D5 green' : `refused: ${refusalDetail(report.gates)}`.slice(0, 120),
+          // The gate's OWN sentences, never a paraphrase — the same rule every other
+          // refusal surface in this system follows (GHI #127).
+          summary: report.gates
+            .map((g) => `- **${g.id}** (${g.requirement}) — \`${g.status}\`${g.detail ? `: ${g.detail}` : ''}`)
+            .join('\n'),
+        },
+      });
+    }
+    out.push({ prNumber: pr.number, report });
+  }
+  return out;
+}
+
 const isMain = process.argv[1]?.endsWith('deliverable-gate.ts');
-if (isMain) {
+if (isMain && process.argv.includes('--sweep')) {
+  // The sweep is its own entry point rather than a mode of `cliMain`, because its
+  // exit code means something different: `cliMain` exits 1 on a red gate, which is
+  // right for the required check and wrong here — a red verdict that was
+  // successfully RECORDED is a successful sweep. Failing the run would only hide
+  // the check run it just wrote.
+  const argv = process.argv.slice(2);
+  const repoArg = argv[argv.indexOf('--repo') + 1] ?? '';
+  const [owner, repoName] = repoArg.split('/');
+  if (!owner || !repoName) {
+    console.error('usage: deliverable-gate --sweep --repo <owner/repo>');
+    process.exit(2);
+  }
+  void sweepDeliverablePrs(createClient(), { owner, repo: repoName })
+    .then((results) => {
+      if (results.length === 0) {
+        console.log('no open deliverable pull requests — nothing to gate');
+        return;
+      }
+      for (const { prNumber, report } of results) {
+        console.log(`\n=== PR #${prNumber} ===`);
+        printReport(report, false);
+      }
+    })
+    .catch((error: unknown) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    });
+} else if (isMain) {
   void cliMain(async (args) => {
     const prArg = args.get('pr');
     const repoArg = args.get('repo');
-    if (!prArg || !repoArg) throw new UsageError('deliverable-gate --pr <number> --repo <owner/repo> [--json]');
+    if (!prArg || !repoArg) throw new UsageError('deliverable-gate (--pr <number> | --sweep) --repo <owner/repo> [--json]');
     const prNumber = Number(prArg);
     if (!Number.isInteger(prNumber) || prNumber <= 0) throw new UsageError(`invalid --pr: ${prArg}`);
     const [owner, repo] = repoArg.split('/');

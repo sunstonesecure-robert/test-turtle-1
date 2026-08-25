@@ -113,6 +113,30 @@ export async function mergeIfPreAuthorized(
   }
 }
 
+/**
+ * SWEEP — every open deliverable pull request, not one named branch.
+ *
+ * Same reasoning as the gate's sweep, and the same live cause: the pull request is
+ * opened by `GITHUB_TOKEN`, so no `pull_request` event fires for it and there is no
+ * reliable branch name in the triggering payload to key on. Asking "which
+ * pre-authorized deliverables are green and unmerged?" needs no event archaeology and
+ * is self-healing — a merge whose run was lost is picked up on the next sweep.
+ */
+export async function sweepMergeable(
+  gh: Octokit,
+  repo: RepoRef,
+  opts: { requiresOperatorMerge?: boolean } = {},
+): Promise<MergeOutcome[]> {
+  const open = await gh.paginate(gh.pulls.list, { ...repo, state: 'open', per_page: 100 });
+  const out: MergeOutcome[] = [];
+  for (const pr of open) {
+    if (!pr.head.ref.startsWith('build/')) continue;
+    if (!parseDeliverableMarker(pr.body ?? '')) continue;
+    out.push(await mergeIfPreAuthorized(gh, repo, pr.head.ref, opts));
+  }
+  return out;
+}
+
 /** Mode 2 — the close event. Who merged it is not this function's business. */
 export async function transitionOnClose(gh: Octokit, repo: RepoRef, prNumber: number): Promise<MergeOutcome> {
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
@@ -138,6 +162,21 @@ if (isMain) {
   const gh = createClient();
   const repo = { owner, repo: repoName };
   const requiresOperatorMerge = /^(1|true|yes)$/i.test(process.env.BUILD_REQUIRES_OPERATOR_MERGE ?? '');
+  if (has('sweep')) {
+    // A blocked pull request is NOT a failed sweep: it is a correct outcome recorded
+    // (the gate is red, or the operator's merge is required). Exiting non-zero would
+    // turn "waiting for a human" into a red run, which is exactly the misreading
+    // FR-067 forbids on the operator's own surfaces.
+    void sweepMergeable(gh, repo, { requiresOperatorMerge })
+      .then((results) => {
+        if (results.length === 0) console.log('no open deliverable pull requests — nothing to merge');
+        for (const r of results) console.log(JSON.stringify(r));
+      })
+      .catch((error) => {
+        console.error(errorMessage(error));
+        process.exit(1);
+      });
+  } else {
   const run = has('closed')
     ? transitionOnClose(gh, repo, Number(get('pr')))
     : mergeIfPreAuthorized(gh, repo, get('branch') ?? '', { requiresOperatorMerge });
@@ -166,4 +205,5 @@ if (isMain) {
       console.error(errorMessage(error));
       process.exit(1);
     });
+  }
 }

@@ -20,10 +20,25 @@
 # asserts that registration independently — because a missing workflow file is loud
 # and an unregistered check is silent.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
+#
+# TWO TRIGGERS, AND THE SECOND IS THE ONE THAT ACTUALLY FIRES (found live, 2026-08-25).
+# A deliverable pull request is opened by `build-publish` using GITHUB_TOKEN, and
+# GitHub deliberately does not emit workflow events for actions taken with that token
+# — so on the one pull request this gate exists for, `pull_request` NEVER ARRIVES.
+# PR #54 sat with no checks at all and a required check that could never be satisfied:
+# permanently unmergeable, and green-looking. The `workflow_run` job below SWEEPS every
+# open deliverable pull request and writes the `deliverable-gate` check run itself. The
+# `pull_request` trigger stays for a human-opened build/** branch, where it does fire.
 name: deliverable-gate
-on:
+# `workflow_run` is flagged by zizmor as a dangerous trigger. Accepted: this job reads
+# a pull request and writes a check run reporting what the gate found. It performs no
+# write derived from agent output and merges nothing.
+on: # zizmor: ignore[dangerous-triggers]
   pull_request:
     branches: [main]
+  workflow_run:
+    workflows: ["build-publish"]
+    types: [completed]
 permissions:
   contents: read # read the frozen plan and compare commits for D1's descendancy check
   pull-requests: read # the PR body's deliverable:v1 marker and its changed file list
@@ -32,12 +47,32 @@ concurrency:
   group: deliverable-gate-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
+  # The sweep. Named `deliverable-gate` too? No — deliberately not: this job WRITES a
+  # check run of that name rather than being one, and two things answering to one
+  # context is how a required check comes to be satisfied by the wrong run.
+  sweep:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: gate every open deliverable pull request (D1–D5) and record the verdict
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+        run: npx tsx scripts/gates/deliverable-gate.ts --sweep --repo "$GITHUB_REPOSITORY"
   deliverable-gate:
     # Only build/** PRs carry a deliverable to gate. Every other PR reports "skipped",
     # which satisfies the required-check rule — a plain skip, never a fail, so approval
     # PRs and ordinary development PRs are not blocked. Same shape as plan-gate's own
     # `plan/**` condition, for the same reason.
-    if: startsWith(github.event.pull_request.head.ref, 'build/')
+    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

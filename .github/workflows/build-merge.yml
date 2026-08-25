@@ -44,14 +44,18 @@ permissions:
   pull-requests: write # merge the pull request
   issues: write # transition the build:* label on the pull request
 concurrency:
-  group: build-merge-${{ github.event.workflow_run.head_branch || github.event.pull_request.number }}
+  # One sweep at a time, so two gate completions cannot race to merge the same PR.
+  group: build-merge-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'sweep' }}
 jobs:
   merge:
-    # Only the gate-completion path, only for a green gate, only for build/** branches.
-    if: >-
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.conclusion == 'success' &&
-      startsWith(github.event.workflow_run.head_branch, 'build/')
+    # SWEEPS rather than keying on the triggering payload's branch (found live,
+    # 2026-08-25). The deliverable pull request is opened by GITHUB_TOKEN, so no
+    # `pull_request` event exists to carry its branch, and a `workflow_run` triggered
+    # by another `workflow_run` reports the DEFAULT branch as its head — not
+    # `build/**`. Asking "which pre-authorized deliverables are green and unmerged?"
+    # needs no event archaeology and is self-healing: a merge whose run was lost is
+    # picked up on the next sweep.
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -62,12 +66,11 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
-      - name: merge the deliverable IF the approved plan pre-authorized it
+      - name: merge every deliverable the approved plan pre-authorized
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BM_BRANCH: ${{ github.event.workflow_run.head_branch }}
           BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
-        run: npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --branch "$BM_BRANCH"
+        run: npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --sweep
   transition:
     # The close event. Who merged it is not this job's business — only that it happened.
     if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')
