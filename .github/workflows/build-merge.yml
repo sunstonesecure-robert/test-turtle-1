@@ -1,0 +1,88 @@
+# build-merge — the post-gate actor nobody had assigned (deterministic, no LLM).
+#
+# Two states were unreachable before this workflow existed (PR #115 Codex review):
+#   1. On the default `requires_operator_merge: false` path NOTHING MERGED the
+#      deliverable pull request. build-publish opens it, deliverable-gate judges it,
+#      the dashboard deliberately shows no button for a pre-authorized PR — so the
+#      default path stalled one step before verification, forever.
+#   2. Nothing ever replaced `build:awaiting-merge`, so a merged deliverable stayed
+#      action-required in the portfolio permanently.
+#
+# TWO JOBS, TWO TRIGGERS:
+#   merge      on deliverable-gate's completion — merges IF AND ONLY IF merge authority
+#              resolves to `pre-authorized`. It NEVER merges an operator-required pull
+#              request: that one waits for the human, and the label transition below
+#              still applies when they merge it themselves.
+#   transition on the pull_request close event — flips build:awaiting-merge to
+#              build:merged (or build:refused when closed unmerged), whoever merged it.
+#
+# IT RE-RUNS THE GATE RATHER THAN READING ITS CHECK RUN. A check run is a record of
+# what the gate said at some past moment about some past commit; merging on it means
+# merging on a claim. `build-merge.ts` re-runs deliverable-gate in-process, so this
+# actor can never land something the gate would refuse — even with a stale green check
+# sitting on the PR.
+#
+# IT NEEDS NO RULESET BYPASS, and must not be given one. setup-repo grants the main
+# ruleset's only bypass to the repo-admin role; the github-actions Integration
+# deliberately holds none (GHI #44). This actor merges a pull request whose required
+# checks are green, which is the ordinary path the rules exist to permit. A bypass here
+# would mean automation could land work the gates refused.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: build-merge
+# `workflow_run` is flagged by zizmor as a dangerous trigger — accepted for the reason
+# above: this job performs no write derived from agent output. It re-runs the gate and
+# merges only on the gate's own verdict about the code being merged.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["deliverable-gate"]
+    types: [completed]
+  pull_request:
+    types: [closed]
+    branches: [main]
+permissions:
+  contents: write # perform the merge
+  pull-requests: write # merge the pull request
+  issues: write # transition the build:* label on the pull request
+concurrency:
+  group: build-merge-${{ github.event.workflow_run.head_branch || github.event.pull_request.number }}
+jobs:
+  merge:
+    # Only the gate-completion path, only for a green gate, only for build/** branches.
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      startsWith(github.event.workflow_run.head_branch, 'build/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: merge the deliverable IF the approved plan pre-authorized it
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BM_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+        run: npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --branch "$BM_BRANCH"
+  transition:
+    # The close event. Who merged it is not this job's business — only that it happened.
+    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: transition the build:* label on close
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BM_PR: ${{ github.event.pull_request.number }}
+        run: npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --pr "$BM_PR" --closed

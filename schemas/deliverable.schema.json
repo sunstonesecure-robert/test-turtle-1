@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-turtles/schemas/deliverable.schema.json",
+  "title": "Agentic Turtles Deliverable Patch",
+  "description": "The deliverable.patch artifact envelope (FR-060) — the ONLY channel by which a build's work reaches the repository. Uploaded by an executor holding contents: read; validated as untrusted input by build-publish, which holds the write scope. A FILE SET rather than a unified diff, deliberately: deliverable-gate D2 (scope containment) and D5 (subject boundary) both need the touched paths to be a fact rather than a parse, and applying a diff would put the write back in a shell with a git credential — the capability the substrate split withholds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["plan_ref", "step_id", "executor_id", "files"],
+  "properties": {
+    "plan_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The frozen plan tag this build was dispatched on. Carried in the artifact because the workflow_run payload the writer is triggered by cannot see dispatch inputs. A CLAIM: D1 binds it against the triggering run's own head_sha, which the executor cannot author."
+    },
+    "step_id": {
+      "type": "string",
+      "pattern": "^step-[a-z0-9-]+$",
+      "description": "The one plan step this deliverable delivers. Executor-authored and therefore not trusted alone (GHI #116): D1 derives the step independently from the build's work item and refuses any disagreement."
+    },
+    "executor_id": { "type": "string", "minLength": 1, "description": "Recorded on the pull request for provenance (FR-065). Descriptive, never authorizing." },
+    "executor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tier": { "enum": ["in-sandbox", "spawned"] },
+        "engine": { "type": "string", "minLength": 1 },
+        "image": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 }
+      },
+      "required": ["tier"]
+    },
+    "files": {
+      "type": "array",
+      "description": "Whole files, not hunks — a hunk cannot be validated against a scope without first being applied.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "content"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "description": "Repo-relative, forward slashes. Traversal and absolute paths are REFUSED by the gate, never normalized into safety." },
+          "content": { "type": "string" },
+          "encoding": { "enum": ["utf-8", "base64"] }
+        }
+      }
+    },
+    "deletions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Paths this deliverable removes. Held to exactly the same scope and reserved checks as files — deleting is a write."
+    },
+    "summary": { "type": "string", "minLength": 1, "description": "One line for the deliverable commit message and PR title." }
+  }
+}

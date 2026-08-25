@@ -35,9 +35,18 @@ export type OversightWorkflow =
  * target repo. Deriving the URL from the same constants is what makes a link
  * here and a readiness check there incapable of disagreeing about a filename.
  *
- * As far as the URL goes this is the end of the road: GitHub has no supported
- * way to prefill `workflow_dispatch` inputs from a query string, so the
- * operator still types the values. Callers should say which ones.
+* As far as the URL goes this is the end of the road, and BOTH halves of that were
+ * tested rather than assumed. GitHub has no supported way to prefill
+ * `workflow_dispatch` inputs from a query string, so the operator types the values
+ * and callers must print them (`DispatchValues`).
+ *
+ * `?ref=` does not help either, and this is a recorded NEGATIVE result (tried and
+ * reverted, 2026-08-23) so nobody spends the idea twice: the link lands on the
+ * workflow's summary page, and the Run-workflow panel is opened by a button click
+ * AFTER that — the panel builds its ref picker fresh, so a ref in the URL never
+ * reaches it. Preselecting the dangerous field is not available from a link. What
+ * covers it instead is the workflow's own first step, which refuses a non-tag
+ * dispatch in two seconds, and preflight B8, which is the authority.
  */
 export function workflowDispatchUrl(repo: RepoRef, workflow: OversightWorkflow): string {
   const agentic = (AGENTIC_WORKFLOWS as readonly string[]).includes(workflow);

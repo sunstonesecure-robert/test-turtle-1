@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, repoFromEnv, type RepoRef } from '../dashboard/lib/github/client';
 import { ALL_LABELS } from '../dashboard/lib/github/labels';
-import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET, EVIDENCE_RULESET } from './gates/lib/readiness';
+import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET, EVIDENCE_RULESET, REQUIRED_CHECK_CONTEXTS } from './gates/lib/readiness';
 import { EVIDENCE_BRANCH, ensureEvidenceBranch } from '../dashboard/lib/github/evidence-store';
 import { runGates, printReport } from './gates/lib/runner';
 import { installOversightFiles } from './install';
@@ -51,6 +51,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     .catch((error: unknown) => (errorStatus(error) === 403 ? planLimited(error) : Promise.reject(error)));
   const rulesetList = rulesets as { id: number; name: string }[];
   const rulesetNames = new Set(rulesetList.map((r) => r.name));
+  const rulesetsByName = new Map(rulesetList.map((r) => [r.name, r]));
   // Reconcile away the pre-2026-07-11 CURRENT push ruleset where it exists
   // (org repos only — user-owned repos never could create it): the file it
   // protected no longer exists, and a stale push rule would block nothing real
@@ -83,11 +84,28 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         // official version is derived from frozen tags (2026-07-11, GHI #44)
         // the post-merge writer never pushes to main, so no machine credential
         // carries a bypass on any repo type. 5 = repository admin role.
+        //
+        // `build-merge` performs the pre-authorized deliverable merge as
+        // github-actions[bot] and is deliberately NOT given a bypass: it merges a
+        // pull request whose required checks are green, which is the ordinary path
+        // these rules exist to permit. A bypass there would mean automation could
+        // land work the gates refused.
         bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }],
         rules: [
           {
             type: 'required_status_checks',
-            parameters: { required_status_checks: [{ context: 'plan-gate' }], strict_required_status_checks_policy: false },
+            // TWO CONTEXTS, and the second is half of the gate (T208(d), FR-068).
+            // `deliverable-gate` running on a build PR without being REGISTERED AS
+            // REQUIRED reports its verdict and blocks nothing: D2 scope containment
+            // and D5 the subject boundary become advisory, silently, on a
+            // green-looking PR. Registered from REQUIRED_CHECK_CONTEXTS rather than
+            // spelled here so readiness item I7 asserts the same list this writes —
+            // two hand-maintained copies is how a gate comes to run and block
+            // nothing.
+            parameters: {
+              required_status_checks: REQUIRED_CHECK_CONTEXTS.map((context) => ({ context })),
+              strict_required_status_checks_policy: false,
+            },
           },
         ],
       },
@@ -138,6 +156,46 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         if (errorStatus(error) === 403) missingAdminScope(error);
         throw error;
       }
+      continue;
+    }
+    // RECONCILE AN EXISTING RULESET, not just create a missing one (2026-08-24).
+    //
+    // `init` is specified as idempotent reconciliation to a desired state (FR-028),
+    // and for rulesets it was only ever create-if-absent. That gap has teeth: adding
+    // `deliverable-gate` to the required-check list changes nothing on any repo
+    // initialized before the change, so the gate would run and block nothing —
+    // silently, on a green-looking pull request, which is the exact absent-≠-success
+    // failure the required-check registration exists to prevent (GHI #108). An
+    // operator re-running `npm run init` has every reason to expect the rules to
+    // catch up, and nothing told them otherwise.
+    //
+    // Compared on the RULES rather than the whole payload: name, target and
+    // conditions are what identify the ruleset, and rewriting those on every run
+    // would make the reconcile itself a change. Bypass actors are compared too —
+    // dropping the machine bypass (GHI #44) is precisely the kind of tightening that
+    // must reach an already-initialized repo.
+    const existing = rulesetsByName.get(name);
+    if (!existing) continue;
+    try {
+      const { data: full } = await gh.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+        ...repo,
+        ruleset_id: existing.id,
+      });
+      const current = full as { rules?: unknown; bypass_actors?: unknown };
+      const same =
+        JSON.stringify(current.rules ?? []) === JSON.stringify(payload.rules ?? []) &&
+        JSON.stringify(current.bypass_actors ?? []) === JSON.stringify(payload.bypass_actors ?? []);
+      if (!same) {
+        await gh.request('PUT /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+          ...repo,
+          ruleset_id: existing.id,
+          ...payload,
+        } as never);
+        changed.push(`ruleset ${name} (rules reconciled)`);
+      }
+    } catch (error: unknown) {
+      if (errorStatus(error) === 403) missingAdminScope(error);
+      throw error;
     }
   }
 

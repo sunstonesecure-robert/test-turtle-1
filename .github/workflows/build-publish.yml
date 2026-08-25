@@ -1,0 +1,90 @@
+# build-publish — deterministic writer for the agent's DELIVERABLE (plain Actions
+# YAML, no LLM: the work is a pure function of the artifact). Third instance of the
+# seam this system uses everywhere: plan.json→plan-publish, vt-results.json→vt-report,
+# and now deliverable.patch→here. The build executor holds `contents: read` and its
+# outputs are artifacts plus a `missing-data` safe output, so it CANNOT push a branch
+# or open a pull request; this workflow holds that scope and validates the artifact as
+# untrusted input before the first write.
+#
+# ON THE BUILD'S COMPLETION: download deliverable.patch, validate it against
+# schemas/deliverable.schema.json, bind its plan_ref to the commit the build actually
+# ran on, refuse any path outside the delivering step's declared scope (D2's rule) or
+# inside the reserved set (D5's rule, FR-068), then create build/<slug>/<step-id> off
+# the FROZEN TAG'S COMMIT — so the head is a DESCENDANT of the frozen commit, never an
+# alteration of it (FR-007 as amended) — and open the pull request with the executor's
+# provenance recorded on it (FR-065).
+#
+# WHY THE SCOPE AND RESERVED CHECKS RUN HERE TOO, when deliverable-gate also runs them:
+# the gate is the required check that blocks a MERGE, but a refused patch should never
+# become a pull request at all. A branch that exists is a thing someone can merge with
+# an admin bypass; a branch that was never created is not.
+#
+# A BUILD THAT PRODUCED NO DELIVERABLE FAILS THIS WORKFLOW, loudly, and writes nothing.
+# That is deliberate: verification of nothing must not read as verification, which is
+# exactly the completion-on-a-lie GHI #141 found.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: build-publish
+# zizmor flags `workflow_run` as a dangerous trigger and is right about the general
+# case: the job runs with the base repo's write token, triggered by a run whose output
+# an attacker may have influenced. Accepted here because the risk it names is exactly
+# what the substrate split contains, and the containment is in this file — the agent job
+# is read-only and can only upload an artifact; this job treats that artifact as
+# UNTRUSTED (schema-validated, path-validated, provenance-bound before the first write);
+# and its writes are confined to a fresh `build/**` branch and a new pull request.
+# Removing the trigger would mean granting the agent `contents: write`, which is
+# strictly worse.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    # MUST match build-template.lock.yml's compiled `name:` exactly (workflow_run keys
+    # on the name, not the file id) — tests/unit/workflow-linkage.test.ts guards it.
+    workflows: ["build-template — dispatched agent build, gated by preflight"]
+    types: [completed]
+permissions:
+  contents: write # the build/<slug>/<step-id> branch and its commit — the only writer of deliverable branches
+  pull-requests: write # open the deliverable pull request the executor could not open itself
+  issues: write # record a refusal on the step's work item, and label the PR build:awaiting-merge
+  actions: read # download the build run's deliverable.patch (cross-run artifact read)
+concurrency:
+  group: build-publish-${{ github.event.workflow_run.id }}
+jobs:
+  publish:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # No git credentials in .git/config: every write here goes through octokit +
+          # GITHUB_TOKEN and the git DATA api (blob→tree→commit→ref), never `git push`
+          # (zizmor artipacked).
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: download the build run's deliverable artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/deliverable-artifacts
+      - name: publish the deliverable (validate, contain, branch, commit, open PR)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BP_RUN_ID: ${{ github.event.workflow_run.id }}
+          # The build was dispatched ON the frozen tag (preflight B8 refuses anything
+          # else), so these two are the trusted binding for the envelope's plan_ref —
+          # the one signal in this pipeline the executor cannot author.
+          BP_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          BP_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # FR-062, escalation-only: this may only ADD an operator merge checkpoint.
+          # Nothing here can remove one a gate demands — a high-stakes step always
+          # waits for the operator regardless of this value.
+          BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+        run: >-
+          npx tsx scripts/build-publish.ts
+          --dir "$RUNNER_TEMP/deliverable-artifacts"
+          --repo "$GITHUB_REPOSITORY"
+          --run-id "$BP_RUN_ID"
+          --head-branch "$BP_HEAD_BRANCH"
+          --head-sha "$BP_HEAD_SHA"

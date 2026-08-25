@@ -56,6 +56,11 @@
           "items": { "type": "string", "pattern": "^step-[a-z0-9-]+$" },
           "description": "Dependency edges used to propagate wrong-assumption flags (FR-022)"
         },
+        "scope": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "OPTIONAL (T223, FR-061). The path globs this step's deliverable may touch, relative to the repo root — `docs/**`, `src/app.py`, `site/*.html`. Deliverable-gate D2 validates the patch against exactly this set and names any straying path. OPTIONAL because a required field would break every plan frozen before 2026-08-24; D2 reports not-applicable (naming the absent field) for a step without one rather than passing silently, since a scope-less plan cannot make the containment promise. SUBJECT BOUNDARY (FR-068): scope is an INCLUSION allowlist and cannot widen what a build may touch — plan-gate G16 refuses a plan whose scope intersects the reserved path set, and deliverable-gate D5 refuses such a patch regardless of what this field says."
+        },
         "tracking_issue": {
           "type": ["integer", "null"],
           "minimum": 1,
@@ -84,6 +89,11 @@
           "type": "string",
           "minLength": 1,
           "description": "A single pass/fail assertion (FR-011)"
+        },
+        "run": {
+          "type": "string",
+          "minLength": 1,
+          "description": "OPTIONAL (T223, FR-063). The EXECUTABLE form of `check`: a single shell command, run from the repo root of the MERGED deliverable commit, whose exit status is the verdict (0 = success, non-zero = failure). Present, the verify run is deterministic — no model interprets anything, and the operator approved the exact command that will judge their work (constitution: Deterministic-First Execution). Absent, `check` stays prose and a conformant executor in verify mode interprets it. `check` remains REQUIRED either way: it is what the operator reviews, and a command with no stated intent is not a commitment anyone judged."
         },
         "maps_to": {
           "type": "array",

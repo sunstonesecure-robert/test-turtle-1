@@ -1,14 +1,14 @@
 import { createHash } from 'node:crypto';
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
-import { resolveCurrent, slugFromPlanRef, tagExists, tryReadPlanAtRef } from '../../../dashboard/lib/github/plans';
+import { resolveCurrent, slugFromPlanRef, tagExists, tagTargetSha, tryReadPlanAtRef } from '../../../dashboard/lib/github/plans';
 import { getWorkload } from '../../../dashboard/lib/github/workloads';
 import { getChunk, findIntentConfirmation } from '../../../dashboard/lib/github/chunks';
 import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 import { CONTRADICTION_LABEL } from '../../../dashboard/lib/github/labels';
 import { ConfirmationRecord } from '../../../schemas/confirmation';
 import type { PlanStep } from '../../../schemas/plan';
-import type { GateResult } from './runner';
+import { asApiUnavailable, type GateResult } from './runner';
 
 /**
  * Build-preflight checks (gate-checks-cli.md §2):
@@ -24,6 +24,9 @@ import type { GateResult } from './runner';
  *   B7  the workload carries workload:active (FR-033/038/039/041)
  *   B8  the run was DISPATCHED ON the frozen tag — GITHUB_REF names --plan-ref
  *       (FR-007; decided 2026-07-28, GHI #72 option A)
+ *   B9  a VERIFY run's commit descends from the frozen tag (FR-063, added
+ *       2026-08-24) — build runs skip it: they have no merged commit yet, and B8
+ *       already governs what they were dispatched on
  */
 
 export async function checkB1FrozenCurrent(
@@ -99,15 +102,38 @@ export function checkB8DispatchedOnFrozenRef(planRef: string, githubRef: string 
   if (ref === `refs/tags/${planRef}` || ref === planRef) {
     return { id: 'B8', status: 'pass', requirement: 'FR-007' };
   }
+  // The consequence, said the same way in both branches below — it is WHY the
+  // refusal exists, and an operator who reads only the first clause still gets it.
+  const because =
+    `Dispatching elsewhere means the agent checks out that ref instead of the approved commit ` +
+    `(FR-007), the results cannot be bound to this build, and a cancel of the workload would not ` +
+    `find this run (FR-038)`;
+  // The SAME-NAME case gets its own sentence (live: run 32658276993). A plan branch
+  // and its frozen tag are both `plan/<slug>/v<N>`, so GitHub's ref picker offers
+  // two entries with one label and lists branches first — the obvious pick is the
+  // wrong one. Saying "dispatched on refs/heads/plan/demo7/v1, not the frozen tag
+  // plan/demo7/v1" to someone in that position names the same string twice and
+  // reads as a contradiction, which is how a correct refusal wasted two dispatches.
+  if (ref === `refs/heads/${planRef}`) {
+    return {
+      id: 'B8',
+      status: 'fail',
+      requirement: 'FR-007',
+      detail:
+        `dispatched on the BRANCH ${planRef}, not the frozen TAG of the same name — the plan branch ` +
+        `and the frozen tag are both called ${planRef}, and GitHub's ref picker lists branches first. ` +
+        `Re-run this build and switch to the Tags tab in the "Use workflow from" dropdown, then pick ` +
+        `${planRef} there. ${because}`,
+    };
+  }
   return {
     id: 'B8',
     status: 'fail',
     requirement: 'FR-007',
     detail:
       `dispatched on ${ref}, not the frozen tag ${planRef} — re-run this build selecting the TAG ` +
-      `${planRef} in the ref picker. Dispatching elsewhere means the agent checks out that ref instead ` +
-      `of the approved commit (FR-007), the results cannot be bound to this build, and a cancel of the ` +
-      `workload would not find this run (FR-038)`,
+      `${planRef} in the ref picker: open the Tags tab, because a plan BRANCH of the same name also ` +
+      `exists and the picker offers it first. ${because}`,
   };
 }
 
@@ -491,6 +517,72 @@ export async function checkB5ConfirmationRecorded(
 
 /** B6 — a chunk flagged wrong-assumption builds on contradicted ground; the flag
  *  must be reconciled (US5) before any build (FR-022). */
+/**
+ * B9 — the commit a VERIFY run is about must descend from the frozen plan tag
+ * (FR-063, T210).
+ *
+ * B8 asks the same family of question about a BUILD: did this run start from the
+ * approved plan? B9 asks it about a VERIFICATION: is the code you just judged
+ * downstream of the plan that was approved? They are different runs at different
+ * moments and neither substitutes for the other — which is why B9 is its own gate
+ * rather than a widened B8.
+ *
+ * `identical` PASSES, and that is the compatibility shim in gate form (constitution:
+ * Frozen-Artifact Compatibility, route (a)). A build frozen before US18 verified the
+ * frozen tree itself and produced no deliverable, so its verify commit IS the tag's
+ * commit. Refusing that would make every previously frozen plan permanently
+ * unverifiable — the GHI #44/#109 mistake exactly. The shim is narrow: `ahead` and
+ * `identical` only. `behind` and `diverged` are refused, because a result about a
+ * commit the plan does not lead to is a result about something else entirely.
+ */
+export async function checkB9VerifyCommitDescends(
+  gh: Octokit,
+  repo: RepoRef,
+  planRef: string,
+  commitSha: string,
+): Promise<GateResult> {
+  const tagSha = await tagTargetSha(gh, repo, planRef);
+  if (tagSha === null) {
+    return { id: 'B9', status: 'fail', requirement: 'FR-063', detail: `${planRef} has no target commit — nothing to descend from` };
+  }
+  if (tagSha === commitSha) {
+    return {
+      id: 'B9',
+      status: 'pass',
+      requirement: 'FR-063',
+      detail:
+        `the verified commit IS the frozen commit (${tagSha.slice(0, 8)}) — the legacy binding, accepted for plans ` +
+        'frozen before verification was rebound to the deliverable commit (compatibility shim)',
+    };
+  }
+  let status: string;
+  try {
+    const { data } = await gh.repos.compareCommits({ ...repo, base: tagSha, head: commitSha });
+    status = data.status;
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) {
+      return {
+        id: 'B9',
+        status: 'fail',
+        requirement: 'FR-063',
+        detail: `commit ${commitSha.slice(0, 8)} and ${planRef} (${tagSha.slice(0, 8)}) share no history`,
+      };
+    }
+    return asApiUnavailable(error);
+  }
+  if (status === 'ahead' || status === 'identical') {
+    return { id: 'B9', status: 'pass', requirement: 'FR-063', detail: `${commitSha.slice(0, 8)} descends from ${planRef}` };
+  }
+  return {
+    id: 'B9',
+    status: 'fail',
+    requirement: 'FR-063',
+    detail:
+      `commit ${commitSha.slice(0, 8)} is "${status}" relative to ${planRef} (${tagSha.slice(0, 8)}), not a descendant. ` +
+      'A verification result may only describe code the approved plan led to (FR-063)',
+  };
+}
+
 export async function checkB6NotFlagged(gh: Octokit, repo: RepoRef, chunkIssue: number): Promise<GateResult> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: chunkIssue });
   const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));

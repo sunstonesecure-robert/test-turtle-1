@@ -6,6 +6,7 @@ import { WORKLOAD_TRANSITIONS } from '../../dashboard/lib/github/labels';
 import { findLiveAndonsBySlug } from '../../dashboard/lib/github/andon';
 import { resolveCurrent, tagTargetSha, tryReadPlanAtRef } from '../../dashboard/lib/github/plans';
 import { deriveCompletionStatus, listVtCheckRuns } from '../../dashboard/lib/github/checks';
+import { resolveVerifiedCommit } from '../../dashboard/lib/github/builds';
 import { commitmentScope } from './lib/checks-scope';
 import { cliMain, runGateCatalogue, UsageError, type GateReport, type GateResult } from './lib/runner';
 import { LIFECYCLE_CATALOGUE } from './lib/catalogue';
@@ -40,8 +41,11 @@ function statePrecondition(workload: Workload | null, action: string): string | 
  * renders from as well. Only resolution lives here:
  *   1. the official frozen plan is DERIVED (resolveCurrent = the newest frozen
  *      plan/<slug>/v* tag) — never a branch, never a stored pointer (GHI #44);
- *   2. results are read on that TAG's commit SHA, so a re-opened plan (new
- *      version, new SHA) automatically requires fresh results;
+ *   2. results are read on the VERIFIED COMMIT — the newest merged deliverable for
+ *      the official plan, else the frozen tag's own commit under the pre-US18
+ *      compatibility shim (FR-063). Either way a re-opened plan (new version, new
+ *      tag) automatically requires fresh results: old deliverables' markers name the
+ *      superseded ref and stop matching;
  *   3. the MUST-mapped target set comes from commitmentScope() — the same
  *      FR-010 derivation plan-gate G3 and the scope panel use, so what was
  *      committed at approval is exactly what completion measures.
@@ -70,10 +74,21 @@ async function checkL3Completion(gh: Octokit, repo: RepoRef, slug: string): Prom
     return fail(`plan.json at the frozen ${current} does not validate, so its MUST set is unknown: ${errors.join('; ')}`);
   }
 
-  const verdict = deriveCompletionStatus(slug, commitmentScope(plan), await listVtCheckRuns(gh, repo, frozenSha));
+  // WHICH COMMIT the results must live on (FR-034 as amended, FR-063). Before US18
+  // this was unconditionally the frozen tag's commit — defensible only while a build
+  // verified the frozen TREE and produced nothing. Once a build produces a
+  // deliverable, results on the frozen commit describe code the repository has never
+  // contained, which is a completion earned on a lie (GHI #141).
+  const verified = await resolveVerifiedCommit(gh, repo, current, frozenSha);
+  const verdict = deriveCompletionStatus(slug, commitmentScope(plan), await listVtCheckRuns(gh, repo, verified.sha));
+  const where =
+    verified.source === 'merged-deliverable'
+      ? `verified on the merged deliverable commit ${verified.sha.slice(0, 8)} (PR #${verified.prNumber})`
+      : `verified on the frozen plan commit ${verified.sha.slice(0, 8)} — no merged deliverable for ${current}, so this ` +
+        'workload is completing under the pre-US18 compatibility shim';
   return verdict.complete
-    ? { id: 'L3', status: 'pass', requirement: 'FR-034', ...(verdict.note ? { detail: verdict.note } : {}) }
-    : fail(verdict.unmet.join('; '));
+    ? { id: 'L3', status: 'pass', requirement: 'FR-034', detail: [verdict.note, where].filter(Boolean).join(' · ') }
+    : fail([verdict.unmet.join('; '), where].filter(Boolean).join(' · '));
 }
 
 /**

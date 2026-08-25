@@ -1,0 +1,92 @@
+# build-verify — verification executed against the MERGED deliverable commit
+# (deterministic, no LLM where the plan made it so). This is what makes completion
+# earnable against code that exists.
+#
+# Before US18 the build agent verified the FROZEN TREE, because nothing in the system
+# could produce anything else — so `vt-*` check runs described a commit that never
+# contained the work, and a completion could be earned on a lie (GHI #141).
+#
+# TRIGGERED BY A PUSH TO THE DEFAULT BRANCH, DELIBERATELY. The run's own `head_sha` is
+# then the merged commit, which is exactly what `vt-report` binds against and what the
+# check runs must land on — no artifact has to carry it and nothing has to be trusted
+# to report it correctly. Most pushes are not deliverable merges: the resolver asks the
+# pull request the commit closed for its `deliverable:v1` marker and exits reporting
+# NOTHING when there is none. It also means an OPERATOR'S OWN merge of an
+# operator-required deliverable triggers verification exactly like the pre-authorized
+# path does.
+#
+# HOW A TARGET IS EXECUTED. `VerificationTarget.run` (the executable form the operator
+# approved alongside the prose `check`) is one shell command whose exit status is the
+# verdict. A MUST-mapped target with no `run` is NOT REPORTED — it cannot be verified
+# deterministically, and L3 fails closed on a target with no check run, so completion
+# stays refused until the plan is re-opened to add one or a conformant executor
+# interprets the prose in verify mode. What this must never do is report a result for a
+# target it did not check.
+#
+# THE COMMANDS RUN WITHOUT CREDENTIALS: GITHUB_TOKEN and the agent keys are stripped
+# from the child environment before any target executes. Operator-approved is not the
+# same as trusted with the repository's write scope.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: build-verify
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read # read the frozen plan; the merged tree comes from the checkout
+  pull-requests: read # find the deliverable pull request this commit closed
+concurrency:
+  group: build-verify-${{ github.sha }}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The MERGED commit — the code that actually contains the deliverable.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: is this commit a merged deliverable?
+        id: subject
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BV_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          ref="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --commit "$BV_SHA")"
+          echo "plan_ref=$ref" >> "$GITHUB_OUTPUT"
+      # PREFLIGHT B9 — the verified commit must DESCEND from the frozen plan tag
+      # (FR-063). B8 asks the same family of question of a BUILD's dispatch ref; this
+      # asks it of a VERIFICATION's subject, and neither substitutes for the other.
+      - name: build-preflight (B9 — the verified commit descends from the frozen tag)
+        if: steps.subject.outputs.plan_ref != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
+          BV_SHA: ${{ github.sha }}
+        run: >-
+          npx tsx scripts/gates/build-preflight.ts
+          --plan-ref "$BV_PLAN_REF"
+          --verify-commit "$BV_SHA"
+          --repo "$GITHUB_REPOSITORY" --json
+      - name: execute every verification target with an executable form
+        if: steps.subject.outputs.plan_ref != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
+        run: >-
+          npx tsx scripts/build-verify.ts
+          --plan-ref "$BV_PLAN_REF"
+          --repo "$GITHUB_REPOSITORY"
+          --out "$RUNNER_TEMP/vt-results.json"
+      - name: upload the verification results for vt-report
+        if: steps.subject.outputs.plan_ref != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vt-results
+          path: ${{ runner.temp }}/vt-results.json
+          if-no-files-found: error

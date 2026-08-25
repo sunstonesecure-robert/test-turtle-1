@@ -22,6 +22,24 @@ export const PlanStep = z
     authority: z.enum(['customer', 'clinical', 'legal']).nullable().optional(),
     depends_on: z.array(stepId),
     /**
+     * The path globs this step's deliverable may touch (T223, FR-061 / FR-068).
+     *
+     * OPTIONAL, and it has to be: `PlanStep` is `.strict()` and every plan frozen
+     * before 2026-08-24 was written without it, so a required field would make each
+     * of them permanently unbuildable (constitution: Frozen-Artifact Compatibility).
+     * D2 therefore reports `not-applicable` — naming the absent field — for a step
+     * that declares none, rather than passing silently: a scope-less plan cannot
+     * make the containment promise, and a gate that says so is not the same as a
+     * gate that agrees.
+     *
+     * IT IS AN INCLUSION ALLOWLIST, and that is exactly its limit (FR-068). It
+     * answers "did the patch stay inside what the plan declared?" — which a plan
+     * aimed at the wrong subject answers perfectly. So it can never be the thing
+     * that keeps a build out of the oversight machinery: G16 refuses a plan whose
+     * scope reaches there, and D5 refuses such a patch whatever this field says.
+     */
+    scope: z.array(z.string().min(1)).optional(),
+    /**
      * The BACKLOG CHUNK issue this step delivers — one field, one meaning
      * (clarified 2026-08-17, GHI #101). It is simultaneously the FR-025 mirror for
      * linkability and the FR-017 build binding, because in this system the issue
@@ -57,7 +75,23 @@ export const VerificationTarget = z
   .object({
     id: z.string().regex(/^vt-[a-z0-9-]+$/),
     kind: z.enum(['expected-output', 'exact-copy', 'boundary-behavior']),
+    /** The prose assertion the OPERATOR judged (FR-011). Required always — a
+     *  command with no stated intent is not a commitment anyone approved. */
     check: z.string().min(1),
+    /**
+     * The EXECUTABLE form of `check` (T223, FR-063) — one shell command, run from
+     * the repo root of the merged deliverable commit, exit status is the verdict.
+     *
+     * Present, verification is DETERMINISTIC: no model interprets the target, the
+     * result is reproducible, and the operator approved the exact command that will
+     * judge the work (constitution: Deterministic-First Execution). Absent, `check`
+     * stays prose and a conformant executor in verify mode interprets it — the
+     * pluggable path, which costs a model call and cannot be replayed.
+     *
+     * Optional for the same Frozen-Artifact reason as `scope`: every target frozen
+     * before 2026-08-24 has only the prose form.
+     */
+    run: z.string().min(1).optional(),
     maps_to: z.array(stepId).min(1),
   })
   .strict();

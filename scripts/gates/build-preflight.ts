@@ -11,6 +11,7 @@ import {
   checkB6NotFlagged,
   checkB7WorkloadActive,
   checkB8DispatchedOnFrozenRef,
+  checkB9VerifyCommitDescends,
   stepsForChunk,
 } from './lib/checks-preflight';
 import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
@@ -19,7 +20,7 @@ import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
  * build-preflight (T040 + T140 + T107) — step 1 of every dispatched build workflow.
  * A non-zero exit fails the run before any agent step executes.
  * Set: B1, B2, B5, B7, B8 always; B3/B6 when the build names a chunk, B4 when it is
- * also unattended.
+ * also unattended; B9 only on a VERIFY run, which carries --verify-commit (FR-063).
  *
  * The plan-ref → slug parse lives in plans.ts beside `planBranch` that builds it: this
  * gate and the portfolio view must agree on which workload a ref names.
@@ -55,6 +56,10 @@ export async function buildPreflight(
     steps?: string[];
     /** the ref + commit this gate code was checked out at (GHI #107) */
     gateSet?: GateSetRef;
+    /** VERIFY RUNS ONLY: the merged deliverable commit this run is about to judge.
+     *  Present makes B9 apply; absent is a build run, which B8 governs instead
+     *  (FR-063, added 2026-08-24). */
+    verifyCommit?: string;
   },
 ): Promise<GateReport> {
   // B3/B6 run only when the build names a chunk; B4 only for unattended runs on
@@ -111,6 +116,17 @@ export async function buildPreflight(
     // failure is the most structural of the set: the run is building the wrong
     // worktree entirely (GHI #72 option A).
     { id: 'B8', run: () => checkB8DispatchedOnFrozenRef(input.planRef, input.githubRef) },
+    // B9 applies to VERIFY runs, which judge a merged commit. A build run has none
+    // yet — and saying so by name is the point: a report that simply omitted B9 on
+    // builds would be shaped like a report where it passed (GHI #108).
+    {
+      id: 'B9',
+      skip: () =>
+        input.verifyCommit === undefined
+          ? 'no --verify-commit: this is a build run, not a verify run — B8 governs the ref it was dispatched on'
+          : null,
+      run: () => checkB9VerifyCommitDescends(gh, repo, input.planRef, input.verifyCommit!),
+    },
   ]);
   return {
     plan: input.planRef,
@@ -128,7 +144,7 @@ if (isMain) {
     const planRef = args.get('plan-ref');
     const repoArg = args.get('repo');
     if (!planRef || !repoArg) {
-      throw new UsageError('build-preflight --plan-ref <tag> --workload <slug> --repo <owner/repo> [--chunk <issue#>] [--unattended] [--step <step-id>]... [--gates-ref <ref> --gates-sha <sha>] [--json]');
+      throw new UsageError('build-preflight --plan-ref <tag> --workload <slug> --repo <owner/repo> [--chunk <issue#>] [--unattended] [--step <step-id>]... [--verify-commit <sha>] [--gates-ref <ref> --gates-sha <sha>] [--json]');
     }
     // Repeatable: one --step per step this build covers. Passing none is not a
     // selection — B5 then gates every high-stakes step in the plan (FR-024).
@@ -164,6 +180,7 @@ if (isMain) {
       ...(flags.has('unattended') ? { unattended: true } : {}),
       ...(githubRef !== undefined ? { githubRef } : {}),
       ...(gatesRef !== undefined && gatesSha !== undefined ? { gateSet: { ref: gatesRef, sha: gatesSha } } : {}),
+      ...(args.get('verify-commit') !== undefined ? { verifyCommit: args.get('verify-commit')! } : {}),
     });
   });
 }

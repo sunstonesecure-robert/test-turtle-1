@@ -24,6 +24,61 @@ export function parseAndonHeader(body: string): AndonHeader | null {
   return m ? { runId: m[1]!, planRef: m[2]! } : null;
 }
 
+// ---------- Deliverable PR: <!-- deliverable:v1 plan:<ref> step:<id> run:<id> executor:<id> tier:<t> [engine:<e>] [image:<i>] [model:<m>] ----------
+
+/**
+ * What `build-publish` records on a deliverable pull request (US18, FR-065).
+ *
+ * This is the ONLY link between a build run and the pull request its work became,
+ * and `deliverable-gate` reads all five of D1–D5 through it. Written by the
+ * deterministic writer with its own scope — never by the executor, which holds
+ * `contents: read` and could not open the PR in the first place. So the marker is
+ * as trustworthy as the writer that emitted it, which is the whole point of the
+ * substrate split.
+ *
+ * `runId` is the load-bearing field: it is the triggering `workflow_run.id`, which
+ * the executor cannot author, and it is what lets D1 go back to the build run and
+ * check what it was actually dispatched with rather than believing the envelope.
+ */
+export interface DeliverableMarker {
+  planRef: string;
+  stepId: string;
+  /** the build run that produced the patch — trusted provenance (GHI #72 shape) */
+  runId: string;
+  executorId: string;
+  tier: 'in-sandbox' | 'spawned';
+  engine?: string;
+  image?: string;
+  model?: string;
+}
+
+const DELIVERABLE_RE =
+  /<!--\s*deliverable:v1\s+plan:(\S+)\s+step:(step-[a-z0-9-]+)\s+run:(\d+)\s+executor:(\S+)\s+tier:(in-sandbox|spawned)(?:\s+engine:(\S+))?(?:\s+image:(\S+))?(?:\s+model:(\S+))?\s*-->/;
+
+export function serializeDeliverableMarker(d: DeliverableMarker): string {
+  const optional = [
+    d.engine ? ` engine:${d.engine}` : '',
+    d.image ? ` image:${d.image}` : '',
+    d.model ? ` model:${d.model}` : '',
+  ].join('');
+  return `<!-- deliverable:v1 plan:${d.planRef} step:${d.stepId} run:${d.runId} executor:${d.executorId} tier:${d.tier}${optional} -->`;
+}
+
+export function parseDeliverableMarker(body: string): DeliverableMarker | null {
+  const m = DELIVERABLE_RE.exec(body);
+  if (!m) return null;
+  return {
+    planRef: m[1]!,
+    stepId: m[2]!,
+    runId: m[3]!,
+    executorId: m[4]!,
+    tier: m[5]! as 'in-sandbox' | 'spawned',
+    ...(m[6] ? { engine: m[6] } : {}),
+    ...(m[7] ? { image: m[7] } : {}),
+    ...(m[8] ? { model: m[8] } : {}),
+  };
+}
+
 // ---------- Judgment task-list items: - [ ] `bc-<id>` — description ----------
 
 export interface JudgmentItem {

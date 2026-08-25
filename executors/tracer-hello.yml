@@ -1,0 +1,18 @@
+# EXAMPLE ONLY — the tracer's simplest conformant executor.
+#
+# NOTHING HERE IS REQUIRED BY THE SYSTEM. This file exists so that conformance has
+# something concrete to read against (FR-059). An operator who replaces every value
+# below and still satisfies `specs/001-sme-operator-oversight/contracts/build-executor.md`
+# is fully supported, and the deterministic writer and the gates must not be able to
+# tell the difference (SC-019). If you find yourself treating this file as a
+# dependency, that is the bug.
+#
+# The deliverable it produces is the OPERATOR'S OWN SOFTWARE — a standalone page, a
+# script, a service. It is never a change to anything `init` installed into the
+# governed repo, and never a change to the governance record (FR-068).
+executor:
+  id: tracer-hello              # recorded on every deliverable it produces (FR-065)
+  tier: in-sandbox              # gh-aw-compiled: containment is STRUCTURAL
+  engine: claude                # per-workflow, compile-time; copilot|gemini|codex equally valid
+  model: claude-haiku-4-5       # deliberately cheap — the tracer proves the seam, not the agent
+  requires_operator_merge: false # default: the approved plan pre-authorizes the merge (FR-062)

@@ -1,0 +1,56 @@
+# deliverable-gate — required status check on every deliverable pull request
+# (deterministic, no LLM: constitution Deterministic-First — plain Actions YAML, not
+# gh-aw, by design). This is the gate that decides whether an agent's actual work may
+# land, and the only gate in the system that reads a patch.
+#
+#   D1  provenance: a validated deliverable patch from a build run on the frozen tag,
+#       whose head DESCENDS from that tag's commit (FR-060, FR-007 as amended)
+#   D2  every path inside the delivering step's DECLARED scope (FR-061)
+#   D3  merge authority resolved — pre-authorized, or the operator's own merge where
+#       configuration demands a checkpoint or the step is high-stakes (FR-062)
+#   D4  executor provenance recorded on the pull request (FR-065)
+#   D5  no path inside the RESERVED set — the installed oversight machinery and the
+#       governance record — read from the patch ALONE, never from the declared scope
+#       (FR-068)
+#
+# REGISTRATION IS HALF THE GATE. A deliverable-gate that runs without being REGISTERED
+# AS A REQUIRED CHECK reports its verdict and blocks nothing: D2 and D5 become
+# advisory, silently, on a green-looking PR. `scripts/setup-repo.ts` registers the
+# `deliverable-gate` context on the default-branch ruleset, and readiness item I7
+# asserts that registration independently — because a missing workflow file is loud
+# and an unregistered check is silent.
+# cost ceiling: $0 per run (constitution: Cost & Observability)
+name: deliverable-gate
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read # read the frozen plan and compare commits for D1's descendancy check
+  pull-requests: read # the PR body's deliverable:v1 marker and its changed file list
+  checks: write # the deliverable-gate check run this workflow reports — its only write
+concurrency:
+  group: deliverable-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  deliverable-gate:
+    # Only build/** PRs carry a deliverable to gate. Every other PR reports "skipped",
+    # which satisfies the required-check rule — a plain skip, never a fail, so approval
+    # PRs and ordinary development PRs are not blocked. Same shape as plan-gate's own
+    # `plan/**` condition, for the same reason.
+    if: startsWith(github.event.pull_request.head.ref, 'build/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: deliverable-gate (D1–D5)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+        run: npx tsx scripts/gates/deliverable-gate.ts --pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json

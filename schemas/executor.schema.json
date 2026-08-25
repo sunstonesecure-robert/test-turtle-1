@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentic-turtles/schemas/executor.schema.json",
+  "title": "Agentic Turtles Executor Configuration",
+  "description": "WHICH agent builds (FR-059). Operator configuration, not a stored record. The system ships one conformant executor and requires none — anything runnable by GitHub Agentic Workflows that satisfies contracts/build-executor.md is legitimate, and the gates and the deterministic writer must not be able to tell the difference (SC-019). The shape exists so provenance is recordable (FR-065) and so one prohibition is enforceable at config load rather than trusted: the spawned tier's guardrailed runner (FR-066).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "tier"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Recorded on every deliverable this executor produces (FR-065)." },
+    "tier": {
+      "enum": ["in-sandbox", "spawned"],
+      "description": "in-sandbox = a gh-aw-compiled workflow; containment is STRUCTURAL (compiled, SHA-pinned, scanned, egress-allowlisted). spawned = an operator-supplied image driving execution outside the gh-aw container; containment is CONDITIONAL and the operator supplies it."
+    },
+    "engine": { "enum": ["copilot", "claude", "gemini", "codex"], "description": "gh-aw compile-time engine selection. Required for the in-sandbox tier — the constitution's standing multi-engine constraint is that this is selectable per workflow, so it must be stated." },
+    "image": { "type": "string", "minLength": 1, "description": "Container image ref. Spawned tier only; gh-aw owns the image in-sandbox." },
+    "model": { "type": "string", "minLength": 1, "description": "Must exist in gh-aw's pinned AI-credits catalog or the proxy rejects the run." },
+    "requires_operator_merge": {
+      "type": "boolean",
+      "description": "The FR-062 merge checkpoint, escalation-only by construction: true ADDS an operator checkpoint. No value removes one a gate demands — a step carrying an external authority's confirmation always waits for the operator, whatever this says."
+    },
+    "guardrailed_runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["binaries", "paths"],
+      "description": "FR-066. Required for the spawned tier and enforced at config load, not documented and hoped for. Both allowlists must be NON-EMPTY: an empty allowlist is not 'no restriction stated', it is 'everything permitted'.",
+      "properties": {
+        "binaries": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "tier": { "const": "spawned" } }, "required": ["tier"] },
+      "then": { "required": ["guardrailed_runner", "image"] }
+    },
+    {
+      "if": { "properties": { "tier": { "const": "in-sandbox" } }, "required": ["tier"] },
+      "then": { "required": ["engine"] }
+    }
+  ]
+}

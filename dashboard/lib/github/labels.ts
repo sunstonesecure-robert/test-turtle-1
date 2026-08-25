@@ -14,6 +14,16 @@ export const LIVE_ANDON_LABELS = ['andon:open', 'andon:under-review'] as const;
 export const TERMINAL_ANDON_LABELS = ['andon:resolved', 'andon:superseded'] as const;
 export const CORRECTION_LABELS = ['correction:open', 'correction:addressed', 'correction:withdrawn'] as const;
 export const CHUNK_LABELS = ['chunk:title-only', 'chunk:ready'] as const;
+/**
+ * The deliverable pull request's lifecycle state (US18, FR-064). Exactly one at a
+ * time, and TWO deterministic writers by trigger: `build-publish` sets the initial
+ * `build:awaiting-merge` on the executor's completion, and `build-merge` transitions
+ * it on the `pull_request` merge/close event. Two writers because `build-publish`
+ * fires only on `workflow_run` from the build, so with it as the sole writer a merged
+ * PR kept `build:awaiting-merge` forever — still returned by the portfolio's search
+ * and still falsely action-required (PR #115 Codex review). No other actor writes them.
+ */
+export const BUILD_LABELS = ['build:awaiting-merge', 'build:merged', 'build:refused'] as const;
 export const WORKLOAD_LABELS = [
   'workload:proposed',
   'workload:active',
@@ -43,6 +53,7 @@ export const ALL_LABELS: readonly string[] = [
   ...WORKLOAD_LABELS,
   ...HIGH_STAKES_LABELS,
   ...CONFIRMED_LABELS,
+  ...BUILD_LABELS,
   ...STANDALONE_LABELS,
 ];
 
@@ -53,6 +64,7 @@ const EXCLUSIVE_FAMILIES: readonly (readonly string[])[] = [
   CORRECTION_LABELS,
   CHUNK_LABELS,
   WORKLOAD_LABELS,
+  BUILD_LABELS,
 ];
 
 /**

@@ -1,5 +1,6 @@
 import type { PlanDoc } from '../../../schemas/plan';
 import type { GateResult } from './runner';
+import { scopeReachesReserved, PRODUCT_PR_ROUTE } from './reserved-paths';
 
 /**
  * Scope-commitment checks G2–G4 (gate-checks-cli.md §1, US2: FR-009…FR-012).
@@ -104,4 +105,66 @@ export function checkG4SinglePassFail(plan: PlanDoc): GateResult {
   return offending.length === 0
     ? { id: 'G4', status: 'pass', requirement: 'FR-011' }
     : { id: 'G4', status: 'fail', requirement: 'FR-011', detail: offending.join('; ') };
+}
+
+/**
+ * G16 — the SUBJECT boundary, asked of a plan before anyone is asked to approve it
+ * (FR-068, added 2026-08-24).
+ *
+ * WHAT IT ASKS. Not "is this plan well-formed?" — every other G gate asks that. It
+ * asks what the plan is ABOUT: does any step's declared `scope` reach into the
+ * installed oversight machinery or the governance record? A plan that does is asking
+ * the operator to approve the system rewriting its own controls, and the honest
+ * moment to refuse that is at the review, not after an agent has spent a run
+ * building it.
+ *
+ * NOT-APPLICABLE FOR A SCOPE-LESS STEP, NAMING THE ABSENT FIELD — and this is the
+ * one place in the gate set where a not-applicable is load-bearing enough to be
+ * worth stating twice. Every plan frozen before `PlanStep.scope` existed declares no
+ * scope, and refusing them all would make each one permanently unapprovable
+ * (constitution: Frozen-Artifact Compatibility). Reporting not-applicable here is
+ * honest ONLY BECAUSE **D5 is unconditional**: the deliverable gate reads the
+ * patch's actual paths and does not consult this field, so a scope-less plan is
+ * still governed at the moment it matters.
+ *
+ * IF D5 EVER BECOMES SCOPE-DEPENDENT, THIS TURNS SILENTLY INTO A PASS FOR THE
+ * ABSENT CASE — the absent-≠-success mistake this project refuses everywhere else
+ * (GHI #108). `tests/unit/subject-boundary.test.ts` pins the coupling for exactly
+ * that reason; do not weaken one without the other.
+ */
+export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly string[] = []): GateResult {
+  const scoped = plan.steps.filter((s) => (s.scope ?? []).length > 0);
+  if (scoped.length === 0) {
+    return {
+      id: 'G16',
+      status: 'not-applicable',
+      requirement: 'FR-068',
+      detail:
+        'no step declares a `scope`, so there is nothing here to compare against the reserved paths. The plan is ' +
+        'still bound at delivery by D5, which reads the patch itself and does not consult this field — that is ' +
+        'what makes reporting not-applicable honest rather than an absent-≠-success pass (GHI #108)',
+    };
+  }
+  const offenders: string[] = [];
+  for (const step of scoped) {
+    const reaching = scopeReachesReserved(step.scope ?? [], extraReserved);
+    for (const glob of reaching) offenders.push(`${step.id} → ${glob}`);
+  }
+  if (offenders.length > 0) {
+    return {
+      id: 'G16',
+      status: 'fail',
+      requirement: 'FR-068',
+      detail:
+        `${offenders.length} declared scope(s) reach the installed oversight machinery or the governance record: ` +
+        `${offenders.join('; ')}. A plan's subject is the operator's OWN software; approving this one would ` +
+        `authorize the system to change the gates, workflows, schemas, or records that govern it. ${PRODUCT_PR_ROUTE}`,
+    };
+  }
+  return {
+    id: 'G16',
+    status: 'pass',
+    requirement: 'FR-068',
+    detail: `${scoped.length} scoped step(s), none reaching the installed machinery or the governance record`,
+  };
 }

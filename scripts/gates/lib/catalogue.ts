@@ -45,6 +45,12 @@ export const PREFLIGHT_CATALOGUE: readonly DeclaredGate[] = [
   { id: 'B6', requirement: 'FR-022' },
   { id: 'B7', requirement: 'FR-033' },
   { id: 'B8', requirement: 'FR-007' },
+  // B9 — a VERIFY run's commit descends from the frozen tag (FR-063, added
+  // 2026-08-24). Declared for the whole family and SKIPPED with its reason on a
+  // build run, which has no merged commit yet: the alternative — declaring it only
+  // for verify runs — would make the two report shapes differ, which is the
+  // condition GHI #108 is about.
+  { id: 'B9', requirement: 'FR-063' },
 ];
 
 /**
@@ -71,6 +77,30 @@ export const PLAN_CATALOGUE: readonly DeclaredGate[] = [
   { id: 'G13', requirement: 'FR-017' },
   { id: 'G14', requirement: 'FR-046' },
   { id: 'G15', requirement: 'FR-022' },
+  // G16 — the SUBJECT boundary at proposal (FR-068, added 2026-08-24). Every other
+  // G gate asks whether the plan is well-formed or fully judged; this one asks what
+  // the plan is ABOUT. It is here rather than only at the deliverable gate so the
+  // operator is never asked to approve the system rewriting its own controls, and
+  // so no build spends money reaching D5.
+  { id: 'G16', requirement: 'FR-068' },
+];
+
+/**
+ * §2b `deliverable-gate` — the required status check on every `build/**` pull
+ * request, and the only gate family in the system that reads a patch.
+ *
+ * D5 LAST, and not because it matters least. D1–D4 are the US18 seam: provenance,
+ * containment, authority, attribution — everything about whether the deliverable
+ * arrived legitimately. D5 asks a question none of them do, about what the work is
+ * ABOUT, and it is appended rather than inserted because gate ids are stable
+ * identifiers and D1–D4 shipped first. Report order is contract order.
+ */
+export const DELIVERABLE_CATALOGUE: readonly DeclaredGate[] = [
+  { id: 'D1', requirement: 'FR-060' },
+  { id: 'D2', requirement: 'FR-061' },
+  { id: 'D3', requirement: 'FR-062' },
+  { id: 'D4', requirement: 'FR-065' },
+  { id: 'D5', requirement: 'FR-068' },
 ];
 
 /** §3 `lifecycle-gate`. Every transition reports all of these; which ones apply is

@@ -17,6 +17,54 @@ timeout-minutes: 15
 # job-level backstop into the .lock.yml; tests/unit/workflow-timeouts.test.ts guards it (#39, PB-004).
 safe-outputs:
   upload-artifact:
+steps:
+  # CAN THIS KEY PAY FOR THE RUN? Asked in one second, before any container pull
+  # (operator ask, 2026-08-23, after run 32658500322 died at "Credit balance is too
+  # low" — at the Claude CLI step, having already spent two checkouts, an npm ci, a
+  # CLI install and a container pull).
+  #
+  # There is NO balance endpoint to check against a threshold: the Anthropic API
+  # exposes no remaining-credit figure, and the Admin API's cost reports need an
+  # admin-scoped key and report SPEND, not balance. So this asks the only question
+  # that is actually answerable — can the key buy one token right now — with the
+  # cheapest possible request (1 max_token, cheapest model). Fractions of a cent.
+  #
+  # FAILS ONLY ON WHAT IT CAME FOR: an exhausted balance or a rejected key. Anything
+  # else — an unavailable model, a network blip, a 5xx — passes with a note, because
+  # a pre-check that invents new ways for a build to die is worse than no pre-check.
+  # gh-aw's own daily AIC guardrail is a different thing (a spend CAP per day, in the
+  # activation job) and does not detect this.
+  - name: refuse a run the API key cannot pay for (before any container pull)
+    env:
+      PROBE_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    run: |
+      set -uo pipefail
+      if [ -z "$PROBE_KEY" ]; then
+        echo "::error::ANTHROPIC_API_KEY is not set on this repository, so no agent step can run. Add it under Settings → Secrets and variables → Actions."
+        exit 1
+      fi
+      status="$(curl -sS -o /tmp/credit-probe.json -w '%{http_code}' \
+        --max-time 20 https://api.anthropic.com/v1/messages \
+        -H "x-api-key: $PROBE_KEY" \
+        -H 'anthropic-version: 2023-06-01' \
+        -H 'content-type: application/json' \
+        -d '{"model":"claude-haiku-4-5-20251001","max_tokens":1,"messages":[{"role":"user","content":"."}]}' || echo 000)"
+      body="$(head -c 600 /tmp/credit-probe.json 2>/dev/null || true)"
+      case "$status" in
+        200)
+          echo "API key answers — the run can pay for itself." ;;
+        400|402|429)
+          if printf '%s' "$body" | grep -qi 'credit balance'; then
+            echo "::error::The Anthropic API refuses this key: credit balance is too low. Every agent step would fail after several minutes of setup, so this run stops here. Top up the account (or switch the ANTHROPIC_API_KEY secret to a funded one) and re-dispatch — nothing has been built and no results were written."
+            exit 1
+          fi
+          echo "::warning::API probe returned $status without a credit-balance error; continuing. Body: $body" ;;
+        401|403)
+          echo "::error::The Anthropic API rejected this key ($status). Every agent step would fail, so this run stops here. Check the ANTHROPIC_API_KEY secret."
+          exit 1 ;;
+        *)
+          echo "::warning::API probe was inconclusive (status $status) — continuing, because a pre-check must not become a new way for a build to fail." ;;
+      esac
 network: defaults
 ---
 

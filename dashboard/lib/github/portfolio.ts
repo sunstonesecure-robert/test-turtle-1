@@ -11,7 +11,7 @@ import { resolveCurrent, slugFromPlanRef, tryReadPlanAtRef } from './plans';
 import { listWorkloads, type Workload } from './workloads';
 import { mergeRecheck } from './read-after-write';
 import { listXLinks } from './xlinks';
-import { buildRunMonitorSnapshot, type RunMonitorRow } from '../../app/runs/snapshot';
+import { buildRunMonitorSnapshot, type RunMonitorRow } from './run-monitor';
 // The gate functions' own verdict on whether a workload's official plan could pass
 // preflight today (GHI #109) — reused, never re-derived, so a plan this view calls
 // unbuildable is one the build actually refuses.

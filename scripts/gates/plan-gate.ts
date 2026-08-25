@@ -4,7 +4,7 @@ import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { cliMain, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
 import { PLAN_CATALOGUE } from './lib/catalogue';
 import { checkG1Schema, checkG7NoOpenCorrections, checkG8AllJudged, checkG9VersionMonotonic, checkG10Acyclic, checkG11QuestionsAnswered } from './lib/checks-core';
-import { checkG2ExactlyOnePriority, checkG3MustCoverage, checkG4SinglePassFail } from './lib/checks-scope';
+import { checkG2ExactlyOnePriority, checkG3MustCoverage, checkG4SinglePassFail, checkG16SubjectBoundary } from './lib/checks-scope';
 import { checkG5EvidenceTags } from './lib/checks-evidence';
 import { checkG6HighStakesAuthority } from './lib/checks-highstakes';
 import {
@@ -14,14 +14,17 @@ import {
 } from './lib/checks-binding';
 
 /**
- * plan-gate (T035 + T057 + T093 + T107) — required status check on every approval PR.
+ * plan-gate (T035 + T057 + T093 + T107 + T240) — required status check on every approval PR.
  * Set: G1 schema, G2 exactly one priority, G3 MUST coverage, G4 single
  * pass/fail check, G5 evidence tags + stand-ins, G6 every high-stakes step names
  * its confirming authority, G7 no open corrections, G8 all boundary cases judged,
  * G9 version monotonic + tag absent, G10 acyclic deps, G11 every question answered,
  * G13 no two steps of this plan claim one work item, G14 no step claims a work item
  * another workload's official plan already claims (GHI #102), G15 no work item this
- * plan delivers carries contradicting evidence raised after the plan was written.
+ * plan delivers carries contradicting evidence raised after the plan was written,
+ * G16 no step's declared scope reaches the installed oversight machinery or the
+ * governance record (FR-068 — the SUBJECT boundary, so the operator is never asked
+ * to approve the system rewriting its own controls).
  *
  * G12 is NOT in the set and its number is not reused: the intent-drift gate is
  * deferred to GHI #28 with its detection mechanism unsettled, and two gates sharing
@@ -66,6 +69,10 @@ export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, pla
     { id: 'G13', skip: unparsed, run: () => checkG13WorkItemUniqueInPlan(plan!) },
     { id: 'G14', skip: unparsed, run: () => checkG14WorkItemUnclaimedElsewhere(gh, repo, plan!) },
     { id: 'G15', skip: unparsed, run: () => checkG15NoUnaddressedContradiction(gh, repo, plan!) },
+    // G16 asks what the plan is ABOUT, which is a different question from every gate
+    // above it and the one nothing asked until GHI #141 (FR-068). Pure: it reads the
+    // declared scopes and the derived reserved set, no API call.
+    { id: 'G16', skip: unparsed, run: () => checkG16SubjectBoundary(plan!) },
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };
 }

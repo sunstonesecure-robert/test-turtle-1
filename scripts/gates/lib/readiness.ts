@@ -10,13 +10,13 @@ import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
  * never a stored flag. Shared by `init --verify` and the dashboard's
  * intake-refusal banner (FR-029), so UX preview and enforcement cannot drift.
  *
- * The set is I1–I6 and I8. **I7 is deliberately absent, not missing**: it is
- * specified (gate-checks-cli.md §4, task T222) as the deliverable-path check —
- * the US18 workflows installed AND `deliverable-gate` registered as a required
- * check — and it has not been built yet. The evidence record store took I8
- * rather than the free-looking I7 because a readiness id, once written into the
- * contract, is a stable identifier: reusing it would make two different checks
- * answer to one name in the record.
+ * The set is I1–I8. **I7 was reserved and is now built** (2026-08-24, T222): the
+ * deliverable-path check — the US18 workflows installed AND `deliverable-gate`
+ * registered as a required status check. The evidence record store took I8 rather
+ * than the then-free-looking I7 because a readiness id, once written into the
+ * contract, is a stable identifier: reusing it would have made two different checks
+ * answer to one name in the record. The out-of-order pair is the cost of having kept
+ * that promise, and it is the cheaper cost.
  */
 
 /** Agentic workflows: gh-aw markdown compiled to pinned .lock.yml. */
@@ -48,6 +48,32 @@ export const DETERMINISTIC_WORKFLOWS = [
   'confirm-record',
   'plan-publish',
 ] as const;
+
+/**
+ * The deliverable path (US18) — asserted by **I7**, separately from I5.
+ *
+ * Separate because the two failures read differently to an operator. A target
+ * missing one of the I5 workflows cannot plan or complete at all, which is loud. A
+ * target missing these four can do everything up to freeze and then quietly build
+ * nothing — the state every live run before 2026-08-24 was in, where the product
+ * governed a build that could not produce anything and no surface said so.
+ *
+ * `build-publish`  the only writer of a deliverable branch and pull request
+ * `deliverable-gate` the required check D1–D5, without which nothing judges a patch
+ * `build-merge`    the actor that merges a pre-authorized deliverable and moves its
+ *                  label — without it the default path stalls one step before
+ *                  verification, forever
+ * `build-verify`   verification on the MERGED commit; without it no `vt-*` check run
+ *                  is ever written, because vt-report triggers on this workflow
+ */
+export const DELIVERABLE_WORKFLOWS = ['build-publish', 'deliverable-gate', 'build-merge', 'build-verify'] as const;
+
+/** The required-status-check contexts the default-branch ruleset must carry.
+ *  `plan-gate` blocks an unapproved plan from freezing; `deliverable-gate` blocks an
+ *  ungated deliverable from landing. Registered together by `setup-repo.ts`, and
+ *  asserted here — because a gate that runs without being REQUIRED reports its
+ *  verdict and blocks nothing. */
+export const REQUIRED_CHECK_CONTEXTS = ['plan-gate', 'deliverable-gate'] as const;
 /**
  * Templates `install.ts` vendors that I5 deliberately does NOT verify, each with
  * the reason. Membership here is a STATED choice; absence from both this map and
@@ -99,6 +125,18 @@ export const I5_UNVERIFIED_TEMPLATES: Readonly<Record<string, string>> = {
 export const OVERSIGHT_WORKFLOW_FILES: readonly string[] = [
   ...AGENTIC_WORKFLOWS.map((w) => `${w}.lock.yml`),
   ...DETERMINISTIC_WORKFLOWS.map((w) => `${w}.yml`),
+];
+
+/**
+ * Every installed workflow file that SOME readiness check demands — I5's set plus
+ * I7's. The GHI #97 drift guard reconciles the installed templates against this,
+ * not against I5 alone: the deliverable-path workflows are verified, just by a
+ * different check, and a guard that did not know that would demand they be listed
+ * as deliberately UNVERIFIED — recording the opposite of the truth.
+ */
+export const VERIFIED_WORKFLOW_FILES: readonly string[] = [
+  ...OVERSIGHT_WORKFLOW_FILES,
+  ...DELIVERABLE_WORKFLOWS.map((w) => `${w}.yml`),
 ];
 
 export const PLAN_RULESET = 'oversight: protect plan branches';
@@ -241,6 +279,69 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
         ? []
         : [`missing ruleset: ${EVIDENCE_RULESET} (append-only records)`]),
   ];
+  // I7 — the deliverable path is INSTALLED and ENFORCED (T222, FR-028/FR-061/FR-062/FR-068).
+  //
+  // TWO HALVES, because they fail differently and only one of them is visible.
+  // A missing workflow FILE means nothing can land: loud, and an operator notices the
+  // first time a build produces no pull request. An unregistered required CHECK means
+  // everything lands UNGATED — D2 scope containment and D5 the subject boundary both
+  // become advisory, silently, on a green-looking PR. That second failure is the
+  // absent-≠-success mistake this project refuses everywhere else (GHI #108), and it
+  // is invisible from every surface, which is exactly why readiness asserts it rather
+  // than an operator eyeballing the Actions tab.
+  const missingDeliverable: string[] = [];
+  for (const workflow of DELIVERABLE_WORKFLOWS) {
+    try {
+      await gh.repos.getContent({ ...repo, path: `.github/workflows/${workflow}.yml` });
+    } catch (error: unknown) {
+      if (errorStatus(error) === 404) missingDeliverable.push(`${workflow}.yml`);
+      else throw error;
+    }
+  }
+  // The registration half. Read from the ruleset itself rather than from what init
+  // intended to write: "we call setup-repo, so it must be registered" is precisely
+  // the assumption that let a shipped feature never once work (GHI #134).
+  let registered: string[] | null = null;
+  if (!planLimitDetail) {
+    try {
+      const { data: rulesets } = await gh.request('GET /repos/{owner}/{repo}/rulesets', { ...repo });
+      const main = (rulesets as { id: number; name: string }[]).find((r) => r.name === MAIN_RULESET);
+      if (main) {
+        const { data: full } = await gh.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+          ...repo,
+          ruleset_id: main.id,
+        });
+        const rules = (full as { rules?: { type: string; parameters?: { required_status_checks?: { context: string }[] } }[] }).rules ?? [];
+        registered = rules
+          .filter((r) => r.type === 'required_status_checks')
+          .flatMap((r) => (r.parameters?.required_status_checks ?? []).map((c) => c.context));
+      } else {
+        registered = [];
+      }
+    } catch (error: unknown) {
+      if (errorStatus(error) === 403) registered = null; // plan limitation, reported below
+      else throw error;
+    }
+  }
+  const unregistered = registered === null ? [] : REQUIRED_CHECK_CONTEXTS.filter((c) => !registered!.includes(c));
+  const deliverableUnmet = [
+    ...(missingDeliverable.length ? [`missing deliverable-path workflows: ${missingDeliverable.join(', ')}`] : []),
+    ...(planLimitDetail || registered === null
+      ? [planLimitDetail ?? 'rulesets unreadable on this plan — the required-check registration cannot be verified']
+      : unregistered.length
+        ? [
+            `required status check(s) NOT registered on ${MAIN_RULESET}: ${unregistered.join(', ')} — ` +
+              'the gate runs and blocks nothing, so deliverables land ungated (GHI #108)',
+          ]
+        : []),
+  ];
+  results.push({
+    id: 'I7',
+    status: deliverableUnmet.length === 0 ? 'pass' : 'fail',
+    requirement: 'FR-028',
+    ...(deliverableUnmet.length ? { detail: deliverableUnmet.join(' · ') } : {}),
+  });
+
   results.push({
     id: 'I8',
     status: evidenceUnmet.length === 0 ? 'pass' : 'fail',

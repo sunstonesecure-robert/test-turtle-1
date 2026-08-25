@@ -7,12 +7,15 @@ import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha } from '..
 import { errorMessage } from '../dashboard/lib/github/errors';
 
 /**
- * vt-report (T154, FR-034) — the deterministic reporter that turns the build
- * agent's verification-target results into `vt-*` check runs on the frozen plan
- * SHA. This is what makes workload completion real in live operation: gate
- * lifecycle-gate row L3 (contracts/gate-checks-cli.md §3) asks whether every
- * MUST-mapped verification target's LATEST `vt-<id>` check run on the current
- * frozen plan SHA concluded `success`. Nothing else writes those check runs.
+ * vt-report (T154 + T211, FR-034 / FR-063) — the deterministic reporter that turns
+ * a run's verification-target results into `vt-*` check runs on the commit those
+ * results actually describe: the MERGED DELIVERABLE COMMIT, or the frozen plan SHA
+ * for the pre-US18 cohort the compatibility shim covers.
+ *
+ * This is what makes workload completion real in live operation: lifecycle-gate row
+ * L3 asks whether every MUST-mapped verification target's LATEST `vt-<id>` check run
+ * on the workload's verified commit concluded `success`. Nothing else writes those
+ * check runs.
  *
  * SUBSTRATE SPLIT — why this is a separate script behind a separate workflow:
  * the build-template agent job is read-only (gh-aw strict mode; its
@@ -30,13 +33,14 @@ import { errorMessage } from '../dashboard/lib/github/errors';
  * first check run is created, so a bad artifact stamps nothing at all rather
  * than half a report.
  *
- * PROVENANCE (GHI #72 option A, decided 2026-07-28): the validation also binds the
- * artifact to the build that produced it. Builds are dispatched ON the frozen tag
- * — preflight B8 refuses anything else — so `workflow_run.head_sha` IS the frozen
- * commit and is the one signal here the agent cannot author. The reported plan_ref
- * must dereference to that same commit, which is what stops a build dispatched for
- * workload A from reporting against workload B's plan and completing B without B
- * ever being built.
+ * PROVENANCE (GHI #72 option A, decided 2026-07-28; rebound 2026-08-24 for FR-063):
+ * the validation also binds the artifact to the run that produced it.
+ * `workflow_run.head_sha` is the one signal here the agent cannot author, and it is
+ * both the binding AND the answer to "which commit do these results describe?" — a
+ * verify run's head is the merged deliverable commit, a pre-US18 build's head is the
+ * frozen tag's own commit. The reported plan_ref must be the official version and
+ * the run's commit must DESCEND from its tag, which is what stops a run for workload
+ * A reporting against workload B's plan and completing B without B ever being built.
  *
  * CHECK-RUN NAME = THE TARGET ID, VERBATIM. L3's row words the name `vt-<id>`,
  * and the schema constrains ids to `^vt-[a-z0-9-]+$` (schemas/plan.ts
@@ -116,7 +120,8 @@ export type VtResults = z.infer<typeof VtResults>;
 export interface VtReportResult {
   /** the frozen plan tag the results were validated against */
   planRef: string;
-  /** the commit SHA the check runs were created on — the frozen tag's target */
+  /** the commit the check runs were created on — the MERGED deliverable commit, or
+   *  the frozen tag's own commit under the pre-US18 compatibility shim (FR-063) */
   headSha: string;
   reported: { id: string; conclusion: CheckConclusion }[];
 }
@@ -212,45 +217,72 @@ export async function reportVtResults(
     );
   }
 
-  // The frozen TAG's commit, never the plan branch head and never main: the
-  // branch can move after the freeze, and a check run on any other commit is
-  // invisible to L3's lookup at the frozen SHA (FR-007 — the frozen plan is the
-  // only thing a build is allowed to have been building). tagTargetSha is the
-  // shared annotated-tag dereference (plans.ts, also used by the freeze, the
-  // re-open, and L3's own read): freezes are always annotated, so reading
-  // `getRef().object.sha` directly would yield the TAG object's sha and every
-  // check run would land on a commit nothing looks at.
-  const headSha = await tagTargetSha(gh, repo, planRef);
-  if (headSha === null) {
+  // The frozen TAG's commit. tagTargetSha is the shared annotated-tag dereference
+  // (plans.ts, also used by the freeze, the re-open, and L3's own read): freezes are
+  // always annotated, so reading `getRef().object.sha` directly would yield the TAG
+  // object's sha and every check run would land on a commit nothing looks at.
+  const tagSha = await tagTargetSha(gh, repo, planRef);
+  if (tagSha === null) {
     // resolveCurrent found the tag a moment ago, so this is a genuine
     // disappearance rather than a normal absence — report it as such.
     throw new Error(`refusing to report: ${planRef} resolved as the official version but its tag has no target commit`);
   }
 
-  // PROVENANCE BINDING (GHI #72 option A, decided 2026-07-28) — the check that
-  // makes "untrusted input" true rather than aspirational.
+  // PROVENANCE BINDING (GHI #72 option A, decided 2026-07-28; REBOUND 2026-08-24 for
+  // FR-063) — the check that makes "untrusted input" true rather than aspirational,
+  // and the check that decides WHICH COMMIT the results describe.
   //
   // Everything validated above establishes the artifact's plan_ref is AN official
-  // frozen version whose plan defines the reported ids. None of it establishes it
-  // is the version THIS build ran against: a build dispatched for workload A could
-  // name workload B's official plan and B's real target ids, and B would satisfy
-  // L3 without ever being built.
+  // frozen version whose plan defines the reported ids. None of it establishes it is
+  // the version THIS run was about: a run for workload A could name workload B's
+  // official plan and B's real target ids, and B would satisfy L3 without ever being
+  // built.
   //
-  // Builds are dispatched ON the frozen tag (preflight B8 refuses anything else),
-  // so `workflow_run.head_sha` IS the frozen commit — the one signal in this
-  // pipeline the agent cannot author. Requiring the artifact's own ref to
-  // dereference to that same commit closes the substitution: naming another
-  // workload's plan yields a different SHA and is refused here, before any write.
+  // TWO ACCEPTED BINDINGS, and the difference between them is the whole of US18:
   //
-  // Absent expectSha is a local invocation with no triggering run; the workflow
-  // always passes it, and B8 is what guarantees it is the frozen tag's commit.
-  if (expectSha !== undefined && expectSha.trim().length > 0 && expectSha.trim() !== headSha) {
-    throw new Error(
-      `refusing to report: vt-results.json claims ${planRef} (commit ${headSha}), but the build that ` +
-        `produced it ran on commit ${expectSha.trim()} — results may only be reported against the plan the ` +
-        `build actually built (FR-007/FR-034). Nothing was written. If this build was dispatched on a ` +
-        `branch rather than the frozen tag, re-dispatch it selecting the TAG (preflight B8).`,
-    );
+  //   DESCENDANT (the rule, FR-063). A verify run executes against the MERGED
+  //   deliverable commit, so its `workflow_run.head_sha` is a descendant of the
+  //   frozen tag. The check runs are recorded THERE — on the code that actually
+  //   contains the work. This is what makes completion earnable against code that
+  //   exists.
+  //
+  //   IDENTICAL (the compatibility shim, constitution Frozen-Artifact Compatibility
+  //   route (a)). Before US18 a build verified the frozen TREE and produced no
+  //   deliverable, so its head_sha IS the tag's commit. Every plan frozen before
+  //   2026-08-24 depends on that reading, and refusing it would make each one
+  //   permanently unverifiable — the GHI #44/#109 mistake exactly.
+  //
+  //   REMOVAL DATE: 2027-02-24, or when no plan frozen before 2026-08-24 remains
+  //   un-completed in any governed repo, whichever is later. What the shim admits is
+  //   narrow and worth naming: results about the frozen tree, which describe code the
+  //   deliverable path did not produce. That is exactly the shape GHI #141 found —
+  //   which is why the shim accepts it only for the cohort that predates the fix, and
+  //   why `build-publish` refuses to create anything at all for a build with no
+  //   deliverable.
+  //
+  // Anything else — `behind`, `diverged`, unrelated — is refused. A result about a
+  // commit the approved plan does not lead to is a result about something else.
+  let headSha = tagSha;
+  const verified = expectSha?.trim();
+  if (verified !== undefined && verified.length > 0 && verified !== tagSha) {
+    let status: string;
+    try {
+      const { data } = await gh.repos.compareCommits({ ...repo, base: tagSha, head: verified });
+      status = data.status;
+    } catch {
+      status = 'unrelated';
+    }
+    if (status !== 'ahead' && status !== 'identical') {
+      throw new Error(
+        `refusing to report: vt-results.json claims ${planRef} (frozen commit ${tagSha.slice(0, 8)}), but the run ` +
+          `that produced it verified commit ${verified.slice(0, 8)}, which is "${status}" relative to the frozen ` +
+          'tag — not a descendant of it. Verification results may only describe code the approved plan led to ' +
+          '(FR-063, preflight B9). Nothing was written.',
+      );
+    }
+    // Record on the MERGED commit — the code that actually contains the verified
+    // work. This one assignment is what US18 moved.
+    headSha = verified;
   }
 
   // Coverage is deliberately NOT checked here. A report naming only some
@@ -275,7 +307,12 @@ export async function reportVtResults(
         // workload's record stays reviewable) — the check text the target
         // committed to, next to the result it got.
         title: `${target.kind} — ${result.conclusion}`,
-        summary: `${target.check}\n\nFrozen plan: ${planRef} (${headSha})\nMaps to: ${target.maps_to.join(', ')}`,
+        summary:
+          `${target.check}\n\n` +
+          `${target.run ? `Executed: \`${target.run}\`\n` : ''}` +
+          `Frozen plan: ${planRef} (${tagSha})\n` +
+          `Verified commit: ${headSha}${headSha === tagSha ? ' — the frozen tree itself (pre-US18 compatibility shim)' : ' — the merged deliverable'}\n` +
+          `Maps to: ${target.maps_to.join(', ')}`,
       },
     });
   }

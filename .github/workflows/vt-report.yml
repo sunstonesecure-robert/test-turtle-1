@@ -1,12 +1,11 @@
-# vt-report — deterministic reporter that turns the build agent's
-# verification-target results into `vt-*` check runs on the frozen plan SHA
-# (plain Actions YAML, no LLM — the work is a pure function of the artifact).
-# On build-template completion: downloads the build run's vt-results.json,
-# validates it as UNTRUSTED agent-authored input, and creates one check run per
-# reported target, named with the target id verbatim, on the commit the frozen
-# plan tag points at. Those check runs are what lifecycle-gate row L3 reads when
-# the operator declares a workload complete (FR-034, contracts/gate-checks-cli.md
-# §3) — nothing else writes them.
+# vt-report — deterministic reporter that turns a verify run's verification-target
+# results into `vt-*` check runs on the commit those results actually describe: the
+# MERGED DELIVERABLE COMMIT (plain Actions YAML, no LLM — the work is a pure function
+# of the artifact). On build-verify completion: downloads that run's vt-results.json,
+# validates it as UNTRUSTED input, and creates one check run per reported target,
+# named with the target id verbatim, on the commit the verify run executed against.
+# Those check runs are what lifecycle-gate row L3 reads when the operator declares a
+# workload complete (FR-034 as amended, FR-063) — nothing else writes them.
 #
 # WHY THIS IS SEPARATE FROM THE AGENT JOB (substrate split): T154's wording puts
 # the reporter step inside build-template.md, but the build-template agent job is
@@ -18,26 +17,29 @@
 # plan-propose.lock.yml → plan-publish.yml precedent: read-only agent uploads an
 # artifact, a deterministic workflow_run workflow performs the privileged write.
 #
-# WHAT IT REFUSES (and therefore never writes): an artifact whose plan_ref does
-# not dereference to the TRIGGERING BUILD'S OWN COMMIT
-# (`workflow_run.head_sha`) — the provenance binding, GHI #72 option A: builds
-# are dispatched ON the frozen tag (preflight B8 refuses anything else), so
-# head_sha is the one signal in this pipeline the agent cannot author, and
-# without this check a build for workload A could report against workload B's
-# plan and complete B without ever building it; a plan_ref that is not the
-# derived official version for its slug (results for a superseded version could
-# never satisfy L3, and stamping them would make a stale green look current); a
-# target id the frozen plan does not define (a check run no plan can explain);
-# any conclusion outside GitHub's accepted set. Validation completes before the
-# first write, so a bad artifact produces no partial report.
+# WHAT IT REFUSES (and therefore never writes): a run whose commit is NOT A
+# DESCENDANT of the frozen plan tag — the provenance binding, GHI #72 option A as
+# rebound by FR-063. `workflow_run.head_sha` is the one signal in this pipeline no
+# agent can author, and it is simultaneously the binding AND the answer to "which
+# commit do these results describe?". `identical` is accepted as the pre-US18
+# compatibility shim (a build that verified the frozen tree itself); `behind`,
+# `diverged` and unrelated are refused, because a result about a commit the approved
+# plan does not lead to is a result about something else. Also refused: a plan_ref
+# that is not the derived official version for its slug (results for a superseded
+# version could never satisfy L3, and stamping them would make a stale green look
+# current); a target id the frozen plan does not define (a check run no plan can
+# explain); any conclusion outside GitHub's accepted set. Validation completes before
+# the first write, so a bad artifact produces no partial report.
 #
 # RE-RUNNABLE, NEVER DESTRUCTIVE: a later report creates a NEW check run with the
 # same name on the same SHA; L3 reads the latest run per name, so it supersedes
 # without deleting or overwriting the earlier attempt (FR-042 — no delete exists).
 #
-# Fails closed: the job only runs on a successful build, and a build whose
-# results never land leaves its targets without check runs — which is exactly
-# what L3 refuses completion on.
+# Fails closed: the job only runs on a successful verify run, and a target whose
+# result never lands has no check run — which is exactly what L3 refuses completion
+# on. A build that produced no deliverable never reaches this workflow at all:
+# build-publish refuses to create a branch for it, so there is no merge, no verify
+# run, and no results. Verification of nothing must not read as verification.
 #
 # NOTE: workflow_run only fires from the copy of this file on the default branch,
 # and it keys on the target workflow's compiled `name:`, never its file id (live
@@ -53,13 +55,29 @@ name: vt-report
 # workload A reporting against workload B's plan.
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
-    # MUST match build-template.lock.yml's compiled `name:` exactly.
-    workflows: ["build-template — dispatched agent build, gated by preflight"]
+    # THE TRIGGER MOVED FROM build-template TO build-verify (2026-08-24, FR-063).
+    #
+    # It used to fire on the BUILD agent's completion, so the agent's own
+    # vt-results.json became check runs on the FROZEN commit — a report about code the
+    # repository did not contain, because the work lived in a throwaway worktree that
+    # died with the runner. Run 32658500322 wrote three green targets for
+    # `dashboard/lib/current-time.ts` at a commit that has never held that file, and
+    # completion was one click from certifying it (GHI #141).
+    #
+    # It now fires on build-verify, which runs on the MERGED deliverable commit, so
+    # `workflow_run.head_sha` is the code being judged. This is a DELIBERATE BREAKING
+    # CHANGE for the pre-US18 cohort: a plan frozen before the deliverable path
+    # existed can no longer earn completion from a frozen-tree build, because nothing
+    # emits results for one any more. Such a plan must be re-opened (FR-008) and
+    # rebuilt through the deliverable path. That is the honest outcome — the
+    # alternative is keeping a route by which "verified" means "verified against
+    # something that was never committed".
+    workflows: ["build-verify"]
     types: [completed]
 permissions:
-  checks: write # the vt-<id> check runs on the frozen plan SHA — this workflow is their ONLY writer
-  contents: read # dereference the frozen plan tag + read plan.json at it to validate the reported ids
-  actions: read # download the build run's vt-results.json artifact (cross-run artifact read)
+  checks: write # the vt-<id> check runs on the verified commit — this workflow is their ONLY writer
+  contents: read # dereference the frozen plan tag, read plan.json at it, compare commits for descendancy
+  actions: read # download the verify run's vt-results.json artifact (cross-run artifact read)
 concurrency:
   group: vt-report-${{ github.event.workflow_run.id }}
 jobs:
@@ -68,22 +86,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # No git credentials in .git/config: every write here goes through
           # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 20
       - run: npm ci
-      - name: download the build run's verification results artifact
+      - name: download the verify run's verification results artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}/vt-artifacts
-      - name: report vt-<id> check runs on the frozen plan SHA
+      - name: report vt-<id> check runs on the verified (merged deliverable) commit
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}

@@ -18,8 +18,25 @@ import type { RepoRef } from '../dashboard/lib/github/client';
 const PRODUCT_ROOT = resolve(new URL('..', import.meta.url).pathname);
 
 /** Directories vendored recursively + single files, all relative to the product root. */
-const TOOLCHAIN_DIRS = ['schemas', 'scripts', 'dashboard/lib'] as const;
-const TOOLCHAIN_FILES = [
+/** Exported so the drift guard can assert what is vendored rather than restate it
+ *  (`tests/unit/vendored-toolchain.test.ts`, GHI #143): these directories are
+ *  globed wholesale, so a new cross-boundary import joins every governed repo
+ *  automatically — the guard is what notices. */
+export const TOOLCHAIN_DIRS = ['schemas', 'scripts', 'dashboard/lib', 'executors'] as const;
+
+/** Product-side `templates/<dir>` walked into the target's `.github/<dir>`. */
+export const TEMPLATE_DIRS = ['workflows', 'ISSUE_TEMPLATE'] as const;
+
+/** Where those template directories LAND in a governed repo — the reserved-path
+ *  set needs the target-side paths, not the product-side ones, and deriving them
+ *  from `TEMPLATE_DIRS` keeps the two from drifting (FR-068). */
+export const INSTALLED_TEMPLATE_DIRS = TEMPLATE_DIRS.map((d) => `.github/${d}`);
+/** Single files vendored verbatim. Exported for the same reason as
+ *  `TOOLCHAIN_DIRS` (T237): the reserved path set DERIVES from this manifest
+ *  rather than restating it, so a file added here becomes off-limits to every
+ *  agent build with no second edit (`scripts/gates/lib/reserved-paths.ts`,
+ *  FR-068). */
+export const TOOLCHAIN_FILES = [
   'package.json',
   'package-lock.json',
   'tsconfig.json',
@@ -41,7 +58,7 @@ function walk(dir: string): string[] {
 /** target-repo path → file content, from the local product checkout. */
 export function collectInstallFiles(productRoot: string = PRODUCT_ROOT): Map<string, string> {
   const files = new Map<string, string>();
-  for (const templateDir of ['workflows', 'ISSUE_TEMPLATE'] as const) {
+  for (const templateDir of TEMPLATE_DIRS) {
     const src = join(productRoot, 'templates', templateDir);
     for (const file of walk(src)) {
       files.set(`.github/${templateDir}/${relative(src, file)}`, readFileSync(file, 'utf8'));

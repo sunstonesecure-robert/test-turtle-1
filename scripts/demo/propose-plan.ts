@@ -14,6 +14,21 @@ import { errorMessage } from '../../dashboard/lib/github/errors';
  * plan (one boundary case, one verification target) to plan/demo/v1, and
  * raises the Andon break. In production this runs inside the plan-propose
  * gh-aw workflow via safe outputs; the seed writes through the same seam.
+ *
+ * THE SUBJECT IS A STANDALONE SCRIPT, DELIBERATELY (T243, FR-068). This plan
+ * used to describe "the operator-facing hello-world greeting on the demo page"
+ * with acceptance "GET /demo returns HTTP 200" — a route that does not exist in
+ * dashboard/app/, so the only way to satisfy it was to ADD ONE TO THE OVERSIGHT
+ * DASHBOARD. The suite's most-copied example therefore modelled exactly the
+ * failure GHI #141 found live: a plan aimed at the installed machinery rather
+ * than at the operator's own software. It now matches the tracer's own example
+ * everywhere else in the suite (plan.md, contracts/build-executor.md, T213):
+ * a standalone hello.py at the repo root.
+ *
+ * IDs are unchanged on purpose — step-hello, vt-hello-copy and bc-empty-name
+ * are keyed on by four integration suites, and bc-empty-name is the
+ * deliberately-wrong boundary case quickstart §4 and PB-001 depend on. No
+ * `scope` field is added: PlanStep is additionalProperties:false until T223.
  */
 
 export function demoPlan(runId: string): PlanDoc {
@@ -26,9 +41,9 @@ export function demoPlan(runId: string): PlanDoc {
     steps: [
       {
         id: 'step-hello',
-        title: 'Render the demo greeting',
-        intent: 'Show the operator-facing hello-world greeting on the demo page',
-        acceptance: 'GET /demo returns HTTP 200 and the body contains the exact greeting string',
+        title: 'Print the demo greeting from hello.py',
+        intent: 'Add a standalone hello.py at the repo root that prints the operator-facing greeting',
+        acceptance: 'Running `python hello.py` exits 0 and prints exactly the greeting string',
         priority: 'MUST',
         evidence_tag: 'verified',
         stand_in: null,
@@ -42,7 +57,7 @@ export function demoPlan(runId: string): PlanDoc {
       {
         id: 'vt-hello-copy',
         kind: 'exact-copy',
-        check: 'Response body of GET /demo equals "Hello, operator!"',
+        check: 'stdout of `python hello.py` equals "Hello, operator!"',
         maps_to: ['step-hello'],
       },
     ],
