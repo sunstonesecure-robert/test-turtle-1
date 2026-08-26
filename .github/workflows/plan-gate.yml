@@ -70,10 +70,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # TWO CHECKOUTS, AND ONLY ONE OF THEM IS THE CANDIDATE'S (Codex on PR #145,
+      # 2026-08-25 — flagged on deliverable-gate, and this file had it too).
+      #
+      # An unqualified `actions/checkout` on a `pull_request` event checks out the PR's
+      # MERGE COMMIT, and the step below then executes `scripts/gates/plan-gate.ts` out
+      # of it — so an approval pull request could carry a neutered G1–G16 and have its
+      # own gate report the required check green. The agent path cannot reach this
+      # (`plan-publish` writes only `plans/<slug>/plan.json`, so a plan branch's gate
+      # code is whatever base had), but a hand-crafted `plan/**` branch can, and the
+      # gate that guards the operator's go-ahead should not be readable as
+      # "whatever the thing under review says it is".
+      #
+      # THE GATE CODE from the default branch. Same reasoning as GHI #107: freezing the
+      # plan is FR-007, freezing the policy that judges it is not.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event.repository.default_branch }}
           # No git credentials in .git/config: every write here goes through
           # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
+          persist-credentials: false
+      # THE PLAN DOCUMENT from the pull request, into a subdirectory it cannot escape.
+      # This IS the thing under review and it has to come from the candidate — but it
+      # is DATA, read and schema-validated by G1, never executed.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: candidate
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -92,8 +114,10 @@ jobs:
         run: |
           set -euo pipefail
           slug="$(printf '%s' "$HEAD_REF" | sed -n 's#^plan/\([a-z0-9][a-z0-9-]*\)/v[0-9][0-9]*$#\1#p')"
-          path="plan.json"
-          if [ -n "$slug" ] && [ -f "plans/$slug/plan.json" ]; then path="plans/$slug/plan.json"; fi
+          # Resolved inside the CANDIDATE checkout — the document under review lives
+          # there, while the gate code that reads it comes from the default branch.
+          path="candidate/plan.json"
+          if [ -n "$slug" ] && [ -f "candidate/plans/$slug/plan.json" ]; then path="candidate/plans/$slug/plan.json"; fi
           echo "path=$path" >> "$GITHUB_OUTPUT"
       - name: plan-gate (G1, G2–G4, G7–G11)
         env:

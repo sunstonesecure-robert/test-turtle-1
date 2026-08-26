@@ -65,6 +65,10 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
     body: pr.body ?? '',
     labels: pr.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? ''))),
     paths,
+    // WHO opened it — D1's cheapest forgery check (Codex on PR #145). The
+    // deterministic writer runs as an Actions identity; a person cannot be it.
+    authorLogin: pr.user?.login ?? '(unknown)',
+    authorIsBot: pr.user?.type === 'Bot',
   };
 
   // D1 runs first and its marker feeds the rest: the step every later gate judges
@@ -90,7 +94,31 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
     { id: 'D1', run: () => ({ id: d1.id, status: d1.status, requirement: d1.requirement, ...(d1.detail ? { detail: d1.detail } : {}) }) },
     { id: 'D2', skip: noStep, run: () => checkD2ScopeContainment(subject, step) },
     { id: 'D3', skip: noStep, run: () => checkD3MergeAuthority(step, { requiresOperatorMerge }) },
-    { id: 'D4', skip: noMarker, run: () => checkD4ExecutorProvenance(d1.marker) },
+    {
+      id: 'D4',
+      skip: noMarker,
+      // The config is read AT THE FROZEN TAG — the commit the operator approved — and
+      // `executors/` is inside the reserved set, so a deliverable cannot edit its own
+      // configuration into compliance (D5). Both properties are what make loading it
+      // here meaningful rather than decorative (FR-066).
+      run: () =>
+        checkD4ExecutorProvenance(d1.marker, async (executorId) => {
+          if (!d1.marker) return null;
+          try {
+            const { data } = await gh.repos.getContent({
+              ...repo,
+              path: `executors/${executorId}.yml`,
+              ref: d1.marker.planRef,
+            });
+            if (Array.isArray(data) || !('content' in data)) return null;
+            return Buffer.from(data.content, 'base64').toString('utf8');
+          } catch {
+            // Absent is a legitimate state for the in-sandbox reference executor;
+            // D4 decides what absence means per tier.
+            return null;
+          }
+        }),
+    },
     // NO `skip`, deliberately, and this is the difference that matters. D2/D3/D4 all
     // need the plan to have resolved; D5 needs nothing but the paths. A patch whose
     // marker is missing, whose plan is unreadable, or whose step is a lie is exactly

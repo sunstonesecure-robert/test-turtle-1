@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { mergeRecheck } from './read-after-write';
-import { errorStatus, Refusal } from './errors';
+import { errorStatus, isRefusal, Refusal } from './errors';
 import { CONTRADICTION_LABEL } from './labels';
 import { EVIDENCE_DIR, commitEvidenceFile, readEvidenceFile, type StoredEvidenceFile } from './evidence-store';
 import { parseWorkloadEvent } from './markers';
@@ -142,6 +142,24 @@ export interface EvidenceBatch {
   source: string;
   kind: EvidenceKind;
   items: EvidenceItem[];
+  /**
+   * The `evidence:batch` issue that surfaces this record — the reverse of the link
+   * `batchBody` already writes into the issue (Codex on PR #138, 2026-08-25).
+   *
+   * OPTIONAL, and it has to be: the file is committed BEFORE the issue exists (an
+   * issue pointing at a missing file is a broken record; a file without an issue is
+   * only an unsurfaced one), so a brand-new record carries no number until a second
+   * commit adds it, and every record written before today has none at all.
+   *
+   * WHY IT EXISTS. Recovering the issue by LISTING issues is not sound: the list
+   * endpoint is not read-after-write consistent — this repo has known that since
+   * PB-003 and says so in `getWorkloadByIssue` — so a batch recorded and then
+   * appended to seconds later found the file, missed its own issue, and opened a
+   * SECOND one with the same title and label. Two review surfaces for one durable
+   * record, in exactly the immediate-repeat case GHI #136 exists to support. With the
+   * number in the record, recovery goes through `issues.get`, which IS consistent.
+   */
+  issue?: number;
 }
 
 /**
@@ -232,6 +250,7 @@ function parseBatch(path: string, raw: string): EvidenceBatch {
   if (
     typeof batch !== 'object' || batch === null ||
     typeof batch.source !== 'string' ||
+    (batch.issue !== undefined && (typeof batch.issue !== 'number' || !Number.isInteger(batch.issue) || batch.issue <= 0)) ||
     !(['feedback', 'analytics', 'test-results'] as const).includes(batch.kind as EvidenceKind) ||
     !Array.isArray(batch.items) ||
     batch.items.some((item) => typeof item !== 'object' || item === null || typeof (item as EvidenceItem).summary !== 'string')
@@ -273,6 +292,12 @@ export interface RecordedBatch {
   /** observations this call added — 0 is valid: an interval that reported nothing
    *  is still evidence that we looked */
   appended: number;
+  /** observations this call offered that the record ALREADY held, and which were
+   *  therefore not duplicated (Codex on PR #138). Surfaced rather than swallowed: a
+   *  submission that added nothing because it was a retry is a different fact from
+   *  one that added nothing because it carried nothing, and the operator is told
+   *  which they got. */
+  alreadyPresent: number;
   /** observations the batch holds after this call — what the operator is told the
    *  record now contains, which is not derivable from `appended` on an append */
   total: number;
@@ -308,24 +333,126 @@ async function locateBatchRecord(
   return null;
 }
 
-/** The batch issue for this record, opened if the record has none — a file
- *  without an issue is an unsurfaced record, and a re-run converges. */
+/**
+ * The batch issue for this record, opened if the record genuinely has none — a file
+ * without an issue is an unsurfaced record, and a re-run converges.
+ *
+ * THREE LOOKUPS, IN THIS ORDER, and the first one is the fix (Codex on PR #138,
+ * 2026-08-25):
+ *
+ *  1. **The record's own `issue` field, via `issues.get`.** Read-after-write
+ *     consistent, so a batch appended to seconds after it was created finds its own
+ *     issue. Without this the list below missed it and a SECOND issue was opened with
+ *     the same title and label — two review and reconciliation surfaces for one
+ *     durable record, in precisely the immediate-repeat case GHI #136 exists to
+ *     support. The `get` is verified rather than trusted: a number pointing at a
+ *     closed issue, a pull request, or something that is not a batch is treated as no
+ *     link at all, because the file is operator-editable text.
+ *  2. **The list**, for records written before the field existed. Still lag-prone;
+ *     that is now a fallback for legacy data rather than the primary path.
+ *  3. **Create one**, and hand the number back so the caller can write it into the
+ *     record — which is what stops step 3 from happening twice.
+ */
 async function batchIssueFor(
   gh: Octokit,
   repo: RepoRef,
   input: { date: string; source: string | null; path: string; batch: EvidenceBatch },
-): Promise<number> {
+): Promise<{ issueNumber: number; recordedInFile: boolean }> {
+  if (input.batch.issue !== undefined) {
+    const named = await getEvidenceBatchRef(gh, repo, input.batch.issue);
+    // The ref parser only answers for an issue whose TITLE matches the batch
+    // grammar, which is what makes believing a number out of a text file safe.
+    if (named && named.date === input.date && (named.source ?? null) === input.source) {
+      return { issueNumber: input.batch.issue, recordedInFile: true };
+    }
+  }
   const existing = (await listEvidenceBatches(gh, repo)).find(
     (b) => b.date === input.date && (b.source ?? null) === input.source,
   );
-  if (existing) return existing.issueNumber;
+  if (existing) return { issueNumber: existing.issueNumber, recordedInFile: false };
   const { data: issue } = await gh.issues.create({
     ...repo,
     title: batchTitle(input.date, input.source),
     body: batchBody(input.path, input.batch),
     labels: ['evidence:batch'],
   });
-  return issue.number;
+  return { issueNumber: issue.number, recordedInFile: false };
+}
+
+/**
+ * Write the issue number INTO the durable record, so the next call can find the
+ * issue without asking a lagging list (Codex on PR #138).
+ *
+ * A second commit, and unavoidably so: the file is committed before the issue exists
+ * — deliberately, because an issue pointing at a missing file is a broken record
+ * while a file without an issue is merely unsurfaced. This is the converging half of
+ * that trade.
+ *
+ * Best-effort ON PURPOSE. If this commit fails the record is still correct and its
+ * issue still exists; the only loss is that the next call falls back to the list. So
+ * a failure here must not fail the operator's write, which already succeeded — it
+ * would report "nothing was written" about a record that is sitting there.
+ */
+async function linkIssueIntoRecord(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { path: string; batch: EvidenceBatch; issueNumber: number },
+): Promise<void> {
+  try {
+    const current = await readEvidenceFile(gh, repo, input.path);
+    if (!current) return;
+    const batch = parseBatch(input.path, current.content);
+    if (batch.issue === input.issueNumber) return; // already converged
+    await commitEvidenceFile(gh, repo, {
+      path: input.path,
+      content: `${JSON.stringify({ ...batch, issue: input.issueNumber }, null, 2)}\n`,
+      message: `evidence: link ${input.path} to its batch issue #${input.issueNumber}`,
+      sha: current.sha,
+    });
+  } catch {
+    // Deliberately swallowed — see the docblock. The record and the issue both
+    // exist; only the shortcut between them is missing, and the list fallback covers
+    // it until the next append converges.
+  }
+}
+
+/**
+ * Which incoming observations are NOT already in the record (Codex on PR #138,
+ * 2026-08-25) — the fix for a retry duplicating a whole batch.
+ *
+ * THE FAILURE IT CLOSES. The create path commits the file and then opens the issue.
+ * If `issues.create` fails — a transient 5xx, a secondary rate limit — the file
+ * exists with its observations and no issue. The retry then takes the APPEND path,
+ * correctly opens the missing issue, and unconditionally concatenated the same
+ * observations onto the ones already committed. Every item duplicated, permanently:
+ * nothing deletes from this record (FR-042), and the scheduled collector re-collects
+ * the same observations on its next interval, so the retry is the expected path
+ * rather than an unlucky one.
+ *
+ * IDENTITY IS THE CONTENT: summary plus the step ids it bears on. Deliberately not a
+ * generated id — the whole point is to recognise an observation we have already
+ * committed, and only its content can do that across two runs.
+ *
+ * THE COST, STATED: two genuinely distinct observations that say exactly the same
+ * thing about exactly the same steps collapse into one. A duplicate identical line
+ * carries no information a reader could act on differently, and the alternative is
+ * permanent duplication of an audit record on any transient API blip. The caller
+ * reports how many were skipped, so this is never silent.
+ */
+export function newObservations(existing: EvidenceItem[], incoming: EvidenceItem[]): EvidenceItem[] {
+  const key = (item: EvidenceItem): string =>
+    JSON.stringify([item.summary.trim(), [...(item.relates_to ?? [])].sort()]);
+  const seen = new Set(existing.map(key));
+  const out: EvidenceItem[] = [];
+  for (const item of incoming) {
+    const k = key(item);
+    // Also guards duplicates WITHIN one submission, which the old path would have
+    // committed twice just as happily.
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(item);
+  }
+  return out;
 }
 
 /**
@@ -362,22 +489,37 @@ export async function recordEvidenceBatch(
           'observations of a different kind belong in their own batch: record them under a distinct source',
       );
     }
-    const issueNumber = await batchIssueFor(gh, repo, {
+    const surfaced = await batchIssueFor(gh, repo, {
       date: input.date,
       source: located.legacy ? null : source,
       path: located.path,
       batch: located.batch,
     });
+    const issueNumber = surfaced.issueNumber;
+    // ONLY the new observations. An append that re-offers what the record already
+    // holds is the create-retry path, and concatenating it duplicated the batch
+    // permanently (Codex on PR #138).
+    const fresh = newObservations(located.batch.items, input.items);
+    const skipped = input.items.length - fresh.length;
     // Nothing to add is a valid outcome, not a refusal: a scheduled interval
     // that reported nothing is still evidence that we looked, and re-running it
     // must not litter the record with empty appends.
-    if (input.items.length === 0) {
+    if (fresh.length === 0) {
+      // Nothing NEW to add — either an empty submission (a scheduled interval that
+      // reported nothing is still evidence that we looked) or a retry of observations
+      // already committed. Both are valid outcomes, not refusals, and both must leave
+      // the record exactly as it is. The issue link is still repaired below-by-way-of
+      // `batchIssueFor` above, which is the converging half.
+      if (!surfaced.recordedInFile && located.batch.issue === undefined) {
+        await linkIssueIntoRecord(gh, repo, { path: located.path, batch: located.batch, issueNumber });
+      }
       return {
         issueNumber,
         path: located.path,
         source: located.legacy ? null : source,
         created: false,
         appended: 0,
+        alreadyPresent: skipped,
         total: located.batch.items.length,
       };
     }
@@ -387,36 +529,41 @@ export async function recordEvidenceBatch(
     // observations; one retry re-reads and re-merges, which is all a
     // single-conflict race needs and is bounded so a persistent conflict still
     // surfaces instead of looping.
-    let merged: EvidenceBatch = { ...located.batch, items: [...located.batch.items, ...input.items] };
+    let merged: EvidenceBatch = { ...located.batch, issue: issueNumber, items: [...located.batch.items, ...fresh] };
     try {
       await commitEvidenceFile(gh, repo, {
         path: located.path,
         content: `${JSON.stringify(merged, null, 2)}\n`,
-        message: `evidence: append ${input.items.length} observation(s) to ${input.date} (${located.batch.source})`,
+        message: `evidence: append ${fresh.length} observation(s) to ${input.date} (${located.batch.source})`,
         sha: located.stored.sha,
       });
     } catch (error: unknown) {
       if (errorStatus(error) !== 409 && errorStatus(error) !== 422) throw error;
-      const fresh = await locateBatchRecord(gh, repo, input.date, source);
-      if (!fresh) throw error;
-      merged = { ...fresh.batch, items: [...fresh.batch.items, ...input.items] };
+      const reread = await locateBatchRecord(gh, repo, input.date, source);
+      if (!reread) throw error;
+      // Re-dedupe against what the OTHER writer just committed: the whole reason this
+      // retry exists is that someone else appended between our read and our write, so
+      // their observations may be the same ones we are holding.
+      const stillNew = newObservations(reread.batch.items, fresh);
+      merged = { ...reread.batch, issue: issueNumber, items: [...reread.batch.items, ...stillNew] };
       await commitEvidenceFile(gh, repo, {
-        path: fresh.path,
+        path: reread.path,
         content: `${JSON.stringify(merged, null, 2)}\n`,
-        message: `evidence: append ${input.items.length} observation(s) to ${input.date} (${fresh.batch.source})`,
-        sha: fresh.stored.sha,
+        message: `evidence: append ${stillNew.length} observation(s) to ${input.date} (${reread.batch.source})`,
+        sha: reread.stored.sha,
       });
     }
     await gh.issues.update({ ...repo, issue_number: issueNumber, body: batchBody(located.path, merged) });
-    const named = [...new Set(input.items.flatMap((item) => item.relates_to ?? []))].sort();
+    const named = [...new Set(fresh.flatMap((item) => item.relates_to ?? []))].sort();
     await gh.issues.createComment({
       ...repo,
       issue_number: issueNumber,
       body: [
-        `<!-- evidence-append:v1 date:${input.date} source:${source} items:${input.items.length}` +
+        `<!-- evidence-append:v1 date:${input.date} source:${source} items:${fresh.length}` +
           `${input.actor ? ` by:@${input.actor}` : ''}${input.at ? ` at:${input.at}` : ''} -->`,
-        `**Appended** ${input.items.length} observation(s) to \`${located.path}\` (${merged.items.length} in the batch now):`,
-        ...input.items.map((item) => `- ${item.summary}${item.relates_to?.length ? ` — ${item.relates_to.join(', ')}` : ''}`),
+        `**Appended** ${fresh.length} observation(s) to \`${located.path}\` (${merged.items.length} in the batch now)` +
+          `${skipped > 0 ? `; ${skipped} already in the record and not duplicated` : ''}:`,
+        ...fresh.map((item) => `- ${item.summary}${item.relates_to?.length ? ` — ${item.relates_to.join(', ')}` : ''}`),
         ...(named.length > 0 ? ['', `Names step(s): ${named.join(', ')}`] : []),
       ].join('\n'),
     });
@@ -425,7 +572,8 @@ export async function recordEvidenceBatch(
       path: located.path,
       source: located.legacy ? null : source,
       created: false,
-      appended: input.items.length,
+      appended: fresh.length,
+      alreadyPresent: skipped,
       total: merged.items.length,
     };
   }
@@ -433,7 +581,10 @@ export async function recordEvidenceBatch(
   // A new batch. The canonical name carries the source, so a second source on
   // the same date is a second record rather than a refusal.
   const path = batchPath(input.date, source);
-  const batch: EvidenceBatch = { source: input.source, kind: input.kind, items: input.items };
+  // Deduped within the submission too: the old path would have committed a repeated
+  // observation twice as happily as it duplicated a whole retried batch.
+  const items = newObservations([], input.items);
+  const batch: EvidenceBatch = { source: input.source, kind: input.kind, items };
   await commitEvidenceFile(gh, repo, {
     path,
     content: `${JSON.stringify(batch, null, 2)}\n`,
@@ -445,7 +596,18 @@ export async function recordEvidenceBatch(
     body: batchBody(path, batch),
     labels: ['evidence:batch'],
   });
-  return { issueNumber: issue.number, path, source, created: true, appended: input.items.length, total: batch.items.length };
+  // The reverse link, so an append seconds from now finds THIS issue instead of
+  // opening a second one past the list lag.
+  await linkIssueIntoRecord(gh, repo, { path, batch, issueNumber: issue.number });
+  return {
+    issueNumber: issue.number,
+    path,
+    source,
+    created: true,
+    appended: items.length,
+    alreadyPresent: input.items.length - items.length,
+    total: items.length,
+  };
 }
 
 export interface EvidenceBatchRef {
@@ -464,10 +626,26 @@ function refFromTitle(issueNumber: number, title: string): EvidenceBatchRef | nu
 }
 
 /** One batch by issue number, through the read-after-write-consistent GET.
- *  `null` for a PR number, an issue that is not a batch, or a title the batch
- *  grammar does not match — which is what makes an untrusted URL hint safe. */
+ *  `null` for a PR number, an issue that is not a batch, a title the batch grammar
+ *  does not match, or an issue number that does not exist — which is what makes an
+ *  untrusted URL hint safe.
+ *
+ *  THE 404 CASE WAS MISSING (found 2026-08-25 by a test written for a different fix).
+ *  Every other way of being wrong about the number returned `null`; a number naming
+ *  no issue at all threw, and the callers are both untrusted-input paths — the
+ *  `?just=` re-read hint on the evidence page, and now a batch record's own `issue`
+ *  pointer. So `/evidence?just=99999` crashed the page with a fault, which is exactly
+ *  the crash-page outcome FR-067 exists to end, and a hand-edited record pointer
+ *  would have failed an operator's write instead of falling back to the list.
+ *  Absence is the same class of wrongness as the rest: it returns `null`. */
 async function getEvidenceBatchRef(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<EvidenceBatchRef | null> {
-  const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+  let issue;
+  try {
+    ({ data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber }));
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
+    throw error;
+  }
   if (issue.pull_request) return null;
   // The SAME membership the list query enforces (`labels: 'evidence:batch'`), or
   // the direct read is the weaker of the two and the hint becomes a way in. The
@@ -540,6 +718,13 @@ export interface ReconcileResult {
   flagged: string[];
   /** the new in-review plan ref, or null when a proposal was already in flight */
   reopenedAs: string | null;
+  /**
+   * Why the plan did NOT re-open, when it did not and a live review is not the reason
+   * (Codex on PR #138). Non-null means the flags and the reconciliation comment
+   * landed and the correction path did not open — a genuine partial outcome, which
+   * the caller must report as such rather than as "nothing was written".
+   */
+  reopenBlocked: string | null;
 }
 
 /**
@@ -635,12 +820,41 @@ export async function markContradicted(
   // branch-exists TOCTOU flavor can also mean an ORPHAN branch from a partial
   // prior re-open (branch cut, Andon never created), and converting that into
   // success would report a correction path that does not exist.
+  //
+  // A REFUSAL HERE MUST NOT ESCAPE (Codex on PR #138, 2026-08-25). The labels above
+  // and the reconciliation comment have ALREADY landed. `operatorWrite` catches a
+  // `Refusal` and redirects to a banner that says, in as many words, that nothing was
+  // written — so the one thing this function must never do is throw a Refusal after
+  // its own writes have succeeded. It reported a zero-write outcome for a call that
+  // flagged a dependency closure and left a permanent comment on the batch issue.
+  //
+  // Reachable, not theoretical: `reopenPlan` throws `Refusal('already re-opened:
+  // branch <ref> exists')` for the branch-creation TOCTOU, which is a different
+  // message from the 'awaiting review' case that was already absorbed here.
+  //
+  // So the re-open's failure becomes part of the OUTCOME rather than an exception.
+  // `reopenedAs` stays null — a correction path that does not exist is never claimed
+  // (which is why the orphan-branch case was re-thrown in the first place) — and
+  // `reopenBlocked` carries the reason, so the caller can report both halves of what
+  // truly happened: the flags landed, the re-open did not, and here is why.
   let reopenedAs: string | null = null;
+  let reopenBlocked: string | null = null;
   try {
     const reopened = await reopenPlan(gh, repo, { slug: input.workloadSlug, actor: input.actor, at: input.at });
     reopenedAs = reopened.planRef;
   } catch (error: unknown) {
-    if (!(error instanceof Error) || !error.message.includes('awaiting review')) throw error;
+    if (!(error instanceof Error)) throw error;
+    // 'awaiting review' keeps its established meaning: a live review absorbs the
+    // correction, which is a complete outcome and not a blockage.
+    if (error.message.includes('awaiting review')) {
+      // nothing to record — the caller's existing copy covers this case
+    } else if (isRefusal(error)) {
+      reopenBlocked = error.message;
+    } else {
+      // A genuine fault (a 5xx, an unparseable document) still throws: it is not an
+      // expected decision, and the flags having landed does not make it one.
+      throw error;
+    }
   }
-  return { flagged, reopenedAs };
+  return { flagged, reopenedAs, reopenBlocked };
 }

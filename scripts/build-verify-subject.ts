@@ -2,6 +2,9 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import { planRefForMergedCommit } from './build-verify';
 import { listDeliverablePrs } from '../dashboard/lib/github/builds';
+import { deriveCompletionStatus, listVtCheckRuns } from '../dashboard/lib/github/checks';
+import { readPlanAtRef, slugFromPlanRef } from '../dashboard/lib/github/plans';
+import { commitmentScope } from './gates/lib/checks-scope';
 import type { Octokit } from '@octokit/rest';
 
 /**
@@ -34,7 +37,27 @@ import type { Octokit } from '@octokit/rest';
  * the same reason: a question asked of repository state cannot miss an event.
  */
 
-/** The newest merged deliverable whose merge commit carries no verification yet. */
+/**
+ * The newest merged deliverable whose verification is not COMPLETE — not merely
+ * "has no check runs".
+ *
+ * THE DIFFERENCE IS THE WHOLE RECOVERY PATH (Codex on PR #145, 2026-08-25). The first
+ * version asked whether ANY `vt-*` check run existed and skipped the merge if one
+ * did. So a target that concluded `failure`, or timed out, or a run that reported one
+ * optional target and died, permanently disqualified that merge from every sweep —
+ * including the `workflow_dispatch` whose documented purpose is *"re-verify after a
+ * flaky target or a runner outage"*. The one thing the manual path existed for was
+ * the one thing it could not do, and `vt-report` is explicitly built to let a later
+ * run supersede via a newer same-named check run.
+ *
+ * So eligibility is now "are the MUST-mapped targets all green?", which is exactly
+ * the question completion (L3) asks. `deriveCompletionStatus` answers it, and reusing
+ * it means the sweep cannot disagree with the gate about whether a deliverable still
+ * needs verifying.
+ *
+ * Ordered by MERGE TIME, which is immutable — an edit to an older pull request must
+ * not make it look like the newest delivered tree.
+ */
 export async function sweepUnverifiedMerge(
   gh: Octokit,
   repo: RepoRef,
@@ -42,15 +65,16 @@ export async function sweepUnverifiedMerge(
   const prs = await listDeliverablePrs(gh, repo);
   const merged = prs
     .filter((p) => p.merged && p.mergeCommitSha && p.marker)
-    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    .sort((a, b) => (a.mergedAt ?? '').localeCompare(b.mergedAt ?? '') * -1);
   for (const pr of merged) {
     const sha = pr.mergeCommitSha!;
-    // "Has it been verified?" asked of the check runs themselves, not of a label or a
-    // stored flag: the check runs ARE the record completion reads, so their presence
-    // is the only honest answer.
-    const { data } = await gh.checks.listForRef({ ...repo, ref: sha, per_page: 100 });
-    const hasVt = data.check_runs.some((r) => r.name.startsWith('vt-'));
-    if (!hasVt) return { sha, planRef: pr.marker!.planRef };
+    const planRef = pr.marker!.planRef;
+    const slug = slugFromPlanRef(planRef);
+    if (slug === null) continue;
+    // Asked of the check runs themselves, not of a label or a stored flag: the check
+    // runs ARE the record completion reads, so they are the only honest answer.
+    const verdict = deriveCompletionStatus(slug, commitmentScope(await readPlanAtRef(gh, repo, planRef)), await listVtCheckRuns(gh, repo, sha));
+    if (!verdict.complete) return { sha, planRef };
   }
   return null;
 }

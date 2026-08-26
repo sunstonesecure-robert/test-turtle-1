@@ -15,6 +15,14 @@ interface RulesetShape {
    *  flipped to `evaluate` or `disabled` keeps its name, its rules and its registered
    *  contexts, so every check by NAME still passes while nothing is enforced at all. */
   enforcement?: string;
+  /** `branch` | `tag` | `push`. Compared for the same reason as `conditions`: a rule
+   *  set aimed at the wrong KIND of ref enforces nothing on the one we meant. */
+  target?: string;
+  /** WHICH refs it applies to. A same-named ruleset carrying our exact rules and
+   *  contexts but conditioned on `refs/heads/plan/**` instead of `~DEFAULT_BRANCH`
+   *  leaves the default branch completely unguarded, and comparing only the rules
+   *  called that unchanged (Codex on PR #145). */
+  conditions?: unknown;
   rules?: { type: string; parameters?: { required_status_checks?: { context: string }[] } }[];
   bypass_actors?: { actor_id: number; actor_type: string; bypass_mode: string }[];
 }
@@ -221,6 +229,13 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         // nothing was looking at. Comparing it here means `init` puts it back; asserting it
         // in readiness means an operator finds out before a deliverable lands ungated.
         const enforcement = r.enforcement ?? 'active';
+        // TARGET AND CONDITIONS TOO (Codex on PR #145). Name, rules, contexts and
+        // bypass actors can all match while the ruleset points at the wrong refs — and
+        // `init` would then call it unchanged and readiness would find the contexts it
+        // expects, with the default branch guarded by nothing. Identity is not just
+        // "what rules" but "applied where".
+        const target = r.target ?? 'branch';
+        const conditions = JSON.stringify(r.conditions ?? {});
         const types = (r.rules ?? []).map((rule) => rule.type).sort();
         const contexts = (r.rules ?? [])
           .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
@@ -229,7 +244,7 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         const bypass = (r.bypass_actors ?? [])
           .map((a) => `${a.actor_type}:${a.actor_id}:${a.bypass_mode}`)
           .sort();
-        return JSON.stringify({ enforcement, types, contexts, bypass });
+        return JSON.stringify({ enforcement, target, conditions, types, contexts, bypass });
       };
       const same = semantics(full as RulesetShape) === semantics(payload as RulesetShape);
       if (!same) {

@@ -1,7 +1,9 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
-import { slugFromPlanRef } from './plans';
+import { readPlanAtRef, slugFromPlanRef } from './plans';
+import type { PlanStep } from '../../../schemas/plan';
+import type { MergeAuthority } from '../../../schemas/executor';
 
 /**
  * Deliverable pull requests as a lifecycle object (US18 — FR-064, FR-065, and the
@@ -14,6 +16,47 @@ import { slugFromPlanRef } from './plans';
  * that matters most, L3's, would be the one nobody looked at.
  */
 
+/**
+ * Merge authority (T209, FR-062) — DERIVED, never configured.
+ *
+ * Escalation-only, and the asymmetry is the whole rule: configuration may ADD a
+ * checkpoint and may never remove one a gate demands.
+ *
+ *   high-stakes step with a recorded confirmation → operator-merge-required, always
+ *   per-workflow checkpoint configured             → operator-merge-required
+ *   otherwise                                      → pre-authorized by the approved plan
+ *
+ * WHY THE HIGH-STAKES BRANCH IS NOT CONFIGURABLE. A step reaches B5 because a
+ * customer, clinician, or lawyer answered a question about *that step* (GHI #87
+ * scoped the gate to the step for this reason). Pre-authorizing its landing would
+ * spend a real authority's answer on a diff no human read — the confirmation would
+ * attest to an intent while the code went unreviewed.
+ */
+export function resolveMergeAuthority(step: PlanStep | null, opts: { requiresOperatorMerge?: boolean } = {}): {
+  authority: MergeAuthority;
+  reason: string;
+} {
+  if (step?.high_stakes) {
+    return {
+      authority: 'operator-merge-required',
+      reason:
+        `step ${step.id} is high-stakes (${step.authority ?? 'authority unset'}) and carries an external authority's ` +
+        'confirmation — its deliverable always waits for the operator\'s own merge, regardless of configuration ' +
+        '(FR-062 is escalation-only: config may add a checkpoint, never remove one a gate demands)',
+    };
+  }
+  if (opts.requiresOperatorMerge) {
+    return {
+      authority: 'operator-merge-required',
+      reason: 'the workflow is configured with requires_operator_merge — this deliverable waits for the operator\'s own merge',
+    };
+  }
+  return {
+    authority: 'pre-authorized',
+    reason: 'the approved plan pre-authorizes this deliverable\'s merge (FR-062 default) — no per-step checkpoint is configured',
+  };
+}
+
 export type BuildState = 'awaiting-merge' | 'merged' | 'refused' | 'unknown';
 
 export interface DeliverablePrView {
@@ -25,6 +68,11 @@ export interface DeliverablePrView {
   merged: boolean;
   /** the merge commit — the code verification runs against and completion is earned from */
   mergeCommitSha: string | null;
+  /** WHEN it merged — immutable, unlike `updatedAt` (Codex on PR #145). This is the
+   *  ordering key for "which deliverable is newest", because a label change or a body
+   *  edit on an older pull request moves `updatedAt` and would otherwise make the
+   *  wrong merge commit look like the latest delivered tree. */
+  mergedAt: string | null;
   marker: DeliverableMarker | null;
   /** derived: awaiting an OPERATOR merge specifically, which is what the portfolio
    *  surfaces as action-required (FR-064). A pre-authorized PR awaiting the
@@ -32,6 +80,26 @@ export interface DeliverablePrView {
   actionRequired: boolean;
   mergeAuthority: 'pre-authorized' | 'operator-merge-required' | 'unknown';
   updatedAt: string;
+}
+
+/**
+ * The plan step a deliverable delivers, for the live merge-authority derivation.
+ *
+ * Cached per listing: a workload's deliverables share a plan ref, so a multi-step
+ * plan would otherwise re-read the same document once per pull request.
+ */
+const planCache = new Map<string, Promise<PlanStep[] | null>>();
+
+async function stepForMarker(gh: Octokit, repo: RepoRef, marker: DeliverableMarker): Promise<PlanStep | null> {
+  const key = `${repo.owner}/${repo.repo}@${marker.planRef}`;
+  let steps = planCache.get(key);
+  if (!steps) {
+    steps = readPlanAtRef(gh, repo, marker.planRef)
+      .then((plan) => plan.steps)
+      .catch(() => null);
+    planCache.set(key, steps);
+  }
+  return (await steps)?.find((s) => s.id === marker.stepId) ?? null;
 }
 
 function stateFromLabels(labels: string[], merged: boolean): BuildState {
@@ -51,6 +119,9 @@ function stateFromLabels(labels: string[], merged: boolean): BuildState {
  */
 export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: string): Promise<DeliverablePrView[]> {
   const prs = await gh.paginate(gh.pulls.list, { ...repo, state: 'all', sort: 'updated', direction: 'desc', per_page: 100 });
+  // Read ONCE for the whole listing: the checkpoint is a repository-wide setting, and
+  // re-reading it per pull request would let one page report two different answers.
+  const requiresOperatorMerge = /^(1|true|yes)$/i.test(process.env.BUILD_REQUIRES_OPERATOR_MERGE ?? '');
   const views: DeliverablePrView[] = [];
   for (const pr of prs) {
     if (!pr.head.ref.startsWith('build/')) continue;
@@ -62,14 +133,25 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
     const labels = pr.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
     const merged = Boolean(pr.merged_at);
     const state = stateFromLabels(labels, merged);
-    // Merge authority is re-derived by the gate on every run; the PR body records
-    // what it said. Reading it back rather than recomputing keeps this module free
-    // of the plan (and of a second copy of the escalation-only rule).
-    const authority = /Merge authority:\*{0,2}\s*`?operator-merge-required/i.test(pr.body ?? '')
-      ? ('operator-merge-required' as const)
-      : /Merge authority:\*{0,2}\s*`?pre-authorized/i.test(pr.body ?? '')
-        ? ('pre-authorized' as const)
-        : ('unknown' as const);
+    // MERGE AUTHORITY IS DERIVED LIVE, not parsed out of the pull request body
+    // (Codex on PR #145). The body records what the writer computed at PUBLICATION
+    // time, and `BUILD_REQUIRES_OPERATOR_MERGE` is a mutable repository variable: flip
+    // it while a deliverable is open and the gate and the merger start refusing to
+    // auto-merge while this reader kept reporting `pre-authorized`. The portfolio then
+    // calls the pull request "in flight" and nothing ever asks the operator to merge
+    // it — an invisible stall, which is the same failure `actionRequired` exists to
+    // prevent.
+    //
+    // So it goes through `resolveMergeAuthority` — the SAME function the gate and the
+    // merger call — with the step read from the plan the marker names. One rule, one
+    // implementation, three callers. An unreadable plan yields `unknown` rather than a
+    // guess: reporting `pre-authorized` because we could not tell would be the
+    // absent-≠-success mistake applied to a merge decision.
+    let authority: DeliverablePrView['mergeAuthority'] = 'unknown';
+    if (marker) {
+      const step = await stepForMarker(gh, repo, marker);
+      if (step) authority = resolveMergeAuthority(step, { requiresOperatorMerge }).authority;
+    }
     views.push({
       number: pr.number,
       title: pr.title,
@@ -78,6 +160,7 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
       state,
       merged,
       mergeCommitSha: pr.merge_commit_sha ?? null,
+      mergedAt: pr.merged_at ?? null,
       marker,
       // ONLY the operator-required case. A pre-authorized PR waiting on the
       // deterministic merger is in progress, not blocked on a human — flagging it
@@ -122,7 +205,13 @@ export async function resolveVerifiedCommit(
   const prs = await listDeliverablePrs(gh, repo, slug);
   const merged = prs
     .filter((p) => p.merged && p.mergeCommitSha && p.marker?.planRef === planRef)
-    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    // BY MERGE TIME, which is immutable (Codex on PR #145). Sorting by `updatedAt`
+    // meant a label change or a body edit on an OLDER deliverable could make it sort
+    // newest, and L3 would then read `vt-*` check runs from the wrong merge commit —
+    // completing against a stale tree, or refusing a completion that was valid. For a
+    // multi-step plan with several merged deliverables that is reachable, and
+    // `build-publish` itself edits bodies on re-delivery.
+    .sort((a, b) => (a.mergedAt ?? '').localeCompare(b.mergedAt ?? '') * -1);
   const newest = merged[0];
   return newest?.mergeCommitSha
     ? { sha: newest.mergeCommitSha, source: 'merged-deliverable', prNumber: newest.number }

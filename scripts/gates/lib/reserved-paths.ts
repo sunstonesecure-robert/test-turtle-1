@@ -96,7 +96,7 @@ export function withExtraReserved(extra: readonly string[]): string[] {
 
 /** Is this one path reserved? */
 export function isReservedPath(path: string, extra: readonly string[] = []): boolean {
-  return matchesAny(path, reservedPaths(extra));
+  return matchesAny(path, reservedPaths(extra), true);
 }
 
 /**
@@ -130,14 +130,17 @@ export function scopeReachesReserved(scope: readonly string[], extra: readonly s
     const g = glob.trim();
     if (g.length === 0) return false;
     // Direction 1: the declared glob names something already reserved.
-    if (matchesAny(g.replace(/\*+$/, '').replace(/\/$/, '') || g, reserved)) return true;
-    if (matchesAny(g, reserved)) return true;
+    if (matchesAny(g.replace(/\*+$/, '').replace(/\/$/, '') || g, reserved, true)) return true;
+    if (matchesAny(g, reserved, true)) return true;
     // Direction 2: the declared glob would swallow a reserved location. Compare
     // against a representative concrete path per reserved pattern — the directory
     // itself plus one file inside it — because a glob cannot be matched against a
     // glob, only against paths.
     return reserved.some((r) => {
       const base = r.replace(/\/?\*+$/, '');
+      // The declared glob is the pattern here, so it takes the SCOPE reading — a
+      // bare `docs` in a scope no longer swallows `docs/lib`, and G16 must agree with
+      // D2 about that or a plan could pass one and fail the other.
       return matchesAny(base, [g]) || matchesAny(`${base}/anything`, [g]) || matchesAny(`${base}/nested/anything`, [g]);
     });
   });

@@ -50,6 +50,14 @@ export function demoPlan(runId: string): PlanDoc {
         high_stakes: false,
         authority: null,
         depends_on: [],
+        // THE STEP'S DECLARED SCOPE (T223 landed, so this is now expressible — the
+        // T243 note said "not until then"). G16 refuses a plan whose step declares
+        // none, because approving a step with an undeclared blast radius is approving
+        // work whose containment D2 cannot check (Codex on PR #145).
+        //
+        // An EXACT path, not `hello.py/**`: a bare name is read exactly in the scope
+        // direction, so this authorizes the one file and nothing beneath it.
+        scope: ['hello.py'],
         tracking_issue: null,
       },
     ],
@@ -58,6 +66,9 @@ export function demoPlan(runId: string): PlanDoc {
         id: 'vt-hello-copy',
         kind: 'exact-copy',
         check: 'stdout of `python hello.py` equals "Hello, operator!"',
+        // The executable form (T223): the operator approves the exact command that
+        // will judge the work, so verification needs no model.
+        run: 'test "$(python hello.py)" = "Hello, operator!"',
         maps_to: ['step-hello'],
       },
     ],

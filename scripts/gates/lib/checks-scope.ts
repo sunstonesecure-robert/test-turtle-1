@@ -118,33 +118,45 @@ export function checkG4SinglePassFail(plan: PlanDoc): GateResult {
  * moment to refuse that is at the review, not after an agent has spent a run
  * building it.
  *
- * NOT-APPLICABLE FOR A SCOPE-LESS STEP, NAMING THE ABSENT FIELD — and this is the
- * one place in the gate set where a not-applicable is load-bearing enough to be
- * worth stating twice. Every plan frozen before `PlanStep.scope` existed declares no
- * scope, and refusing them all would make each one permanently unapprovable
- * (constitution: Frozen-Artifact Compatibility). Reporting not-applicable here is
- * honest ONLY BECAUSE **D5 is unconditional**: the deliverable gate reads the
- * patch's actual paths and does not consult this field, so a scope-less plan is
- * still governed at the moment it matters.
+ * EVERY STEP MUST DECLARE A SCOPE, and the first version of this gate got that wrong
+ * (Codex on PR #145, 2026-08-25). It reported **not-applicable** for a plan with no
+ * scopes and silently ignored the un-scoped steps of a partly-scoped plan, on
+ * Frozen-Artifact Compatibility grounds. That reasoning does not apply here at all:
  *
- * IF D5 EVER BECOMES SCOPE-DEPENDENT, THIS TURNS SILENTLY INTO A PASS FOR THE
- * ABSENT CASE — the absent-≠-success mistake this project refuses everywhere else
- * (GHI #108). `tests/unit/subject-boundary.test.ts` pins the coupling for exactly
- * that reason; do not weaken one without the other.
+ * **G16 runs at APPROVAL, and every plan reaching approval is new.** G9 requires
+ * `version = max + 1` with the tag absent, so there is no such thing as re-approving
+ * an already-frozen plan — a re-open mints v N+1, which is also new. The compatibility
+ * carve-out is about builds of plans frozen BEFORE the field existed, and that is
+ * **D2's** problem, which is where the not-applicable stance belongs and stays.
+ *
+ * What the old stance actually permitted: `plan-propose.md` tells the agent every step
+ * must carry a scope, and nothing enforced it — so a proposal omitting it sailed
+ * through approval, after which `build-publish` and D2 both skip containment for that
+ * step and its deliverable may touch any non-reserved path. The operator approved a
+ * step whose blast radius was undeclared.
+ *
+ * D5 still backs this up unconditionally, so the machinery is safe either way. But
+ * "the reserved paths are safe" is a much weaker promise than "the deliverable stays
+ * where the plan said", and only this gate can require the second.
  */
 export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly string[] = []): GateResult {
-  const scoped = plan.steps.filter((s) => (s.scope ?? []).length > 0);
-  if (scoped.length === 0) {
+  // A step with no scope makes no containment promise, and at approval time there is
+  // no compatibility reason to accept one.
+  const unscoped = plan.steps.filter((s) => (s.scope ?? []).length === 0).map((s) => s.id);
+  if (unscoped.length > 0) {
     return {
       id: 'G16',
-      status: 'not-applicable',
+      status: 'fail',
       requirement: 'FR-068',
       detail:
-        'no step declares a `scope`, so there is nothing here to compare against the reserved paths. The plan is ' +
-        'still bound at delivery by D5, which reads the patch itself and does not consult this field — that is ' +
-        'what makes reporting not-applicable honest rather than an absent-≠-success pass (GHI #108)',
+        `${unscoped.length} step(s) declare no \`scope\`: ${unscoped.join(', ')}. A step without one makes no ` +
+        'containment promise — D2 cannot check what a deliverable for it touches, so the operator would be ' +
+        'approving work whose blast radius is undeclared. Add the path globs each step may write (e.g. ' +
+        '`["docs/**"]`, `["src/app.py", "tests/test_app.py"]`) and keep them as narrow as the acceptance requires. ' +
+        'Note a bare `docs` means the FILE `docs`; write `docs/**` for the directory.',
     };
   }
+  const scoped = plan.steps;
   const offenders: string[] = [];
   for (const step of scoped) {
     const reaching = scopeReachesReserved(step.scope ?? [], extraReserved);

@@ -12,6 +12,7 @@ import { listWorkloads, type Workload } from './workloads';
 import { mergeRecheck } from './read-after-write';
 import { listXLinks } from './xlinks';
 import { buildRunMonitorSnapshot, type RunMonitorRow } from './run-monitor';
+import { listDeliverablePrs } from './builds';
 // The gate functions' own verdict on whether a workload's official plan could pass
 // preflight today (GHI #109) — reused, never re-derived, so a plan this view calls
 // unbuildable is one the build actually refuses.
@@ -451,7 +452,7 @@ export async function loadPortfolio(
   // The conflict attribution reads only NON-archived workloads' plans: an archived
   // workload owns no row, so resolving its steps would buy nothing (FR-045).
   const active = workloads.filter((w) => w.state !== 'archived');
-  const [corrections, conflicts, buildability] = await Promise.all([
+  const [corrections, conflicts, buildability, deliverables] = await Promise.all([
     attributeCorrections(gh, repo, slugByAndon),
     attributeConflicts(gh, repo, active, flagged),
     // Scoped to `active` for the same reason (GHI #109): a deferred or completed
@@ -463,6 +464,14 @@ export async function loadPortfolio(
       repo,
       active.filter((w) => w.state === 'active').map((w) => w.slug),
     ),
+    // THE DELIVERABLES THE ROLLUP NEEDS (Codex on PR #145, 2026-08-25). The pure
+    // rollup grew a `deliverables` input and its tests passed by injecting one, while
+    // this loader never populated it — so in production the rollup always took the
+    // `[]` fallback and an operator-required deliverable could wait forever without
+    // ever becoming an action-required reason or a `/builds` link. The tests were
+    // green and the feature was absent, which is the shape this repo has been bitten
+    // by before (GHI #134): authoring a thing is not wiring it.
+    listDeliverablePrs(gh, repo),
   ]);
 
   return portfolioRollup({
@@ -474,5 +483,16 @@ export async function loadPortfolio(
     unbuildable: buildability
       .filter((v) => !v.buildable)
       .map(({ slug, reasons, andonIssue }) => ({ slug, reasons, andonIssue })),
+    // Only the ones actually waiting on the operator. `actionRequired` is the view's
+    // own derivation (operator-merge-required AND still awaiting), so filtering here
+    // keeps the rollup from having to re-derive it.
+    deliverables: deliverables
+      .filter((d) => d.actionRequired)
+      .map((d) => ({
+        slug: d.marker ? (slugFromPlanRef(d.marker.planRef) ?? d.branch.split('/')[1] ?? '') : (d.branch.split('/')[1] ?? ''),
+        prNumber: d.number,
+        url: d.url,
+        stepId: d.marker?.stepId ?? '(unknown step)',
+      })),
   });
 }

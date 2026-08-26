@@ -197,8 +197,25 @@ export async function readPlanFileAtRef(gh: Octokit, repo: RepoRef, ref: string)
   if (legacy && (slug === null || (declaredFeature(legacy.raw) ?? slug) === slug)) {
     return { path: LEGACY_PLAN_PATH, ...legacy };
   }
-  if (slug === null) throw new Refusal(`no plan document at ref ${ref}: ${LEGACY_PLAN_PATH} is absent`);
-  throw new Refusal(
+  // A FAULT, NOT A REFUSAL (Codex on PR #138, 2026-08-25).
+  //
+  // A `Refusal` reaches the operator through `operatorWrite` as an expected decision:
+  // "nothing was written", with the implication that adjusting the submission will
+  // fix it. Nothing about this condition is adjustable. Every caller here arrives
+  // with a ref the SYSTEM derived — the official version from `resolveCurrent`, or a
+  // live Andon's own header — so a missing document at that ref means the repository
+  // record is broken, and no change to the priority, the target or the contradicted
+  // step ids can repair it. Telling the operator to try again is worse than telling
+  // them nothing.
+  //
+  // Thrown as a fault, it reaches `app/error.tsx`: an apology plus the log digest,
+  // which is the correct recovery path for a broken document.
+  //
+  // A caller that legitimately expects the document to be absent already has the
+  // right tool — `tryReadPlanAtRef`, which returns its errors instead of throwing —
+  // and that is where the "might not be there" case belongs.
+  if (slug === null) throw new Error(`no plan document at ref ${ref}: ${LEGACY_PLAN_PATH} is absent`);
+  throw new Error(
     `no plan document at ref ${ref}: ${planPath(slug)} is absent and the root ${LEGACY_PLAN_PATH} ` +
       (legacy
         ? `belongs to "${declaredFeature(legacy.raw)}", not "${slug}"`

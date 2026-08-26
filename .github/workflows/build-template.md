@@ -66,6 +66,22 @@ steps:
   # three-gate preflight, because B3/B4/B5/B6/B8 did not exist in that tag's copy of
   # the gate code. B5 is the alarming one — the whole US6 high-stakes block was inert.
   #
+  # THE SCOPE OF THAT CLAIM, stated because it was previously implied and is not total
+  # (GHI #151, 2026-08-25). "The gate set is not frozen with the plan" holds for builds
+  # dispatched from a workflow definition that CARRIES THIS STEP. GitHub runs the
+  # workflow definition from the dispatch ref, and a build must be dispatched ON the
+  # frozen tag (B8/FR-007) - so a tag frozen BEFORE gates_ref existed carries a lock
+  # file without it and runs its own frozen gates, permanently. The mechanism that
+  # un-freezes the gates is itself frozen with the plan.
+  #
+  # Re-proven live on 2026-08-25 (run 32883023973, dispatched on plan/demo6/v1): the
+  # preflight reported B1/B2/B7 and nothing else, and B1 spoke about CURRENT, a pointer
+  # eliminated in July (GHI #44). Worse than a short report - GHI #108's `absent`
+  # protection cannot reach it, because that frozen copy's CATALOGUE predates the
+  # missing gates too, so it reads as a clean three-gate pass. GHI #151 carries the
+  # options; none is free, because dispatch-on-tag is what makes the worktree, the
+  # provenance and the cancel path structural (GHI #72 option A).
+  #
   # Ordering, not a second path: the preflight reads the plan through the API
   # (tryReadPlanAtRef), never the worktree, so it needs no checkout of its own. Running
   # it before the frozen checkout keeps it step 1 of the job AND leaves the agent the

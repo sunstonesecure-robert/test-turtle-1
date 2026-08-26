@@ -3,7 +3,7 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { parseDeliverableMarker } from '../dashboard/lib/github/markers';
 import { readPlanAtRef } from '../dashboard/lib/github/plans';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
-import { resolveMergeAuthority } from './gates/lib/checks-deliverable';
+import { resolveMergeAuthority } from '../dashboard/lib/github/builds';
 import { deliverableGate } from './gates/deliverable-gate';
 import { refusalDetail } from './gates/lib/runner';
 
@@ -106,10 +106,25 @@ export async function mergeIfPreAuthorized(
     await setBuildLabel(gh, repo, pr.number, 'build:merged');
     return { outcome: 'merged', prNumber: pr.number, sha: data.sha };
   } catch (error: unknown) {
-    // 405 = not mergeable (conflicts, required checks unsatisfied, ruleset). Report
-    // it as blocked rather than crashing: the PR is still there and still correct,
-    // and the operator can merge it themselves.
-    return { outcome: 'blocked', prNumber: pr.number, reason: errorMessage(error) };
+    // ONLY THE EXPECTED NON-MERGEABLE ANSWERS BECOME `blocked` (Codex on PR #145,
+    // 2026-08-25). This catch used to swallow everything, and `blocked` exits the
+    // sweep successfully — so a timeout, a secondary rate limit, an auth failure or a
+    // 5xx left a pre-authorized deliverable sitting open with a GREEN workflow, while
+    // the dashboard correctly told the operator that nothing was required of them.
+    // Nobody would ever have looked.
+    //
+    //   405 / 409  not mergeable: conflicts, required checks unsatisfied, a ruleset.
+    //              A real answer about this pull request, and the operator can merge
+    //              it themselves — `blocked` with the reason is exactly right.
+    //   422        GitHub's other "cannot merge as asked" response.
+    //   anything   an operational failure that says nothing about mergeability. It
+    //   else       must fail the run so the retry is visible — and `workflow_dispatch`
+    //              on this workflow is what an operator uses to re-run the sweep.
+    const status = errorStatus(error);
+    if (status === 405 || status === 409 || status === 422) {
+      return { outcome: 'blocked', prNumber: pr.number, reason: errorMessage(error) };
+    }
+    throw error;
   }
 }
 
@@ -127,6 +142,9 @@ export async function sweepMergeable(
   repo: RepoRef,
   opts: { requiresOperatorMerge?: boolean } = {},
 ): Promise<MergeOutcome[]> {
+  // A thrown operational failure propagates out of here by design (see the catch in
+  // `mergeIfPreAuthorized`): one unmergeable pull request is a result, but a broken
+  // API is a broken sweep, and finishing the loop quietly would hide it.
   const open = await gh.paginate(gh.pulls.list, { ...repo, state: 'open', per_page: 100 });
   const out: MergeOutcome[] = [];
   for (const pr of open) {

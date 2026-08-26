@@ -12,23 +12,33 @@
  * (install.ts vendors package.json too), and the grammar a plan step needs is
  * three constructs wide. What is supported, exhaustively:
  *
- *   `docs/index.html`  exact path
+ *   `docs/index.html`  exact path — and EXACTLY that path
  *   `docs/*.html`      one segment, no `/`
  *   `docs/**`          this directory and everything beneath it
  *   `docs/`            trailing slash = the same as `docs/**`
- *   `docs`             a BARE DIRECTORY NAME also matches everything beneath it
  *
- * That last one is a deliberate leniency in the SCOPE direction and a necessity in
- * the RESERVED direction. A plan author writing `scope: ["docs"]` plainly means the
- * directory, and reading it as "a file literally named docs" would refuse their
- * whole deliverable for a missing slash. In the reserved set it is load-bearing:
- * `TOOLCHAIN_DIRS` holds bare directory names (`scripts`, `schemas`), and a matcher
- * that read those as file names would reserve nothing at all.
+ * A BARE NAME LIKE `docs` DEPENDS ON WHICH QUESTION IS BEING ASKED, and getting that
+ * wrong was a real hole (Codex on PR #145, 2026-08-25). The first version rewrote
+ * every wildcard-free value to `<value>/**` unconditionally, so a step advertising
+ * `scope: ["src/app.py"]` also authorized `src/app.py/backdoor.js` — reachable,
+ * because our envelope writes files at explicit paths and nothing stops an executor
+ * naming one under a path that is currently a file (or deleting the file and creating
+ * a directory of that name in the same patch). D2 accepted it as in-scope.
  *
- * Note the asymmetry that follows and is intended: leniency widens what a scope
- * ALLOWS, which D5 then re-judges against the reserved set regardless. Leniency in
- * the reserved set widens what is FORBIDDEN. Both directions err toward refusing,
- * which is the direction a gate should err in.
+ * So the two directions are now explicit rather than emergent:
+ *
+ *   `bareIsDirectory: false`  (the SCOPE question, D2) — a value with no wildcard is
+ *                             an exact path and matches only itself. A plan author who
+ *                             means a directory writes `docs/**` or `docs/`, which is
+ *                             what `plan-propose.md` already teaches, and the refusal
+ *                             names the fix when they forget.
+ *   `bareIsDirectory: true`   (the RESERVED question, D5/G16) — a bare name is the
+ *                             directory and everything under it. Load-bearing:
+ *                             `TOOLCHAIN_DIRS` holds bare names (`scripts`, `schemas`)
+ *                             and reading those as file names would reserve nothing.
+ *
+ * The asymmetry is deliberate and both halves err toward refusing: exactness narrows
+ * what a scope ALLOWS, recursion widens what is FORBIDDEN.
  */
 
 /** Normalize to the repo-relative, forward-slash, no-leading-`./` form every
@@ -71,14 +81,13 @@ export function isRepoRelative(path: string): boolean {
  *   • a middle `**` (`**\/*.md`) emitted a doubled separator and matched nothing.
  * Segments make the `**`-spans-separators rule explicit instead of emergent.
  */
-function globToRegExp(glob: string): RegExp {
+function globToRegExp(glob: string, bareIsDirectory: boolean): RegExp {
   let g = normalizePath(glob);
-  // `docs/` and a bare `docs` both mean the directory and everything under it. The
-  // bare form is only read as a directory when it carries no wildcard — `*.md` is a
-  // pattern, not a folder. An exact file path gets the same treatment harmlessly:
-  // nothing can live under `package.json`.
+  // A trailing slash always means the directory. A bare wildcard-free name means the
+  // directory only where the caller says so — see the docblock: exact in the scope
+  // direction, recursive in the reserved direction.
   if (g.endsWith('/')) g = `${g.slice(0, -1)}/**`;
-  else if (!/[*?]/.test(g)) g = `${g}/**`;
+  else if (bareIsDirectory && !/[*?]/.test(g)) g = `${g}/**`;
 
   const escape = (seg: string): string =>
     seg
@@ -111,16 +120,17 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${out}$`);
 }
 
-/** Does `path` match `glob`? Both are normalized first. */
-export function matchesGlob(path: string, glob: string): boolean {
-  return globToRegExp(glob).test(normalizePath(path));
+/** Does `path` match `glob`? Both are normalized first. `bareIsDirectory` picks which
+ *  question is being asked — see the module docblock. */
+export function matchesGlob(path: string, glob: string, bareIsDirectory = false): boolean {
+  return globToRegExp(glob, bareIsDirectory).test(normalizePath(path));
 }
 
 /** Does `path` match ANY of `globs`? An empty pattern list matches nothing —
  *  never everything, which is the reading that would turn an unset scope into a
  *  licence and an empty reserved set into an open door. */
-export function matchesAny(path: string, globs: readonly string[]): boolean {
-  return globs.some((g) => matchesGlob(path, g));
+export function matchesAny(path: string, globs: readonly string[], bareIsDirectory = false): boolean {
+  return globs.some((g) => matchesGlob(path, g, bareIsDirectory));
 }
 
 /** The subset of `paths` that matches none of `globs` — i.e. what strayed.
@@ -128,11 +138,14 @@ export function matchesAny(path: string, globs: readonly string[]): boolean {
  *  offending paths, and a caller that has to recompute them will phrase it
  *  differently from the gate that decided. */
 export function pathsOutside(paths: readonly string[], globs: readonly string[]): string[] {
-  return paths.filter((p) => !matchesAny(p, globs));
+  // The SCOPE question: a bare name is an exact path, so an approved file cannot
+  // become an approved directory.
+  return paths.filter((p) => !matchesAny(p, globs, false));
 }
 
 /** The subset of `paths` that matches at least one of `globs` — the reserved-set
  *  question, which is the complement of the scope question and is asked by D5/G16. */
 export function pathsInside(paths: readonly string[], globs: readonly string[]): string[] {
-  return paths.filter((p) => matchesAny(p, globs));
+  // The RESERVED question: a bare name is the directory and everything under it.
+  return paths.filter((p) => matchesAny(p, globs, true));
 }

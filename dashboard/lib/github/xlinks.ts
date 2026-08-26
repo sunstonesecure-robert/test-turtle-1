@@ -225,6 +225,23 @@ function droppedConflictItems(existing: XLink | undefined, items: number[]): num
 }
 
 /**
+ * What a cross-workload write actually did: the folded links, and the conflict-label
+ * propagation's own account of which labels it added and removed.
+ *
+ * The second half exists because the success banners were making claims the writes
+ * did not support (Codex on PR #138). `conflictFlagTargets` flags ONLY open
+ * `conflicts-with` links, so recording a `depends-on` with item references flags
+ * nothing — while the banner said the items were "flagged as conflicting". And a
+ * resolution RETAINS the label on any item another pair's open conflict still
+ * justifies — while the banner said the flags were cleared. Only the propagation
+ * knows which, so it is what gets reported.
+ */
+export interface XLinkWriteResult {
+  links: XLink[];
+  flags: { added: number[]; removed: number[] };
+}
+
+/**
  * Record a cross-workload relationship (FR-047). Writes the paired comment to BOTH
  * workload issues, then reconciles `conflict:open` across the pair.
  *
@@ -247,7 +264,7 @@ export async function recordXLink(
   gh: Octokit,
   repo: RepoRef,
   input: { fromSlug: string; toSlug: string; type: XLinkType; items: number[] },
-): Promise<XLink[]> {
+): Promise<XLinkWriteResult> {
   if (input.fromSlug === input.toSlug) {
     throw new Refusal(`self-link refused: ${input.fromSlug} — a cross-workload link relates two DIFFERENT workloads (FR-047)`);
   }
@@ -297,8 +314,8 @@ export async function recordXLink(
     recorded.push({ ...end.marker, slug: end.workload.slug, issueNumber: end.workload.issueNumber });
   }
 
-  await propagateConflictFlags(gh, repo, [input.fromSlug, input.toSlug]);
-  return sortLinks(recorded);
+  const flags = await propagateConflictFlags(gh, repo, [input.fromSlug, input.toSlug]);
+  return { links: sortLinks(recorded), flags };
 }
 
 /**
@@ -326,7 +343,7 @@ export async function resolveXLink(
   gh: Octokit,
   repo: RepoRef,
   input: { fromSlug: string; toSlug: string; type: XLinkType; resolution: string },
-): Promise<XLink[]> {
+): Promise<XLinkWriteResult> {
   if (input.fromSlug === input.toSlug) {
     throw new Refusal(`self-link refused: ${input.fromSlug} — a cross-workload link relates two DIFFERENT workloads (FR-047)`);
   }
@@ -383,8 +400,12 @@ export async function resolveXLink(
     resolved.push({ ...marker, slug: end.workload.slug, issueNumber: end.workload.issueNumber, resolution: effective });
   }
 
-  await propagateConflictFlags(gh, repo, [input.fromSlug, input.toSlug]);
-  return sortLinks(resolved);
+  // RETURNED, not discarded (Codex on PR #138): the caller's success banner said
+  // "the conflict flags are cleared" unconditionally, while this propagation
+  // deliberately RETAINS a label on any item another pair's open conflict still
+  // justifies. Only the propagation knows which, so only it can be quoted.
+  const flags = await propagateConflictFlags(gh, repo, [input.fromSlug, input.toSlug]);
+  return { links: sortLinks(resolved), flags };
 }
 
 /**

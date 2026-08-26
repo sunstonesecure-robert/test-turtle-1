@@ -8,7 +8,8 @@ import { readPlanAtRef, slugFromPlanRef, tagTargetSha } from '../dashboard/lib/g
 import { getWorkload } from '../dashboard/lib/github/workloads';
 import { serializeDeliverableMarker } from '../dashboard/lib/github/markers';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
-import { patchPathsWithinStepScope, resolveMergeAuthority } from './gates/lib/checks-deliverable';
+import { patchPathsWithinStepScope } from './gates/lib/checks-deliverable';
+import { resolveMergeAuthority } from '../dashboard/lib/github/builds';
 import { isRepoRelative, normalizePath } from './gates/lib/globs';
 import { reservedPathsTouched, reservedRefusalDetail, PRODUCT_PR_ROUTE } from './gates/lib/reserved-paths';
 
@@ -173,18 +174,26 @@ export async function publishDeliverable(
   // operator is watching for this build.
   const reportOn = step.tracking_issue ?? fallbackIssue;
 
-  const paths = patchPaths(patch).map(normalizePath);
-  if (paths.length === 0) {
+  // VALIDATED RAW, NORMALIZED AFTER (Codex on PR #145, 2026-08-25). The order was
+  // reversed, and `normalizePath` strips a leading slash — so an executor emitting
+  // `/docs/output.txt` had it quietly turned into `docs/output.txt` BEFORE
+  // `isRepoRelative` looked at it, and the absolute path the contract requires to be
+  // refused was accepted and written to the relative location instead. Silently
+  // repairing untrusted input is exactly what this boundary must not do, and the
+  // later gate cannot recover the original spelling to notice.
+  const rawPaths = patchPaths(patch);
+  if (rawPaths.length === 0) {
     return refuse(gh, repo, reportOn, 'deliverable.patch writes and deletes nothing — an empty deliverable is not a deliverable');
   }
-  const traversal = paths.filter((p) => !isRepoRelative(p));
+  const traversal = rawPaths.filter((p) => !isRepoRelative(p));
   if (traversal.length > 0) {
     return refuse(
       gh,
       repo,
       reportOn,
-      `deliverable.patch names path(s) that escape the repository: ${traversal.join(', ')}. Refused outright — a path ` +
-        'that leaves the checkout is never resolved and retried, it is rejected.',
+      `deliverable.patch names path(s) that are not repo-relative: ${traversal.join(', ')}. Refused outright, and ` +
+        'refused AS WRITTEN — an absolute path or a traversal is never normalized into something acceptable and then ' +
+        'accepted; the contract requires repo-relative paths with forward slashes.',
     );
   }
 
@@ -192,6 +201,8 @@ export async function publishDeliverable(
   // whatever the scope says, so asking the scope question first would report the
   // less important failure when both hold — and would imply, wrongly, that a wider
   // scope could have made it acceptable.
+  // Only now — every path is known repo-relative, so normalizing cannot launder one.
+  const paths = rawPaths.map(normalizePath);
   const reserved = reservedPathsTouched(paths);
   if (reserved.length > 0) {
     return refuse(gh, repo, reportOn, reservedRefusalDetail(reserved, 'deliverable.patch'));
