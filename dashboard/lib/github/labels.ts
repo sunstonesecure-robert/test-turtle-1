@@ -44,7 +44,40 @@ export const CONFLICT_LABEL = 'conflict:open';
 // two readers that BLOCK on it (preflight B6, lifecycle L8), and now a clearer at
 // the freeze (GHI #75) — four modules that must spell it identically.
 export const CONTRADICTION_LABEL = 'flagged:wrong-assumption';
-export const STANDALONE_LABELS = ['intent:confirmed', 'evidence:batch', CONTRADICTION_LABEL, CONFLICT_LABEL] as const;
+/**
+ * The approval pull request's marker — what KIND of pull request this is, and nothing
+ * more (operator finding, 2026-08-28).
+ *
+ * WHY IT EXISTS. A deliverable pull request carries a `build:*` label; an approval pull
+ * request carried none, so a governed repo's pull request list showed labels on some
+ * rows and nothing on others — which reads as "that one has no state" rather than "that
+ * one is a different kind". It is also what makes `label:plan:approval` a shareable
+ * filter, which the title alone is not.
+ *
+ * WHY IT IS A MARKER AND NOT A FAMILY. There is deliberately no
+ * `plan:awaiting-approval` → `plan:approved` progression, because that fact is already
+ * held in two authoritative places: the Andon break's `andon:*` labels, and the pull
+ * request's own merged/closed state, which is what `getApprovalRecord` reads (FR-026).
+ * A third copy is a third thing to go stale — and this taxonomy has been bitten by that
+ * twice already, in the stranded live-Andon labels `isLiveAndon` exists to survive, and
+ * in `build:awaiting-merge` outliving its merge until a second writer was added.
+ *
+ * WHY NOTHING READS IT. Not one gate, sweep or view keys on this label, and none may.
+ * An approval pull request is identified by its head ref (`plan/<slug>/v<N>`, bound to
+ * the frozen tag) and its authority is the merge itself — `merged_by`, `merged_at`,
+ * `merge_commit_sha`. A label is mutable by anyone with write access; the moment one
+ * enters that chain, the answer to "was this approved" becomes forgeable. It is display,
+ * and it stays display (GHI #105 makes the same argument about attestation by label).
+ */
+export const APPROVAL_PR_LABEL = 'plan:approval';
+export const STANDALONE_LABELS = [
+  'intent:confirmed',
+  'evidence:batch',
+  CONTRADICTION_LABEL,
+  CONFLICT_LABEL,
+  // Deliberately NOT in EXCLUSIVE_FAMILIES below: it has no siblings to be exclusive with.
+  APPROVAL_PR_LABEL,
+] as const;
 
 export const ALL_LABELS: readonly string[] = [
   ...ANDON_LABELS,

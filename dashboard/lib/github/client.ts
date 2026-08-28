@@ -48,12 +48,25 @@ export function createClient(opts: ClientOptions = {}): Octokit {
     // Nothing is lost by dropping them: a 404 nobody handles still THROWS, and
     // the thrown RequestError carries the same status and URL the log line would
     // have shown. Every other status still logs AND throws.
+    //
+    // ONE narrow addition (operator finding, 2026-08-28): a 403 on
+    // `actions/variables/*`. Reading a repository variable needs the fine-grained
+    // "Variables" permission, which is NOT implied by the Actions-read scope the
+    // dashboard token is documented with, so a correctly-configured target answers
+    // 403 on every render of /workloads. `readOperatorMergeCheckpoint` handles it
+    // — reporting merge authority as "unknown" rather than guessing — and prints
+    // its own warning naming the permission and the remedy. The red overlay on top
+    // of that says only "403 with id BD64:…", which sends the operator to the
+    // network tab to work out which setting it was about. Scoped to that one path:
+    // a 403 anywhere else is still an unhandled authorization failure and still logs.
     log: {
       debug: () => {},
       info: () => {},
       warn: console.warn,
       error: (...args: unknown[]) => {
-        if (typeof args[0] === 'string' && / - (?:304|404) with id /.test(args[0])) return;
+        if (typeof args[0] !== 'string') return void console.error(...args);
+        if (/ - (?:304|404) with id /.test(args[0])) return;
+        if (/\/actions\/variables\/[^ ]* - 403 with id /.test(args[0])) return;
         console.error(...args);
       },
     },

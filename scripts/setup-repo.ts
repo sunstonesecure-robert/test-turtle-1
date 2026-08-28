@@ -350,6 +350,7 @@ function labelColor(name: string): string {
   if (name.startsWith('chunk:')) return 'c5def5';
   if (name.startsWith('high-stakes:')) return 'b60205';
   if (name.startsWith('confirmed:')) return '0052cc';
+  if (name.startsWith('plan:')) return '5319e7';
   return 'ededed';
 }
 

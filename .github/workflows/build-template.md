@@ -184,15 +184,15 @@ steps:
         exit 1
       fi
   - name: current gate code, NOT the frozen copy (GHI 107)
-    uses: actions/checkout@v4
+    uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     with:
       # A pinned gates release when the dispatch names one, else the default branch.
       # Deliberately never inputs.plan_ref: that is the defect this exists to remove.
       ref: ${{ inputs.gates_ref || github.event.repository.default_branch }}
       persist-credentials: false
-  - uses: actions/setup-node@v4
+  - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
     with:
-      node-version: 20
+      node-version: 24
   - run: npm ci
   - name: resolve the gate set (reported, so an absent gate cannot read as a passing one)
     id: gates
@@ -213,7 +213,7 @@ steps:
       --repo ${{ github.repository }} --json
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  - uses: actions/checkout@v4
+  - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     with:
       # The FROZEN TAG, not the dispatch ref (FR-007). Without this the worktree is
       # whatever `main` is at dispatch time, so the agent verifies its targets against

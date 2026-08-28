@@ -1,5 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
+import { errorStatus } from './errors';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
 import { readPlanAtRef, slugFromPlanRef } from './plans';
 import type { PlanStep } from '../../../schemas/plan';
@@ -134,11 +135,31 @@ function stateFromLabels(labels: string[], merged: boolean): BuildState {
  * already receive the variable in their environment, keep working unchanged — and so a
  * local dashboard can exercise the path without touching the target's settings.
  *
- * A read failure falls back to the environment rather than throwing: this is a listing
- * that renders a page, and taking the whole Builds view down because one settings read
- * failed would be a worse outcome than the value it was fetching.
+ * UNREADABLE IS NOT UNSET (operator finding, 2026-08-28; GHI #150). This used to
+ * answer `false` for every failure, and `false` here means *pre-authorized* — so a
+ * repository whose checkpoint is set to `true`, read with a token that cannot see
+ * repository variables, produced the exact invisible stall the paragraph above says
+ * this function exists to prevent. That is how it was found: the documented dashboard
+ * token carries **Actions read**, and GitHub gates `actions/variables` behind a
+ * SEPARATE *Variables* permission, so a correctly-configured target answered `403` and
+ * this reader called it "not set".
+ *
+ * The distinction is the one T260 drew for `readExecutorConfig` on this same pull
+ * request, one function away, and the one the listing below already makes about an
+ * unreadable PLAN: only a verified 404 is absence. Everything else is `'unreadable'`,
+ * and a caller that cannot tell must not guess — `listDeliverablePrs` reports every
+ * deliverable's authority as `unknown` rather than inventing `pre-authorized`.
+ *
+ * Still no throw: this value renders a listing, and taking the whole Builds view down
+ * because one settings read failed would be a worse outcome than the value it was
+ * fetching. It degrades to "I could not tell", which is honest and visible.
  */
-export async function readOperatorMergeCheckpoint(gh: Octokit, repo: RepoRef): Promise<boolean> {
+export type MergeCheckpoint = boolean | 'unreadable';
+
+/** Warned-about repositories, so a per-render read does not print once per workload. */
+const checkpointWarned = new Set<string>();
+
+export async function readOperatorMergeCheckpoint(gh: Octokit, repo: RepoRef): Promise<MergeCheckpoint> {
   const truthy = (v: string | undefined): boolean => /^(1|true|yes)$/i.test(v ?? '');
   if (process.env.BUILD_REQUIRES_OPERATOR_MERGE !== undefined) {
     return truthy(process.env.BUILD_REQUIRES_OPERATOR_MERGE);
@@ -146,9 +167,22 @@ export async function readOperatorMergeCheckpoint(gh: Octokit, repo: RepoRef): P
   try {
     const { data } = await gh.actions.getRepoVariable({ ...repo, name: 'BUILD_REQUIRES_OPERATOR_MERGE' });
     return truthy(data.value);
-  } catch {
+  } catch (error: unknown) {
     // 404 is the ordinary unset case — the FR-062 default is pre-authorized.
-    return false;
+    if (errorStatus(error) === 404) return false;
+    const key = `${repo.owner}/${repo.repo}`;
+    if (!checkpointWarned.has(key)) {
+      checkpointWarned.add(key);
+      // Said once, and said with the remedy: a status code alone sends the operator
+      // to the network tab to work out which setting it was about.
+      console.warn(
+        `Could not read the BUILD_REQUIRES_OPERATOR_MERGE repository variable of ${key} ` +
+          `(${errorStatus(error) ?? 'no status'}). Merge authority is reported as "unknown" rather than ` +
+          'guessed. A 403 means the token lacks the fine-grained "Variables" read permission — grant it, ' +
+          'or set BUILD_REQUIRES_OPERATOR_MERGE in the dashboard environment to state the answer directly.',
+      );
+    }
+    return 'unreadable';
   }
 }
 
@@ -156,7 +190,8 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
   const prs = await gh.paginate(gh.pulls.list, { ...repo, state: 'all', sort: 'updated', direction: 'desc', per_page: 100 });
   // Read ONCE for the whole listing: the checkpoint is a repository-wide setting, and
   // re-reading it per pull request would let one page report two different answers.
-  const requiresOperatorMerge = await readOperatorMergeCheckpoint(gh, repo);
+  const checkpoint = await readOperatorMergeCheckpoint(gh, repo);
+  const requiresOperatorMerge = checkpoint === true;
   const views: DeliverablePrView[] = [];
   for (const pr of prs) {
     if (!pr.head.ref.startsWith('build/')) continue;
@@ -182,10 +217,26 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
     // implementation, three callers. An unreadable plan yields `unknown` rather than a
     // guess: reporting `pre-authorized` because we could not tell would be the
     // absent-≠-success mistake applied to a merge decision.
+    //
+    // An unreadable CHECKPOINT degrades to `unknown` for the same reason — except where
+    // the checkpoint does not decide the answer. A HIGH-STAKES step is
+    // `operator-merge-required` whatever the configuration says (FR-062 is
+    // escalation-only), so its authority is fully knowable with the setting unread, and
+    // reporting `unknown` there would HIDE the one class of deliverable that certainly
+    // waits for a human — worse than the guess this change removes (Codex on PR #166).
+    // So: always read the step; consult the checkpoint only when it is what the answer
+    // depends on.
     let authority: DeliverablePrView['mergeAuthority'] = 'unknown';
     if (marker) {
       const step = await stepForMarker(gh, repo, marker);
-      if (step) authority = resolveMergeAuthority(step, { requiresOperatorMerge }).authority;
+      if (step && checkpoint === 'unreadable') {
+        // No opts: the high-stakes branch of the shared rule is reached without
+        // supplying a checkpoint we do not have. A step that is not high-stakes has an
+        // authority that genuinely depends on the unread setting — that is `unknown`.
+        if (step.high_stakes) authority = resolveMergeAuthority(step).authority;
+      } else if (step) {
+        authority = resolveMergeAuthority(step, { requiresOperatorMerge }).authority;
+      }
     }
     views.push({
       number: pr.number,
@@ -197,10 +248,17 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
       mergeCommitSha: pr.merge_commit_sha ?? null,
       mergedAt: pr.merged_at ?? null,
       marker,
-      // ONLY the operator-required case. A pre-authorized PR waiting on the
-      // deterministic merger is in progress, not blocked on a human — flagging it
-      // would teach the operator that action-required sometimes means "wait".
-      actionRequired: state === 'awaiting-merge' && authority === 'operator-merge-required',
+      // NOT the pre-authorized case: a pre-authorized PR waiting on the deterministic
+      // merger is in progress, not blocked on a human — flagging it would teach the
+      // operator that action-required sometimes means "wait".
+      //
+      // `unknown` DOES belong here (Codex on PR #166). It is not "wait", it is "we
+      // could not tell whether this waits for you", and the surface that leaves it out
+      // files it under In flight, where the card reads *"Nothing is asked of you
+      // here."* — the permissive answer this whole change exists to stop reporting,
+      // arriving one layer up. Asking a human to look at a deliverable that might be
+      // stalled is the cheap error; leaving it silent is the expensive one.
+      actionRequired: state === 'awaiting-merge' && authority !== 'pre-authorized',
       mergeAuthority: authority,
       updatedAt: pr.updated_at,
     });
