@@ -9,7 +9,7 @@
       "id": "step-pi-digit",
       "title": "Print the Nth digit of π for a given N",
       "intent": "Deliver a small standalone program that, given a non-negative integer N, prints exactly one decimal digit: the Nth digit of π taken over its digit string \"314159265358979…\" (the leading 3 counts, 0-indexed, so digit 0 = 3). N is read as the first command-line argument. Digits are produced by a sufficient-precision computation (not IEEE-754 floating point) so that large N stays correct. This is the operator's own software; it touches only src/ and tests/ and nothing in the oversight machinery or governance record.",
-      "acceptance": "Invoked as `python3 src/pi_digit.py <N>` with a non-negative integer N, the program writes to stdout exactly one character matching ^\\d$ that equals the Nth digit (0-indexed) of π's digit string beginning with 3; for invalid N (negative, non-integer, or absent) it exits non-zero and prints no digit.",
+      "acceptance": "Invoked as `python3 src/pi_digit.py <N>` with a non-negative integer N, the program writes to stdout exactly one character matching ^\\d$ that equals the Nth digit (0-indexed) of π's digit string beginning with 3; for invalid N (negative, non-integer, or absent) it writes an error message string to stderr, prints no digit to stdout, and exits non-zero.",
       "priority": "MUST",
       "evidence_tag": "assumption",
       "stand_in": "Python 3 CLI program; N read from argv[1]; 0-indexed digit string of π beginning with 3 (digit 0 = 3); arbitrary/sufficient-precision computation for large N. Indexing convention is pending operator confirmation (q-pi-indexing).",
@@ -54,8 +54,8 @@
     {
       "id": "vt-pi-digit-invalid",
       "kind": "boundary-behavior",
-      "check": "Given an invalid N (negative, non-integer, or missing), the program exits non-zero and writes no digit to stdout.",
-      "run": "! python3 src/pi_digit.py -1 >/dev/null 2>&1 && ! python3 src/pi_digit.py abc >/dev/null 2>&1 && ! python3 src/pi_digit.py >/dev/null 2>&1",
+      "check": "Given an invalid N (negative, non-integer, or missing), the program exits non-zero, writes no digit to stdout, and writes a non-empty error message string to stderr.",
+      "run": "for a in -1 abc; do ! python3 src/pi_digit.py \"$a\" >/dev/null 2>&1 && [ -z \"$(python3 src/pi_digit.py \"$a\" 2>/dev/null)\" ] && [ -n \"$(python3 src/pi_digit.py \"$a\" 2>&1 >/dev/null)\" ] || exit 1; done; ! python3 src/pi_digit.py >/dev/null 2>&1 && [ -z \"$(python3 src/pi_digit.py 2>/dev/null)\" ] && [ -n \"$(python3 src/pi_digit.py 2>&1 >/dev/null)\" ]",
       "maps_to": [
         "step-pi-digit"
       ]
@@ -74,7 +74,7 @@
     },
     {
       "id": "bc-invalid-n",
-      "description": "Negative, non-integer, or missing N is rejected: the program exits non-zero and prints no digit, rather than emitting a spurious character.",
+      "description": "Negative, non-integer, or missing N is rejected with an error message string written to stderr: the program prints no digit to stdout and exits non-zero, rather than emitting a spurious character or failing silently.",
       "step_id": "step-pi-digit"
     }
   ]
