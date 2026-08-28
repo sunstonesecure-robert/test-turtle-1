@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../dashboard/lib/github/client';
+import { TOOLCHAIN_DIRS, TEMPLATE_DIRS, TOOLCHAIN_FILES } from './install-manifest';
 
 /**
  * Product/target install step (T178, research.md "Product/target split"):
@@ -17,33 +18,11 @@ import type { RepoRef } from '../dashboard/lib/github/client';
 
 const PRODUCT_ROOT = resolve(new URL('..', import.meta.url).pathname);
 
-/** Directories vendored recursively + single files, all relative to the product root. */
-/** Exported so the drift guard can assert what is vendored rather than restate it
- *  (`tests/unit/vendored-toolchain.test.ts`, GHI #143): these directories are
- *  globed wholesale, so a new cross-boundary import joins every governed repo
- *  automatically — the guard is what notices. */
-export const TOOLCHAIN_DIRS = ['schemas', 'scripts', 'dashboard/lib', 'executors'] as const;
-
-/** Product-side `templates/<dir>` walked into the target's `.github/<dir>`. */
-export const TEMPLATE_DIRS = ['workflows', 'ISSUE_TEMPLATE'] as const;
-
-/** Where those template directories LAND in a governed repo — the reserved-path
- *  set needs the target-side paths, not the product-side ones, and deriving them
- *  from `TEMPLATE_DIRS` keeps the two from drifting (FR-068). */
-export const INSTALLED_TEMPLATE_DIRS = TEMPLATE_DIRS.map((d) => `.github/${d}`);
-/** Single files vendored verbatim. Exported for the same reason as
- *  `TOOLCHAIN_DIRS` (T237): the reserved path set DERIVES from this manifest
- *  rather than restating it, so a file added here becomes off-limits to every
- *  agent build with no second edit (`scripts/gates/lib/reserved-paths.ts`,
- *  FR-068). */
-export const TOOLCHAIN_FILES = [
-  'package.json',
-  'package-lock.json',
-  'tsconfig.json',
-  'tsconfig.base.json',
-  'dashboard/package.json',
-  'dashboard/tsconfig.json',
-] as const;
+/** The manifest of what `init` vendors lives in its own import-free module so the
+ *  reserved-path set can derive from it without pulling this installer (and
+ *  `node:fs`, Octokit, `import.meta.url`) into the dashboard's browser bundle.
+ *  Re-exported here because callers have always read it from `scripts/install`. */
+export { TOOLCHAIN_DIRS, TEMPLATE_DIRS, INSTALLED_TEMPLATE_DIRS, TOOLCHAIN_FILES } from './install-manifest';
 
 function walk(dir: string): string[] {
   const out: string[] = [];

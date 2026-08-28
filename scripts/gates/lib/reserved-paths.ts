@@ -1,4 +1,4 @@
-import { TOOLCHAIN_DIRS, TOOLCHAIN_FILES, INSTALLED_TEMPLATE_DIRS } from '../../install';
+import { TOOLCHAIN_DIRS, TOOLCHAIN_FILES, INSTALLED_TEMPLATE_DIRS } from '../../install-manifest';
 import { matchesAny, pathsInside, isRepoRelative } from './globs';
 
 /**
