@@ -225,17 +225,26 @@ async function confirmStep(
     // B5 recomputes from — so a demo record stays valid exactly as long as the
     // step it confirms is unchanged, which is the behaviour being demonstrated.
     workload: input.slug,
-    step_digest: stepDigest(step),
     authority,
-    confirmer: {
-      // Named as a stand-in when the demo has no real external authority to ask:
-      // "@operator standing in for customer" is attributable and honest; a bare
-      // placeholder is the unattributable record FR-024 refuses to accept.
-      name: input.confirmer ?? `@${input.actor} (demo stand-in for the ${authority} authority)`,
-      contact: input.contact ?? `https://github.com/${input.actor}`,
-    },
-    confirmed_at: input.at,
-    scope: `Confirmed outcome for ${step.id} ("${step.title}"): ${step.acceptance}`,
+    // A LEDGER OF ONE (GHI #96). The demo records an approval, which is the happy
+    // path it exists to walk — but it emits the ledger shape rather than the legacy
+    // flat one, because the canonical example is what everybody copies, and the
+    // shape that cannot express a refusal is the shape this issue was about.
+    decisions: [
+      {
+        decision: 'approved',
+        step_digest: stepDigest(step),
+        by: {
+          // Named as a stand-in when the demo has no real external authority to ask:
+          // "@operator standing in for customer" is attributable and honest; a bare
+          // placeholder is the unattributable record FR-024 refuses to accept.
+          name: input.confirmer ?? `@${input.actor} (demo stand-in for the ${authority} authority)`,
+          contact: input.contact ?? `https://github.com/${input.actor}`,
+        },
+        at: input.at,
+        rationale: `Confirmed outcome for ${step.id} ("${step.title}"): ${step.acceptance}`,
+      },
+    ],
   });
 
   // The real preflight, scoped to this step with the repeatable --step argument.
@@ -380,7 +389,7 @@ if (isMain) {
         process.exit(r.before.result === 'pass' ? 0 : 1);
       }
       console.log('');
-      console.log(`recorded     ${r.path} on ${r.branch} — confirmed by ${r.record.confirmer.name}`);
+      console.log(`recorded     ${r.path} on ${r.branch} — ${r.record.decisions[r.record.decisions.length - 1]!.decision} by ${r.record.decisions[r.record.decisions.length - 1]!.by.name}`);
       console.log('');
       console.log('build-preflight with the confirmation on record:');
       printReport(r.after!, false);

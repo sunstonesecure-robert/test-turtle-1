@@ -48,10 +48,11 @@ on: # zizmor: ignore[dangerous-triggers]
   # No inputs, deliberately: the sweep decides its own subjects from repository state, so
   # there is nothing for an operator to point at the wrong thing.
   workflow_dispatch:
-permissions:
-  contents: read # read the frozen plan and compare commits for D1's descendancy check
-  pull-requests: read # the PR body's deliverable:v1 marker and its changed file list
-  checks: write # the deliverable-gate check run this workflow reports — its only write
+# PERMISSIONS ARE DECLARED PER JOB, NOT PER WORKFLOW (zizmor excessive-permissions,
+# 2026-08-27). Both jobs below legitimately need the same three, so this is a scoping
+# change rather than a reduction: the point is that a job added later starts from none
+# instead of inheriting `checks: write` — the capability that writes the required check
+# this whole workflow exists to report.
 concurrency:
   group: deliverable-gate-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'sweep' }}
   cancel-in-progress: true
@@ -61,6 +62,10 @@ jobs:
   # context is how a required check comes to be satisfied by the wrong run.
   sweep:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    permissions:
+      contents: read # read the frozen plan and compare commits for D1's descendancy check
+      pull-requests: read # the PR body's deliverable:v1 marker and its changed file list
+      checks: write # the deliverable-gate check run this workflow reports — its only write
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -82,6 +87,10 @@ jobs:
     # PRs and ordinary development PRs are not blocked. Same shape as plan-gate's own
     # `plan/**` condition, for the same reason.
     if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')
+    permissions:
+      contents: read # read the frozen plan and compare commits for D1's descendancy check
+      pull-requests: read # the PR body's deliverable:v1 marker and its changed file list
+      checks: write # the deliverable-gate check run this workflow reports — its only write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

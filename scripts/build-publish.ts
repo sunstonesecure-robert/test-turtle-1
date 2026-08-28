@@ -21,7 +21,7 @@ import { reservedPathsTouched, reservedRefusalDetail, PRODUCT_PR_ROUTE } from '.
  * the pull request its work has to become. This publisher, triggered on the build's
  * `workflow_run` completion, downloads `deliverable.patch`, validates it as
  * UNTRUSTED input, and — only if every check holds — creates
- * `build/<slug>/<step-id>` off the frozen tag's commit, writes the files, and opens
+ * `build/<slug>/v<N>/<step-id>` off the frozen tag's commit, writes the files, and opens
  * the pull request with the executor's provenance recorded on it.
  *
  * Third instance of the same seam: `plan.json`→`plan-publish`,
@@ -77,8 +77,25 @@ export interface BuildRunContext {
   base?: string;
 }
 
-export function deliverableBranch(slug: string, stepId: string): string {
-  return `build/${slug}/${stepId}`;
+/**
+ * The deliverable branch for one step of one FROZEN VERSION of a plan.
+ *
+ * THE VERSION IS PART OF THE NAME (Codex on PR #153). It used to be
+ * `build/<slug>/<step-id>`, which is stable across a re-open — and a re-open is an
+ * ordinary move (FR-008), not an edge case. Rebuilding the same step against v2 then
+ * found the v1 branch still there, `createRef` returned 422, and the write below
+ * resumed on it: the new commit was parented to the OLD branch head instead of the v2
+ * tag. Since a v2 tag normally descends from the earlier merge on `main`, the two
+ * histories diverge, and D1 refuses the v2 pull request as not descending from its
+ * plan — permanently, with no way out but deleting a branch by hand.
+ *
+ * Mirroring the plan ref's own shape (`plan/<slug>/v<N>` → `build/<slug>/v<N>/<step>`)
+ * keeps the slug at the same path segment, which is what `listDeliverablePrs` falls
+ * back to when a pull request carries no readable marker.
+ */
+export function deliverableBranch(planRef: string, stepId: string): string {
+  const withoutPrefix = planRef.replace(/^plan\//, '');
+  return `build/${withoutPrefix}/${stepId}`;
 }
 
 /**
@@ -225,7 +242,7 @@ export async function publishDeliverable(
   // ---- Everything below WRITES. Nothing above did. ----
 
   const base = ctx.base ?? 'main';
-  const branch = deliverableBranch(slug, step.id);
+  const branch = deliverableBranch(patch.plan_ref, step.id);
   const { authority, reason } = resolveMergeAuthority(step, { requiresOperatorMerge: ctx.requiresOperatorMerge });
 
   // The branch is cut from the FROZEN TAG'S COMMIT, so the head is a DESCENDANT of

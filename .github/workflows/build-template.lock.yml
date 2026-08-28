@@ -534,7 +534,7 @@ jobs:
           GH_AW_STEPS_GATES_OUTPUTS_REF: ${{ steps.gates.outputs.ref }}
           GH_AW_STEPS_GATES_OUTPUTS_SHA: ${{ steps.gates.outputs.sha }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        name: build-preflight (B1–B8 as applicable — MUST be step 1, fails the run before any agent step)
+        name: build-preflight (B1–B9 as applicable — MUST be step 1, fails the run before any agent step)
         run: npx tsx scripts/gates/build-preflight.ts --plan-ref $GH_AW_INPUTS_PLAN_REF --workload $GH_AW_INPUTS_WORKLOAD $GH_AW_EXPR_5A5AEB5A $GH_AW_EXPR_BD9AC60A --gates-ref $GH_AW_STEPS_GATES_OUTPUTS_REF --gates-sha $GH_AW_STEPS_GATES_OUTPUTS_SHA --repo $GH_AW_GITHUB_REPOSITORY --json
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:

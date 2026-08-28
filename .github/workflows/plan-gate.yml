@@ -33,10 +33,11 @@ on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: ["build-publish"]
     types: [completed]
-permissions:
-  contents: read
-  issues: read # G7/G11 read the Andon break's corrections and answers to judge the plan
-  checks: write # the plan-gate check run this workflow reports — its only write
+# PERMISSIONS ARE DECLARED PER JOB, NOT PER WORKFLOW (zizmor excessive-permissions,
+# 2026-08-27). Both jobs below legitimately need the same three, so this is a scoping
+# change rather than a reduction: the point is that a job added later starts from none
+# instead of inheriting `checks: write` — the capability that writes the required check
+# this whole workflow exists to report.
 concurrency:
   # Keyed per pull request on the event path; one shared sweep otherwise, so two
   # build-publish completions cannot race to write the same check run.
@@ -48,6 +49,10 @@ jobs:
   # check comes to be satisfied by the wrong run.
   sweep-non-plan:
     if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      issues: read # G7/G11 read the Andon break's corrections and answers to judge the plan
+      checks: write # the plan-gate check run this workflow reports — its only write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -67,6 +72,10 @@ jobs:
     # other PR reports "skipped", which satisfies the required-check rule — a plain
     # skip, never a fail, so ordinary development PRs are not blocked.
     if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'plan/')
+    permissions:
+      contents: read
+      issues: read # G7/G11 read the Andon break's corrections and answers to judge the plan
+      checks: write # the plan-gate check run this workflow reports — its only write
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -9,7 +9,7 @@ import { resolveCurrent, tryReadPlanAtRef } from '../dashboard/lib/github/plans'
 import { listWorkloads } from '../dashboard/lib/github/workloads';
 import type { ConfirmationRecord } from '../schemas/confirmation';
 import type { PlanStep } from '../schemas/plan';
-import { CONFIRMATION_DIR, confirmationMismatch, parseConfirmation } from './gates/lib/checks-preflight';
+import { CONFIRMATION_DIR, confirmationVerdict, parseConfirmation } from './gates/lib/checks-preflight';
 
 /**
  * confirm-record — validates every committed high-stakes confirmation and applies
@@ -268,15 +268,23 @@ export async function confirmRecords(gh: Octokit, repo: RepoRef, dir: string = R
       continue;
     }
     const { planRef, step } = located;
-    // The gate's own binding check, imported not restated (GHI #95): a record that
-    // confirms a superseded version of the step must not light a label saying the
-    // authority signed off on what is frozen today.
-    const mismatch = confirmationMismatch(record, step);
-    if (mismatch !== null) {
+    // The gate's own read rule, imported not restated (GHI #95, #96): a ledger whose
+    // latest decision about the CURRENT step is not an authorization must not light a
+    // label saying the authority signed off on what is frozen today.
+    const verdict = confirmationVerdict(record, step);
+    if (!verdict.ok) {
+      // A REFUSAL IS NOT A BROKEN RECORD. The file is valid and the authority
+      // answered; the answer was no. Reporting it as `rejected` alongside malformed
+      // JSON would tell the operator to go fix the file, when the file is the one
+      // thing here that is right. It earns no label, and the sweep below strips any
+      // confirmed:* label a previous approval had left standing.
       outcomes.push({
         file,
-        status: 'rejected',
-        detail: `${mismatch} — until then the label would credit an answer to a question that authority was never asked (${planRef})`,
+        status: verdict.kind === 'refused' ? 'unlabeled' : 'rejected',
+        detail:
+          verdict.kind === 'refused'
+            ? `${verdict.reason} — no confirmed:${authority} label is earned while the latest decision stands (${planRef})`
+            : `${verdict.reason} — until then the label would credit an answer to a question that authority was never asked (${planRef})`,
       });
       continue;
     }

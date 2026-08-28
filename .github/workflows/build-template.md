@@ -201,7 +201,7 @@ steps:
       echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
     env:
       GATES_REF: ${{ inputs.gates_ref }}
-  - name: build-preflight (B1–B8 as applicable — MUST be step 1, fails the run before any agent step)
+  - name: build-preflight (B1–B9 as applicable — MUST be step 1, fails the run before any agent step)
     run: >-
       npx tsx scripts/gates/build-preflight.ts
       --plan-ref ${{ inputs.plan_ref }}

@@ -117,11 +117,46 @@ function stateFromLabels(labels: string[], merged: boolean): BuildState {
  * marker, and it holds a write scope the executor does not. Reading the marker is
  * therefore the difference between "this looks like a deliverable" and "this is one".
  */
+/**
+ * The FR-062 merge checkpoint, read from where the operator actually sets it.
+ *
+ * IT IS AN ACTIONS REPOSITORY VARIABLE (Codex on PR #153). `CONFIGURATION_GUIDE.md` §3
+ * documents it as one, and `build-publish`, `deliverable-gate` and `build-merge` all
+ * receive it as `${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}`. This module used to read
+ * `process.env` — which, in a dashboard deployment, is the DASHBOARD's environment and
+ * has nothing to do with the repository variable. An operator who set the checkpoint as
+ * documented got the gate and the merger correctly waiting for a human, while this
+ * reader defaulted to `false`, classified the pull request as pre-authorized, left it
+ * out of Action Required and offered no merge link. A checkpoint nobody is told about
+ * is an invisible stall — the same failure `actionRequired` exists to prevent.
+ *
+ * `process.env` stays as an explicit override so the CLIs, which run INSIDE Actions and
+ * already receive the variable in their environment, keep working unchanged — and so a
+ * local dashboard can exercise the path without touching the target's settings.
+ *
+ * A read failure falls back to the environment rather than throwing: this is a listing
+ * that renders a page, and taking the whole Builds view down because one settings read
+ * failed would be a worse outcome than the value it was fetching.
+ */
+export async function readOperatorMergeCheckpoint(gh: Octokit, repo: RepoRef): Promise<boolean> {
+  const truthy = (v: string | undefined): boolean => /^(1|true|yes)$/i.test(v ?? '');
+  if (process.env.BUILD_REQUIRES_OPERATOR_MERGE !== undefined) {
+    return truthy(process.env.BUILD_REQUIRES_OPERATOR_MERGE);
+  }
+  try {
+    const { data } = await gh.actions.getRepoVariable({ ...repo, name: 'BUILD_REQUIRES_OPERATOR_MERGE' });
+    return truthy(data.value);
+  } catch {
+    // 404 is the ordinary unset case — the FR-062 default is pre-authorized.
+    return false;
+  }
+}
+
 export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: string): Promise<DeliverablePrView[]> {
   const prs = await gh.paginate(gh.pulls.list, { ...repo, state: 'all', sort: 'updated', direction: 'desc', per_page: 100 });
   // Read ONCE for the whole listing: the checkpoint is a repository-wide setting, and
   // re-reading it per pull request would let one page report two different answers.
-  const requiresOperatorMerge = /^(1|true|yes)$/i.test(process.env.BUILD_REQUIRES_OPERATOR_MERGE ?? '');
+  const requiresOperatorMerge = await readOperatorMergeCheckpoint(gh, repo);
   const views: DeliverablePrView[] = [];
   for (const pr of prs) {
     if (!pr.head.ref.startsWith('build/')) continue;

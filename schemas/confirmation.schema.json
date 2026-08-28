@@ -2,52 +2,88 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-turtles/schemas/confirmation.schema.json",
   "title": "Agentic Turtles High-Stakes Confirmation Record",
-  "description": "Attributable external sign-off for one high-stakes plan step, committed at confirmations/<workload>/<step-id>.json on the default branch. Its existence is what unblocks the build, even on an approved, frozen plan (FR-023, FR-024, SC-006). The record is BOUND to the work it was given about: the workload it belongs to, and a digest of the step's own content (amended 2026-08-17, GHI #95) — an authority's answer authorizes THAT step in THAT workload and nothing else.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["step_id", "workload", "step_digest", "authority", "confirmer", "confirmed_at", "scope"],
-  "properties": {
-    "step_id": {
-      "type": "string",
-      "pattern": "^step-[a-z0-9-]+$",
-      "description": "The plan step this confirms; must equal the <step-id> in the filename (the record is looked up by it)"
-    },
-    "workload": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9-]*$",
-      "description": "The workload slug this confirms a step of; must equal the <workload> directory in the path. Step ids are unique only WITHIN a plan, so without this two workloads that both declare step-billing-cycle would share one record and one authority's answer would unblock the other's build (GHI #95)."
-    },
-    "step_digest": {
-      "type": "string",
-      "pattern": "^sha256:[0-9a-f]{64}$",
-      "description": "sha256 over the step's id, intent, acceptance and authority, canonically serialized. B5 recomputes it from the frozen plan and refuses a mismatch, so a re-approval that CHANGED this step invalidates the sign-off while a re-approval that left it alone does not (GHI #95). Obtain it from the review page's high-stakes panel — it prints the record to commit with this field filled in."
-    },
-    "authority": {
-      "enum": ["customer", "clinical", "legal"],
-      "description": "Must equal the step's authority (FR-023 names the route, FR-024 makes it binding). Extensible in future schema versions."
-    },
-    "confirmer": { "$ref": "#/$defs/Confirmer" },
-    "confirmed_at": {
-      "type": "string",
-      "format": "date-time",
-      "description": "ISO 8601 / RFC 3339 instant, zone included — either a Z suffix or a numeric offset. The confirmation is expected AFTER the plan is frozen (FR-024), so the moment is part of the record."
-    },
-    "scope": {
-      "type": "string",
-      "minLength": 1,
-      "pattern": "\\S",
-      "description": "The guardrails actually confirmed, in the authority's terms. Must carry non-whitespace text: a blank scope confirms nothing while still unblocking the build."
-    }
-  },
+  "description": "The decision ledger for one high-stakes plan step, committed at confirmations/<workload>/<step-id>.json on the default branch. Its LATEST decision about the step being built is what unblocks or blocks the build, even on an approved, frozen plan (FR-023, FR-024, SC-006). Each decision is BOUND to the work it was given about: the workload it belongs to, and a digest of the step's own content (amended 2026-08-17, GHI #95) — an authority's answer authorizes THAT step in THAT workload and nothing else. A LEDGER rather than a single answer (amended 2026-08-27, GHI #96): the record used to say only that a conversation happened, with no field for what was decided, so a recorded refusal read as a confirmation and unblocked the build it should have stopped. Entries are appended, never rewritten — each names its own author, so lifting a block does not edit the authority's answer. Append-only is a convention here, not a structural guarantee: git history is the audit trail, and this schema does not make a rewritten entry detectable.",
+  "oneOf": [{ "$ref": "#/$defs/Ledger" }, { "$ref": "#/$defs/Legacy" }],
   "$defs": {
-    "Confirmer": {
+    "Ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "workload", "authority", "decisions"],
+      "properties": {
+        "step_id": {
+          "type": "string",
+          "pattern": "^step-[a-z0-9-]+$",
+          "description": "The plan step this ledger is about; must equal the <step-id> in the filename (the record is looked up by it)"
+        },
+        "workload": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "The workload slug this ledger belongs to; must equal the <workload> directory in the path. Step ids are unique only WITHIN a plan, so without this two workloads that both declare step-billing-cycle would share one record and one authority's answer would unblock the other's build (GHI #95)."
+        },
+        "authority": {
+          "enum": ["customer", "clinical", "legal"],
+          "description": "Must equal the step's authority (FR-023 names the route, FR-024 makes it binding). Extensible in future schema versions. A re-route is a different question, not the same one, so it is compared before the digest — see confirmationVerdict."
+        },
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/Decision" },
+          "description": "In chronological order, oldest first. `at` must be non-decreasing. An `overridden` entry must be preceded by a `rejected` entry carrying the SAME step_digest — an override of nothing is a mis-recorded approval wearing the word."
+        }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "step_digest", "by", "at", "rationale"],
+      "description": "One decision about one version of the step. Uniform shape whoever made it: an authority answering, or an operator lifting a block they recorded.",
+      "properties": {
+        "decision": {
+          "enum": ["approved", "rejected", "overridden"],
+          "description": "`approved` and `rejected` are the authority's answer. `overridden` is the OPERATOR lifting a recorded refusal — a deliberate, attributable act that the gate reports loudly rather than silently passing (FR-024, GHI #96)."
+        },
+        "step_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "sha256 over the step's id, intent, acceptance and authority, canonically serialized — WHICH VERSION of the step this decision was about. Per entry rather than per record (2026-08-27) so a ledger survives a step revision: the gate reads the newest entry matching the CURRENT step, and an earlier version's answer stays as history without authorizing anything. Obtain it from the review page's high-stakes panel — it prints the entry to commit with this field filled in."
+        },
+        "by": { "$ref": "#/$defs/Attribution" },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 / RFC 3339 instant, zone included — either a Z suffix or a numeric offset. Decisions are expected AFTER the plan is frozen (FR-024), so the moment is part of the record."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "For `approved`/`rejected`: the guardrails actually confirmed or the ground for refusing, in the authority's terms. For `overridden`: why the block was lifted. Must carry non-whitespace text — a blank rationale decides nothing while still moving the gate."
+        }
+      }
+    },
+    "Attribution": {
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "contact"],
-      "description": "Named person/org + contact context — both halves are what make the record attributable",
+      "description": "Named person/org + contact context — both halves are what make an entry attributable. A name nobody can reach cannot be corroborated afterwards; a contact with no name attributes the decision to no one.",
       "properties": {
         "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
         "contact": { "type": "string", "minLength": 1, "pattern": "\\S" }
+      }
+    },
+    "Legacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["step_id", "workload", "step_digest", "authority", "confirmer", "confirmed_at", "scope"],
+      "description": "The pre-ledger shape, still accepted and read as a ledger of exactly one `approved` entry (constitution Frozen-Artifact Compatibility, route (a)). This is not a guess made to keep old data working: refusal was UNREPRESENTABLE when these records were written, so every one of them is necessarily an approval. Writers emit the ledger shape; this branch exists only so records committed before 2026-08-27 keep verifying.",
+      "properties": {
+        "step_id": { "type": "string", "pattern": "^step-[a-z0-9-]+$" },
+        "workload": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "step_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "authority": { "enum": ["customer", "clinical", "legal"] },
+        "confirmer": { "$ref": "#/$defs/Attribution" },
+        "confirmed_at": { "type": "string", "format": "date-time" },
+        "scope": { "type": "string", "minLength": 1, "pattern": "\\S" }
       }
     }
   }

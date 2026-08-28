@@ -6,7 +6,7 @@ import { getWorkload } from '../../../dashboard/lib/github/workloads';
 import { getChunk, findIntentConfirmation } from '../../../dashboard/lib/github/chunks';
 import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 import { CONTRADICTION_LABEL } from '../../../dashboard/lib/github/labels';
-import { ConfirmationRecord } from '../../../schemas/confirmation';
+import { ConfirmationRecord, Ledger, Legacy } from '../../../schemas/confirmation';
 import type { PlanStep } from '../../../schemas/plan';
 import { asApiUnavailable, type GateResult } from './runner';
 
@@ -343,6 +343,68 @@ async function readTextAtRef(gh: Octokit, repo: RepoRef, path: string, ref: stri
  * below, because one caller (`confirmRecords`) reads records before it knows which
  * official plan, if any, declares them.
  */
+/**
+ * How to actually LAND a confirmation record — one definition, shared by the gate's
+ * refusal and the review page, so the two can never tell an operator different things
+ * (GHI #92).
+ *
+ * The fact itself is not new: PB-012's preconditions have stated it since the playbook
+ * was written. What was missing is that it lived in a preconditions block in one file,
+ * and the operator who needs it is looking at a blocked build in the dashboard or a
+ * refusal in a run log. Knowledge nothing points at is knowledge nobody has.
+ *
+ * WHY THERE IS A SECOND ROUTE AT ALL. The default-branch ruleset requires the
+ * plan-gate and deliverable-gate checks on EVERY push, not merely on pull-request
+ * merges, and bypasses only the repository-admin role (`setup-repo.ts`, actor_id 5).
+ * That is deliberate: no machine credential holds a bypass on any repo type. The
+ * consequence is that the person who obtained a customer's or a clinician's answer may
+ * have no way to commit it directly — and the gate would then block a build for want of
+ * a record the operator was holding in their hand.
+ *
+ * The pull request works because both gates report `skipped` — never a failure — on a
+ * pull request that carries neither a plan document nor a deliverable, and a skip
+ * satisfies a required check. That is the same property that keeps ordinary
+ * development pull requests from being blocked by gates that do not apply to them.
+ */
+export function howToLandTheRecord(path: string, branch: string): string {
+  return (
+    `record their answer at ${path}. Committing straight to ${branch} needs the repository-admin role — the ${branch} ` +
+    'ruleset requires the plan-gate and deliverable-gate checks on every push and bypasses only that role. Without it, ' +
+    'open a pull request from a branch instead: a pull request carrying neither a plan nor a deliverable is reported ' +
+    'skipped by both gates, which satisfies the required checks, so you can merge it yourself'
+  );
+}
+
+/**
+ * Why this record did not parse, in words an operator can act on.
+ *
+ * A UNION'S OWN ERROR SAYS NOTHING. `ConfirmationRecord` is `Ledger | Legacy`, and
+ * zod collapses a failed union into a single `invalid_union` issue at the root whose
+ * message is "Invalid input" — so a record with a blank contact, or a missing
+ * confirmer, or a decision spelled `denied`, all reported identically and none of
+ * them usefully. That is the same failure shape as a gate that refuses without
+ * saying why (T250): correct, and useless at the moment someone needs it.
+ *
+ * So the branch the document was plainly TRYING to be is re-validated on its own and
+ * ITS issues are reported. A document carrying `scope`/`confirmer`/`confirmed_at` and
+ * no `decisions` is a legacy record and is judged as one; everything else is judged
+ * as a ledger, which is what every writer emits.
+ */
+function confirmationParseReason(doc: unknown): string {
+  const isRecord = typeof doc === 'object' && doc !== null && !Array.isArray(doc);
+  const has = (key: string): boolean => isRecord && key in (doc as Record<string, unknown>);
+  const looksLegacy = !has('decisions') && ['scope', 'confirmer', 'confirmed_at'].some(has);
+  const result = looksLegacy ? Legacy.safeParse(doc) : Ledger.safeParse(doc);
+  if (result.success) {
+    // Unreachable in practice: the union failed, so neither branch accepts it. Kept
+    // because "the union said no and the branch said yes" is a contradiction worth
+    // naming rather than reporting as an empty string.
+    return 'it matches neither the decision-ledger shape nor the pre-2026-08-27 flat one';
+  }
+  const detail = result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ');
+  return looksLegacy ? `${detail} (read as a pre-2026-08-27 flat record)` : detail;
+}
+
 export function parseConfirmation(
   raw: string,
   at: { workload: string; stepId: string },
@@ -355,7 +417,7 @@ export function parseConfirmation(
   }
   const parsed = ConfirmationRecord.safeParse(doc);
   if (!parsed.success) {
-    return { reason: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') };
+    return { reason: confirmationParseReason(doc) };
   }
   // A record whose step_id disagrees with its filename was copied from another
   // step: the authority answered a different question, so it attributes nothing
@@ -375,33 +437,96 @@ export function parseConfirmation(
 }
 
 /**
- * Does this valid record actually confirm THIS step? Null when it does, otherwise
- * the reason — one definition, used by B5 and by the confirm-record validator, so
- * the gate and the board can never disagree about what a record authorizes.
+ * What does this ledger say about THIS step — and is it enough to build?
+ *
+ * One definition, used by B5 and by the confirm-record validator, so the gate and
+ * the board can never disagree about what a record authorizes.
+ *
+ * THE READ RULE (GHI #96, 2026-08-27): the NEWEST decision whose `step_digest`
+ * matches the step being built wins. `approved` and `overridden` authorize;
+ * `rejected` blocks; no matching entry means nobody has been asked about THIS
+ * version yet. Earlier versions' decisions stay in the file as history and
+ * authorize nothing — which is the point of keeping them.
+ *
+ * WHY A PASS CAN CARRY A NOTE. An override is an operator overruling a recorded
+ * refusal. It is a legitimate act and it must not be silent: a build that proceeded
+ * because a human set aside a clinician's "no" should say so in the same report the
+ * operator reads, not only in the file. `note` is that sentence.
  *
  * ORDER IS THE MESSAGE. Authority is compared first even though it is also inside
  * the digest: a re-route from customer to legal changes the fingerprint too, and
  * "the step changed since this was signed" would send the operator to re-ask the
  * customer when what they actually need is to ask counsel. The specific cause
  * wins; the digest is the catch-all behind it (the same reason B5 reports its
- * three causes apart rather than as one message).
+ * causes apart rather than as one message).
  */
-export function confirmationMismatch(record: ConfirmationRecord, step: PlanStep): string | null {
+export function confirmationVerdict(
+  record: ConfirmationRecord,
+  step: PlanStep,
+): { ok: true; note: string | null } | { ok: false; kind: 'refused' | 'mismatch'; reason: string } {
   // authority is non-null on any high_stakes step that survived the schema
   // (plan.ts's superRefine, FR-023), so the route is always something to match.
   if (record.authority !== step.authority) {
-    return `confirmed by ${record.authority}, but the step routes to ${step.authority} — an answer from another authority leaves the risk this step named unreviewed`;
+    return {
+      ok: false,
+      kind: 'mismatch',
+      reason: `recorded against the ${record.authority} authority, but the step routes to ${step.authority} — an answer from another authority leaves the risk this step named unreviewed`,
+    };
   }
   const digest = stepDigest(step);
-  if (record.step_digest !== digest) {
-    return (
-      `it confirms a different version of ${step.id} — the step's intent or acceptance has changed since ` +
-      `${record.confirmed_at} (the record carries ${record.step_digest}, this step hashes to ${digest}). ` +
-      `Take the changed step back to the ${record.authority} authority and record a fresh answer; a sign-off ` +
-      `given about different work is exactly what this gate exists to refuse (GHI #95)`
-    );
+  const forThisVersion = record.decisions.filter((entry) => entry.step_digest === digest);
+  const latest = forThisVersion[forThisVersion.length - 1];
+
+  if (!latest) {
+    // NOT "no confirmation recorded" — that wording was the old failure and it is
+    // false here: somebody WAS asked, about a version that has since changed. Saying
+    // which one, and when, is the difference between the operator re-asking a
+    // question with the new text in hand and re-asking one already answered.
+    const history = record.decisions[record.decisions.length - 1];
+    return {
+      ok: false,
+      kind: 'mismatch',
+      reason: history
+        ? `its decisions are all about a different version of ${step.id} — the step's intent or acceptance has changed ` +
+          `since the last one (${history.decision} on ${history.at}; the ledger's newest entry carries ${history.step_digest}, ` +
+          `this step hashes to ${digest}). Take the changed step back to the ${record.authority} authority and append a fresh ` +
+          `decision; an answer given about different work is exactly what this gate exists to refuse (GHI #95)`
+        : `records no decision at all about ${step.id}`,
+    };
   }
-  return null;
+
+  if (latest.decision === 'rejected') {
+    // The refusal in the authority's own words. Deliberately NOT "route it to the
+    // authority and commit the answer": they answered, and the answer was no. The
+    // remedy that fits is to change the work or to lift the block on the record —
+    // sending the operator back to re-ask would be a correct refusal with a remedy
+    // that does not fit the road they arrived by (the T250 lesson).
+    return {
+      ok: false,
+      kind: 'refused',
+      reason:
+        `the ${record.authority} authority REFUSED this version of ${step.id} on ${latest.at} — ${latest.by.name} ` +
+        `(${latest.by.contact}): "${latest.rationale}". A refusal blocks the build. Either change the step and take the ` +
+        `new version back to them, or, if the objection is answered elsewhere, append an \`overridden\` decision saying ` +
+        `why — an override is recorded and reported, never silent (FR-024)`,
+    };
+  }
+
+  if (latest.decision === 'overridden') {
+    const refusal = forThisVersion.filter((entry) => entry.decision === 'rejected').pop();
+    return {
+      ok: true,
+      note:
+        'building over a recorded refusal — ' +
+        (refusal
+          ? `${refusal.by.name} (${refusal.by.contact}) for the ${record.authority} authority refused on ${refusal.at}: ` +
+            `"${refusal.rationale}"`
+          : `the ${record.authority} authority refused earlier`) +
+        `; ${latest.by.name} (${latest.by.contact}) lifted the block on ${latest.at}: "${latest.rationale}"`,
+    };
+  }
+
+  return { ok: true, note: null };
 }
 
 /**
@@ -474,6 +599,11 @@ export async function checkB5ConfirmationRecorded(
   }
 
   const blocked = unknown.map((id) => `${id}: named by this build but absent from the plan at ${planRef}`);
+  // A PASS is not always a quiet one. An override lets the build proceed over a
+  // recorded refusal, and that has to reach the same report the operator reads —
+  // a gate that passed silently here would make "an authority agreed" and "a human
+  // overruled an authority" look identical (FR-024, GHI #96).
+  const notes: string[] = [];
   if (inScope.length > 0) {
     // Derived from the dispatched ref, never a parameter: B1/B8 already police
     // which plan this build is for, so scoping the records to that same ref means
@@ -499,7 +629,7 @@ export async function checkB5ConfirmationRecorded(
         const legacy = await readTextAtRef(gh, repo, legacyConfirmationPath(step.id), branch);
         blocked.push(
           legacy === null
-            ? `${step.id}: no confirmation recorded — ${path} does not exist on ${branch}; route it to the ${step.authority} authority and commit the answer`
+            ? `${step.id}: no confirmation recorded — ${path} does not exist on ${branch}; route it to the ${step.authority} authority, then ${howToLandTheRecord(path, branch)}`
             : `${step.id}: a confirmation exists at the old unscoped ${legacyConfirmationPath(step.id)}, which no longer binds to any workload or step version (GHI #95) — re-record it at ${path} with its workload and step_digest fields; the review page's high-stakes panel prints the record to commit`,
         );
         continue;
@@ -509,14 +639,18 @@ export async function checkB5ConfirmationRecorded(
         blocked.push(`${step.id}: ${path} is not a valid confirmation record — ${parsed.reason}`);
         continue;
       }
-      const mismatch = confirmationMismatch(parsed.record, step);
-      if (mismatch !== null) blocked.push(`${step.id}: ${mismatch}`);
+      const verdict = confirmationVerdict(parsed.record, step);
+      if (!verdict.ok) blocked.push(`${step.id}: ${verdict.reason}`);
+      else if (verdict.note !== null) notes.push(`${step.id}: ${verdict.note}`);
     }
   }
 
-  return blocked.length === 0
-    ? { id: 'B5', status: 'pass', requirement: 'FR-024' }
-    : { id: 'B5', status: 'fail', requirement: 'FR-024', detail: blocked.join('; ') };
+  if (blocked.length > 0) {
+    return { id: 'B5', status: 'fail', requirement: 'FR-024', detail: blocked.join('; ') };
+  }
+  return notes.length > 0
+    ? { id: 'B5', status: 'pass', requirement: 'FR-024', detail: notes.join('; ') }
+    : { id: 'B5', status: 'pass', requirement: 'FR-024' };
 }
 
 /** B6 — a chunk flagged wrong-assumption builds on contradicted ground; the flag

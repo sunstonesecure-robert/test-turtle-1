@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
-import { cliMain, printReport, refusalDetail, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
+import { errorMessage, errorStatus } from '../../dashboard/lib/github/errors';
+import { ApiUnavailableError, cliMain, printReport, refusalDetail, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
 import { DELIVERABLE_CATALOGUE } from './lib/catalogue';
 import {
   checkD1Provenance,
@@ -48,6 +49,37 @@ import {
  *  ruleset registration (`REQUIRED_CHECK_CONTEXTS`) and this must be the same
  *  string or the gate reports a verdict nothing is waiting for. */
 export const DELIVERABLE_CHECK_NAME = 'deliverable-gate';
+
+/**
+ * The executor configuration at the frozen tag, or `null` when there genuinely is none.
+ *
+ * ONLY A VERIFIED 404 MEANS ABSENT (Codex on PR #153). Absence is a legitimate state
+ * for the in-sandbox reference executor, and D4 decides what it means per tier — but a
+ * bare `catch { return null }` made EVERY failure mean it. A 5xx, a secondary rate
+ * limit or an authorization error was read as "no configuration declared", which for an
+ * `in-sandbox` marker is a PASS: a temporarily unreadable config that actually declares
+ * `spawned`, lacks its guardrails, or contradicts the marker's tier could take a green
+ * REQUIRED gate and be auto-merged. That is the absent-≠-satisfied mistake this project
+ * refuses everywhere else (GHI #108), reached through the one door nothing was watching.
+ *
+ * Exported so the distinction is testable directly: the difference between "absent" and
+ * "unreadable" is the whole point, and it is invisible from the gate's own report.
+ */
+export async function readExecutorConfig(
+  gh: Octokit,
+  repo: RepoRef,
+  executorId: string,
+  planRef: string,
+): Promise<string | null> {
+  try {
+    const { data } = await gh.repos.getContent({ ...repo, path: `executors/${executorId}.yml`, ref: planRef });
+    if (Array.isArray(data) || !('content' in data)) return null;
+    return Buffer.from(data.content, 'base64').toString('utf8');
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
+    throw new ApiUnavailableError(errorMessage(error));
+  }
+}
 
 export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: number): Promise<GateReport> {
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
@@ -102,22 +134,9 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
       // configuration into compliance (D5). Both properties are what make loading it
       // here meaningful rather than decorative (FR-066).
       run: () =>
-        checkD4ExecutorProvenance(d1.marker, async (executorId) => {
-          if (!d1.marker) return null;
-          try {
-            const { data } = await gh.repos.getContent({
-              ...repo,
-              path: `executors/${executorId}.yml`,
-              ref: d1.marker.planRef,
-            });
-            if (Array.isArray(data) || !('content' in data)) return null;
-            return Buffer.from(data.content, 'base64').toString('utf8');
-          } catch {
-            // Absent is a legitimate state for the in-sandbox reference executor;
-            // D4 decides what absence means per tier.
-            return null;
-          }
-        }),
+        checkD4ExecutorProvenance(d1.marker, (executorId) =>
+          d1.marker ? readExecutorConfig(gh, repo, executorId, d1.marker.planRef) : Promise.resolve(null),
+        ),
     },
     // NO `skip`, deliberately, and this is the difference that matters. D2/D3/D4 all
     // need the plan to have resolved; D5 needs nothing but the paths. A patch whose
