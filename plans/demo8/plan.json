@@ -1,0 +1,81 @@
+{
+  "feature": "demo8",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "33181937455",
+  "andon_issue": 57,
+  "steps": [
+    {
+      "id": "step-pi-digit",
+      "title": "Print the Nth digit of π for a given N",
+      "intent": "Deliver a small standalone program that, given a non-negative integer N, prints exactly one decimal digit: the Nth digit of π taken over its digit string \"314159265358979…\" (the leading 3 counts, 0-indexed, so digit 0 = 3). N is read as the first command-line argument. Digits are produced by a sufficient-precision computation (not IEEE-754 floating point) so that large N stays correct. This is the operator's own software; it touches only src/ and tests/ and nothing in the oversight machinery or governance record.",
+      "acceptance": "Invoked as `python3 src/pi_digit.py <N>` with a non-negative integer N, the program writes to stdout exactly one character matching ^\\d$ that equals the Nth digit (0-indexed) of π's digit string beginning with 3; for invalid N (negative, non-integer, or absent) it writes an error message string to stderr, prints no digit to stdout, and exits non-zero.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "Python 3 CLI program; N read from argv[1]; 0-indexed digit string of π beginning with 3 (digit 0 = 3); arbitrary/sufficient-precision computation for large N. Indexing convention is pending operator confirmation (q-pi-indexing).",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "src/pi_digit.py",
+        "tests/**"
+      ],
+      "tracking_issue": 55
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-pi-digit-format",
+      "kind": "expected-output",
+      "check": "Running `python3 src/pi_digit.py 3` prints exactly one character matching the regex ^\\d$ (a single decimal digit 0–9).",
+      "run": "python3 src/pi_digit.py 3 | grep -Eq '^[0-9]$'",
+      "maps_to": [
+        "step-pi-digit"
+      ]
+    },
+    {
+      "id": "vt-pi-digit-value",
+      "kind": "expected-output",
+      "check": "For known indices the output equals the corresponding digit of π's digit string \"3141592653…\" (0-indexed, digit 0 = 3): N=0→3, N=2→4, N=5→9.",
+      "run": "[ \"$(python3 src/pi_digit.py 0)\" = \"3\" ] && [ \"$(python3 src/pi_digit.py 2)\" = \"4\" ] && [ \"$(python3 src/pi_digit.py 5)\" = \"9\" ]",
+      "maps_to": [
+        "step-pi-digit"
+      ]
+    },
+    {
+      "id": "vt-pi-digit-large",
+      "kind": "boundary-behavior",
+      "check": "A large index beyond IEEE-754 double precision still yields the correct digit: 0-indexed digit 50 of π (3.14159265358979323846264338327950288419716939937510…) is 0.",
+      "run": "[ \"$(python3 src/pi_digit.py 50)\" = \"0\" ]",
+      "maps_to": [
+        "step-pi-digit"
+      ]
+    },
+    {
+      "id": "vt-pi-digit-invalid",
+      "kind": "boundary-behavior",
+      "check": "Given an invalid N (negative, non-integer, or missing), the program exits non-zero, writes no digit to stdout, and writes a non-empty error message string to stderr.",
+      "run": "for a in -1 abc; do ! python3 src/pi_digit.py \"$a\" >/dev/null 2>&1 && [ -z \"$(python3 src/pi_digit.py \"$a\" 2>/dev/null)\" ] && [ -n \"$(python3 src/pi_digit.py \"$a\" 2>&1 >/dev/null)\" ] || exit 1; done; ! python3 src/pi_digit.py >/dev/null 2>&1 && [ -z \"$(python3 src/pi_digit.py 2>/dev/null)\" ] && [ -n \"$(python3 src/pi_digit.py 2>&1 >/dev/null)\" ]",
+      "maps_to": [
+        "step-pi-digit"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-n-zero",
+      "description": "N=0 returns \"3\" — the leading integer-part digit — confirming the 0-indexed origin where digit 0 is the 3 before the decimal point.",
+      "step_id": "step-pi-digit"
+    },
+    {
+      "id": "bc-large-n",
+      "description": "A large N (e.g. 50) beyond double-precision float accuracy still returns the correct digit, proving the implementation computes π to sufficient precision rather than relying on a fixed float literal.",
+      "step_id": "step-pi-digit"
+    },
+    {
+      "id": "bc-invalid-n",
+      "description": "Negative, non-integer, or missing N is rejected with an error message string written to stderr: the program prints no digit to stdout and exits non-zero, rather than emitting a spurious character or failing silently.",
+      "step_id": "step-pi-digit"
+    }
+  ]
+}
