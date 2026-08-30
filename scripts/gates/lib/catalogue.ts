@@ -101,6 +101,16 @@ export const DELIVERABLE_CATALOGUE: readonly DeclaredGate[] = [
   { id: 'D3', requirement: 'FR-062' },
   { id: 'D4', requirement: 'FR-065' },
   { id: 'D5', requirement: 'FR-068' },
+  // D6 — the SUBJECT-WORKFLOW CONTENT guards (FR-069, GHI #174 C′, added 2026-08-29).
+  // D5 says WHERE an agent may write: everything under `.github/**` except the
+  // `subject_<name>.yml` namespace. D6 says WHAT a file written into that namespace
+  // may do at runtime — triggers, permissions, secrets, pinned actions, an approved
+  // environment — because a workflow is the one deliverable that changes what runs
+  // with which credentials. It sits after D5 for the same reason D5 sits after D4:
+  // ids are stable and it shipped later. Declared for every deliverable and reported
+  // `not-applicable` ("no subject workflow in this patch") when none is present, so
+  // the report shape never depends on what the patch happened to touch (GHI #108).
+  { id: 'D6', requirement: 'FR-069' },
 ];
 
 /** §3 `lifecycle-gate`. Every transition reports all of these; which ones apply is

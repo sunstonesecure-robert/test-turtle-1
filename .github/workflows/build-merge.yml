@@ -1,7 +1,8 @@
 # build-merge — the post-gate actor nobody had assigned (deterministic, no LLM).
 #
 # Two states were unreachable before this workflow existed (PR #115 Codex review):
-#   1. On the default `requires_operator_merge: false` path NOTHING MERGED the
+#   1. On the repository default path — BUILD_REQUIRES_OPERATOR_MERGE unset, no
+#      checkpoint path touched, the step not high-stakes — NOTHING MERGED the
 #      deliverable pull request. build-publish opens it, deliverable-gate judges it,
 #      the dashboard deliberately shows no button for a pre-authorized PR — so the
 #      default path stalled one step before verification, forever.
@@ -12,7 +13,10 @@
 #   merge      on deliverable-gate's completion — merges IF AND ONLY IF merge authority
 #              resolves to `pre-authorized`. It NEVER merges an operator-required pull
 #              request: that one waits for the human, and the label transition below
-#              still applies when they merge it themselves.
+#              still applies when they merge it themselves. Operator-required is also
+#              decided by WHAT THE DIFF TOUCHES (GHI #163 option 3, GHI #174): a subject
+#              workflow `.github/workflows/subject_<name>.yml` always waits, and so does
+#              a path inside a CHECKPOINT_PATHS glob.
 #   transition on the pull_request close event — flips build:awaiting-merge to
 #              build:merged (or build:refused when closed unmerged), whoever merged it.
 #
@@ -86,6 +90,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+          # The operator's checkpoint paths (CONFIGURATION_GUIDE.md §3) — escalation-only,
+          # like the line above: a touched path inside one of these globs is never merged
+          # here. A subject workflow is never merged here regardless of this value.
+          CHECKPOINT_PATHS: ${{ vars.CHECKPOINT_PATHS }}
         run: npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --sweep
   transition:
     # The close event. Who merged it is not this job's business — only that it happened.

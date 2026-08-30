@@ -30,7 +30,7 @@ export function parseAndonHeader(body: string): AndonHeader | null {
  * What `build-publish` records on a deliverable pull request (US18, FR-065).
  *
  * This is the ONLY link between a build run and the pull request its work became,
- * and `deliverable-gate` reads all five of D1–D5 through it. Written by the
+ * and `deliverable-gate` reads all six of D1–D6 through it. Written by the
  * deterministic writer with its own scope — never by the executor, which holds
  * `contents: read` and could not open the PR in the first place. So the marker is
  * as trustworthy as the writer that emitted it, which is the whole point of the

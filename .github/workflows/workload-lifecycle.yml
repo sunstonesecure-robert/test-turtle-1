@@ -15,7 +15,11 @@
 # for a reactivate whose gate report says requires_review it re-opens the plan
 # (FR-008 path) so the workload returns to review first (FR-040). There is no
 # delete action anywhere — unknown actions exit 2 (FR-042), and `delete` is not
-# offered in the dispatch choices.
+# offered in the dispatch choices. After a successful `complete`, step 2 also runs the
+# DEPLOY HOOK (FR-070): every subject workflow declaring the `plan_ref`/`commit` inputs
+# is dispatched with the official plan ref and the verified merged commit, and what was
+# dispatched (or that there was nothing to dispatch) is commented on the workload issue;
+# a dispatch API error is commented and then fails the run — the transition stands.
 # Two entry points, one writer: repository_dispatch (dashboard / API callers,
 # actor from the payload) and workflow_dispatch (Actions-tab UI, actor is the
 # clicking user — github.actor, never spoofable via inputs).
@@ -43,7 +47,10 @@ on:
 permissions:
   contents: read
   issues: write # workload:* labels + event comments — this workflow is their ONLY writer
-  actions: write # cancel in-flight runs on workload cancel (SC-014)
+  actions: write # cancel in-flight runs on workload cancel (SC-014); on complete, `workflow_dispatch`
+  #   the operator's subject workflows (`.github/workflows/subject_*.yml`) with the plan ref and
+  #   the verified merged commit (FR-070, GHI #174 §3). GitHub's anti-recursion rule exempts
+  #   workflow_dispatch, so GITHUB_TOKEN should suffice — PB-017 verifies that live.
   checks: read # L3 reads the frozen plan SHA's vt-* check runs (FR-034). Specifying
   #   ANY permissions block sets every unlisted scope to none, so without this row the
   #   complete transition fails with "Resource not accessible by integration" instead
@@ -95,7 +102,7 @@ jobs:
           | tee "$RUNNER_TEMP/lifecycle-gate.json"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: apply transition (cancel/reactivate effects + label flip + event comment; close+lock on archive)
+      - name: apply transition (cancel/reactivate effects + label flip + event comment; close+lock on archive; deploy hook on complete)
         run: >-
           npx tsx scripts/lifecycle-apply.ts
           --workload "$WL_WORKLOAD"

@@ -1,5 +1,6 @@
 import type { PlanDoc } from '../../../schemas/plan';
 import type { GateResult } from './runner';
+import { isSubjectWorkflowScope } from '../../install-manifest';
 import { scopeReachesReserved, PRODUCT_PR_ROUTE } from './reserved-paths';
 
 /**
@@ -173,10 +174,18 @@ export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly s
         `authorize the system to change the gates, workflows, schemas, or records that govern it. ${PRODUCT_PR_ROUTE}`,
     };
   }
+  // A namespace scope is accepted by NAME, and the name is a glob wider than the rule
+  // (`subject_*.yml` covers `subject_x.lock.yml`, which the namespace does not) — so
+  // the pass says what the delivery gate will hold the step to (Codex on PR #175).
+  const namespaced = scoped.filter((s) => (s.scope ?? []).some((g) => isSubjectWorkflowScope(g))).map((s) => s.id);
   return {
     id: 'G16',
     status: 'pass',
     requirement: 'FR-068',
-    detail: `${scoped.length} scoped step(s), none reaching the installed machinery or the governance record`,
+    detail:
+      `${scoped.length} scoped step(s), none reaching the installed machinery or the governance record` +
+      (namespaced.length > 0
+        ? `. ${namespaced.join(', ')} may deliver a subject workflow: the file must be named .github/workflows/subject_<name>.yml — lowercase letters, digits and hyphens, no other dot — or D5 refuses it at delivery as reserved`
+        : ''),
   };
 }

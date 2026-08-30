@@ -12,6 +12,9 @@ import { patchPathsWithinStepScope } from './gates/lib/checks-deliverable';
 import { resolveMergeAuthority } from '../dashboard/lib/github/builds';
 import { isRepoRelative, normalizePath } from './gates/lib/globs';
 import { reservedPathsTouched, reservedRefusalDetail, PRODUCT_PR_ROUTE } from './gates/lib/reserved-paths';
+import { checkD6SubjectWorkflowContent, subjectWorkflowPaths, type SubjectWorkflowFile } from './gates/lib/checks-subject-workflow';
+import { checkpointPathsTouched, parseCheckpointPaths, CHECKPOINT_PATHS_VARIABLE } from './gates/lib/checkpoint-paths';
+import { scannerRunner } from './gates/lib/subject-workflow-scanners';
 
 /**
  * build-publish (T207) — the deterministic writer that lands an agent's deliverable.
@@ -42,8 +45,12 @@ import { reservedPathsTouched, reservedRefusalDetail, PRODUCT_PR_ROUTE } from '.
  *   • any path falls outside the delivering step's declared scope (FR-061)
  *   • any path is inside the RESERVED set — the installed oversight machinery or the
  *     governance record (FR-068), regardless of what the scope says
+ *   • a subject workflow (`.github/workflows/subject_<name>.yml`, the one part of
+ *     `.github/` a deliverable may be — FR-069, GHI #174) whose CONTENT fails any D6
+ *     guard: a trigger outside push/pull_request/workflow_dispatch, a write scope, a
+ *     secret, an unpinned action, a scanner finding, an OIDC job with no environment
  *
- * The last two run HERE as well as in `deliverable-gate`, and the duplication is
+ * The last three run HERE as well as in `deliverable-gate`, and the duplication is
  * deliberate: the gate is the required check that blocks a merge, but a refused
  * patch should never become a pull request at all. A branch that exists is a thing
  * someone can merge with an admin bypass; a branch that was never created is not.
@@ -74,6 +81,9 @@ export interface BuildRunContext {
   headSha?: string;
   /** per-workflow merge checkpoint (FR-062); may only ADD a checkpoint */
   requiresOperatorMerge?: boolean;
+  /** the operator's CHECKPOINT_PATHS globs (parsed); a path inside one waits for the
+   *  operator's merge (GHI #163 option 3). Subject workflows wait regardless. */
+  checkpointGlobs?: readonly string[];
   base?: string;
 }
 
@@ -239,11 +249,52 @@ export async function publishDeliverable(
     }
   }
 
+  const base = ctx.base ?? 'main';
+
+  // D6 — THE CONTENT GUARDS, on the one part of `.github/` a deliverable may be
+  // (FR-069, GHI #174), and still BEFORE ANY WRITE. D5 above said where an agent may
+  // write; this says what a file written there may do. The bytes judged are the
+  // patch's own (the same bytes the tree below would be built from), and the branch a
+  // subject trigger may name is the one this pull request lands on — the gate reads
+  // `pr.base.ref`, which is this same `base`, so the two cannot disagree. The scanners
+  // come from PATH; when either is missing D6.5 FAILS closed and the patch is refused
+  // rather than published unscanned (GHI #108). A refused subject workflow therefore
+  // produces no branch — the property this whole pre-write block exists for.
+  const subjectPaths = new Set(subjectWorkflowPaths(paths));
+  if (subjectPaths.size > 0) {
+    const subjectFiles: SubjectWorkflowFile[] = [
+      ...patch.files
+        .filter((f) => subjectPaths.has(normalizePath(f.path)))
+        .map((f) => ({
+          path: normalizePath(f.path),
+          content: f.encoding === 'base64' ? Buffer.from(f.content, 'base64').toString('utf8') : f.content,
+        })),
+      ...(patch.deletions ?? [])
+        .map(normalizePath)
+        .filter((p) => subjectPaths.has(p))
+        .map((p) => ({ path: p, content: null })),
+    ];
+    const d6 = await checkD6SubjectWorkflowContent(subjectFiles, { defaultBranch: base, scan: scannerRunner() });
+    if (d6.status !== 'pass') {
+      // The gate's OWN sentences (GHI #127): every violated guard, named, with the way out.
+      return refuse(
+        gh,
+        repo,
+        reportOn,
+        `deliverable.patch delivers a subject workflow that fails the content guards: ${d6.detail ?? d6.status}`,
+      );
+    }
+  }
+
   // ---- Everything below WRITES. Nothing above did. ----
 
-  const base = ctx.base ?? 'main';
   const branch = deliverableBranch(patch.plan_ref, step.id);
-  const { authority, reason } = resolveMergeAuthority(step, { requiresOperatorMerge: ctx.requiresOperatorMerge });
+  // Merge authority, with the checkpoint BY PATH (GHI #163 option 3): a subject workflow
+  // always waits for the operator's merge, and so does a path inside one of their
+  // CHECKPOINT_PATHS globs. Recorded on the pull request as before; the gate, the
+  // merger and the dashboard re-derive it live from the same rule.
+  const checkpointPaths = checkpointPathsTouched(paths, ctx.checkpointGlobs ?? []);
+  const { authority, reason } = resolveMergeAuthority(step, { requiresOperatorMerge: ctx.requiresOperatorMerge, checkpointPaths });
 
   // The branch is cut from the FROZEN TAG'S COMMIT, so the head is a DESCENDANT of
   // the frozen commit and never an alteration of it (FR-007 as amended, and what D1
@@ -331,9 +382,17 @@ export async function publishDeliverable(
     '---',
     '',
     'This branch was written by the deterministic `build-publish` workflow, not by the executor — the executor holds',
-    '`contents: read` and could not have pushed it. `deliverable-gate` (D1–D5) is the required check on this pull',
+    '`contents: read` and could not have pushed it. `deliverable-gate` (D1–D6) is the required check on this pull',
     'request; **D5** additionally refuses any patch touching the installed oversight machinery or the governance',
     'record, independently of the declared scope above (FR-068).',
+    ...(subjectPaths.size > 0
+      ? [
+          '',
+          `**Subject workflow(s):** ${[...subjectPaths].map((p) => `\`${p}\``).join(', ')} — the one part of \`.github/\` a deliverable may be.`,
+          'Its content passed the guards here (triggers, permissions, secrets, pinned actions, scanners, environment) and',
+          '**D6** re-reads it on this pull request; it always waits for the operator\'s own merge (FR-069).',
+        ]
+      : []),
   ].join('\n');
 
   const existing = await findDeliverablePr(gh, repo, branch, base);
@@ -413,6 +472,10 @@ if (isMain) {
     ...(get('head-sha') ? { headSha: get('head-sha') } : {}),
     ...(get('base') ? { base: get('base') } : {}),
     requiresOperatorMerge: /^(1|true|yes)$/i.test(process.env.BUILD_REQUIRES_OPERATOR_MERGE ?? ''),
+    // The workflow passes the CHECKPOINT_PATHS repository variable through as an env
+    // var of the same name (CONFIGURATION_GUIDE.md §3); unset or empty = no operator
+    // globs, and subject workflows wait regardless.
+    checkpointGlobs: parseCheckpointPaths(process.env[CHECKPOINT_PATHS_VARIABLE]),
   })
     .then((result) => {
       if (result.outcome === 'refused') {

@@ -5,6 +5,8 @@ import { parseDeliverableMarker, type DeliverableMarker } from './markers';
 import { readPlanAtRef, slugFromPlanRef } from './plans';
 import type { PlanStep } from '../../../schemas/plan';
 import type { MergeAuthority } from '../../../schemas/executor';
+import { checkpointPathsTouched, type CheckpointPath } from '../../../scripts/gates/lib/checkpoint-paths';
+import { readCheckpointPaths } from './checkpoint-config';
 
 /**
  * Deliverable pull requests as a lifecycle object (US18 — FR-064, FR-065, and the
@@ -18,13 +20,31 @@ import type { MergeAuthority } from '../../../schemas/executor';
  */
 
 /**
- * Merge authority (T209, FR-062) — DERIVED, never configured.
+ * The inputs merge authority is derived from — besides the step itself.
+ *
+ * Every field ESCALATES or is absent; none can pre-authorize. That is what lets a
+ * reader that could not read one of them still answer when another is set (see
+ * `listDeliverablePrs`).
+ */
+export interface MergeAuthorityInputs {
+  /** the repository's `BUILD_REQUIRES_OPERATOR_MERGE` Actions variable (FR-062) */
+  requiresOperatorMerge?: boolean;
+  /** the checkpoint paths THIS PATCH touches, each with why it waits — a subject
+   *  workflow, or a path inside a `CHECKPOINT_PATHS` glob (`checkpointPathsTouched`,
+   *  GHI #163 option 3 / GHI #174 D6.7). Read from the pull request's actual files,
+   *  never from the declared scope. */
+  checkpointPaths?: readonly CheckpointPath[];
+}
+
+/**
+ * Merge authority (T209, FR-062; amended T274) — DERIVED, never configured.
  *
  * Escalation-only, and the asymmetry is the whole rule: configuration may ADD a
  * checkpoint and may never remove one a gate demands.
  *
  *   high-stakes step with a recorded confirmation → operator-merge-required, always
- *   per-workflow checkpoint configured             → operator-merge-required
+ *   the patch touches a checkpoint path           → operator-merge-required, always
+ *   repository checkpoint (`BUILD_REQUIRES_OPERATOR_MERGE`) → operator-merge-required
  *   otherwise                                      → pre-authorized by the approved plan
  *
  * WHY THE HIGH-STAKES BRANCH IS NOT CONFIGURABLE. A step reaches B5 because a
@@ -32,8 +52,24 @@ import type { MergeAuthority } from '../../../schemas/executor';
  * scoped the gate to the step for this reason). Pre-authorizing its landing would
  * spend a real authority's answer on a diff no human read — the confirmation would
  * attest to an intent while the code went unreviewed.
+ *
+ * WHY THE PATH BRANCH SITS SECOND, ABOVE THE REPOSITORY SETTING (GHI #163 option 3,
+ * GHI #174 D6.7). The deliverable that most needs a human to read it is identified by
+ * WHAT IT CHANGES — an agent-authored GitHub Actions workflow decides what runs with
+ * which credentials the moment it lands, and an IAM or organization config is the
+ * same shape of change in the cloud. So the namespace `.github/workflows/subject_*`
+ * always waits, whatever `BUILD_REQUIRES_OPERATOR_MERGE` says, and the operator may
+ * add their own paths. It is checked even when the STEP is unknown: a checkpoint by
+ * path does not depend on which plan step produced the change, and answering
+ * "pre-authorized" about a subject workflow because the plan could not be read would
+ * be the absent-≠-success mistake applied to a merge decision.
+ *
+ * THE REASONS CARRY NO GATE OR REQUIREMENT IDS (house rule, 2026-08-29). They reach
+ * the Builds page verbatim — the operator is told in plain words which path waits and
+ * why — and the gate's own detail (`checkD3MergeAuthority`) quotes the same sentence
+ * so three readers cannot phrase one decision three ways (GHI #127).
  */
-export function resolveMergeAuthority(step: PlanStep | null, opts: { requiresOperatorMerge?: boolean } = {}): {
+export function resolveMergeAuthority(step: PlanStep | null, opts: MergeAuthorityInputs = {}): {
   authority: MergeAuthority;
   reason: string;
 } {
@@ -42,20 +78,101 @@ export function resolveMergeAuthority(step: PlanStep | null, opts: { requiresOpe
       authority: 'operator-merge-required',
       reason:
         `step ${step.id} is high-stakes (${step.authority ?? 'authority unset'}) and carries an external authority's ` +
-        'confirmation — its deliverable always waits for the operator\'s own merge, regardless of configuration ' +
-        '(FR-062 is escalation-only: config may add a checkpoint, never remove one a gate demands)',
+        'confirmation — its deliverable always waits for your own merge, whatever the configuration says ' +
+        '(configuration may add a checkpoint, never remove one a gate demands)',
     };
   }
+  const checkpoints = opts.checkpointPaths ?? [];
+  if (checkpoints.length > 0) {
+    return { authority: 'operator-merge-required', reason: checkpointPathsReason(checkpoints) };
+  }
   if (opts.requiresOperatorMerge) {
+    // NAMES THE REPOSITORY VARIABLE, not a per-executor field (GHI #163, option 2). The
+    // old sentence cited the executor's own merge flag, which was configuration that
+    // nothing read; the checkpoint has always been `BUILD_REQUIRES_OPERATOR_MERGE`, and
+    // the per-executor field is now deleted from the executor schema.
     return {
       authority: 'operator-merge-required',
-      reason: 'the workflow is configured with requires_operator_merge — this deliverable waits for the operator\'s own merge',
+      reason:
+        'the repository\'s BUILD_REQUIRES_OPERATOR_MERGE variable asks for an operator checkpoint on every ' +
+        'deliverable — this one waits for your own merge',
     };
   }
   return {
     authority: 'pre-authorized',
-    reason: 'the approved plan pre-authorizes this deliverable\'s merge (FR-062 default) — no per-step checkpoint is configured',
+    reason:
+      'the approved plan pre-authorizes this deliverable\'s merge — the step is not high-stakes, the change touches ' +
+      'no checkpoint path, and the repository asks for no checkpoint',
   };
+}
+
+/**
+ * The plain-language sentence for a path checkpoint: "this change touches `a`, `b` —
+ * <why>", one clause per distinct reason. Paths are grouped by their reason so a
+ * patch touching two subject workflows reads as one fact, not two.
+ */
+export function checkpointPathsReason(paths: readonly CheckpointPath[]): string {
+  const byWhy = new Map<string, string[]>();
+  for (const p of paths) {
+    const list = byWhy.get(p.why) ?? [];
+    if (!list.includes(p.path)) list.push(p.path);
+    byWhy.set(p.why, list);
+  }
+  return [...byWhy.entries()]
+    .map(([why, list]) => `this change touches ${list.map((p) => `\`${p}\``).join(', ')} — ${why}`)
+    .join('; ');
+}
+
+/**
+ * Every path a pull request's diff touches — added, modified, removed, renamed.
+ *
+ * `previous_filename` is included deliberately: a rename WRITES both sides, so a patch
+ * that renames a reserved or checkpoint file out of the way has touched it, and a
+ * reader that only saw the destination would let exactly that through. Shared by the
+ * gate (D5, D6, D3), the merger and this listing, so all four readers of "what did
+ * this change touch?" ask the API the same question (T274).
+ */
+export async function listPullRequestPaths(gh: Octokit, repo: RepoRef, prNumber: number): Promise<string[]> {
+  const files = await gh.paginate(gh.pulls.listFiles, { ...repo, pull_number: prNumber, per_page: 100 });
+  return [...new Set(files.flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]))];
+}
+
+/** Warned-about diff reads, so a listing does not print once per pull request. */
+const diffWarned = new Set<string>();
+
+/**
+ * The listing's degrading form of `listPullRequestPaths`: `null` when the diff could
+ * not be read, warned once with the remedy. The GATE and the MERGER keep the throwing
+ * form — for them an unreadable diff is `ApiUnavailableError`, a refusal to decide;
+ * for a listing it is one row that says `unknown` (the `readOperatorMergeCheckpoint`
+ * rule: taking the whole Builds view down because one read failed is a worse outcome
+ * than the value it was fetching).
+ */
+async function listPullRequestPathsOrNull(gh: Octokit, repo: RepoRef, prNumber: number): Promise<string[] | null> {
+  try {
+    return await listPullRequestPaths(gh, repo, prNumber);
+  } catch (error: unknown) {
+    const key = `${repo.owner}/${repo.repo}#${prNumber}`;
+    if (!diffWarned.has(key)) {
+      diffWarned.add(key);
+      console.warn(
+        `Could not read the files of pull request ${key} (${errorStatus(error) ?? 'no status'}). Its merge authority is ` +
+          'reported as "unknown" rather than guessed. A 403 means the token lacks pull-request read on this repository.',
+      );
+    }
+    return null;
+  }
+}
+
+/**
+ * The authority `build-publish` RECORDED on a pull request body at publication —
+ * `**Merge authority:** \`<authority>\` — <reason>` — for the settled rows, where the
+ * decision is history. `null` when the line is absent or names an unknown value.
+ */
+export function parseRecordedMergeAuthority(body: string): { authority: MergeAuthority; reason: string } | null {
+  const m = /\*\*Merge authority:\*\* `(pre-authorized|operator-merge-required)`(?: — ([^\n]+))?/.exec(body);
+  if (!m) return null;
+  return { authority: m[1] as MergeAuthority, reason: (m[2] ?? '').trim() || 'recorded at publication' };
 }
 
 export type BuildState = 'awaiting-merge' | 'merged' | 'refused' | 'unknown';
@@ -80,6 +197,11 @@ export interface DeliverablePrView {
    *  deterministic merger is not the operator's problem and is not flagged. */
   actionRequired: boolean;
   mergeAuthority: 'pre-authorized' | 'operator-merge-required' | 'unknown';
+  /** WHY, in the rule's own plain words (`resolveMergeAuthority`), for the Builds page
+   *  to show under an operator-required row — which path waits, or which setting asked.
+   *  `null` when the authority is `unknown`: there is no reason to give for an answer
+   *  that could not be derived. */
+  mergeReason: string | null;
   updatedAt: string;
 }
 
@@ -192,6 +314,13 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
   // re-reading it per pull request would let one page report two different answers.
   const checkpoint = await readOperatorMergeCheckpoint(gh, repo);
   const requiresOperatorMerge = checkpoint === true;
+  // The operator's CHECKPOINT_PATHS list, read at most once per listing and only when
+  // an open deliverable needs it (T274). Lazy because this listing also serves
+  // `resolveVerifiedCommit`, which asks only about MERGED pull requests — reading a
+  // setting that cannot change their answer would cost an API call and, on a token
+  // without the Variables permission, a warning about nothing.
+  let checkpointConfig: Awaited<ReturnType<typeof readCheckpointPaths>> | undefined;
+  const readCheckpointConfig = async () => (checkpointConfig ??= await readCheckpointPaths(gh, repo));
   const views: DeliverablePrView[] = [];
   for (const pr of prs) {
     if (!pr.head.ref.startsWith('build/')) continue;
@@ -203,6 +332,10 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
     const labels = pr.labels.map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
     const merged = Boolean(pr.merged_at);
     const state = stateFromLabels(labels, merged);
+    // Open = not merged and not closed. `state` is read defensively because the
+    // listing's shape is what the tests stub, and a missing field must not turn a
+    // pull request into a settled one.
+    const isOpen = !merged && (pr as { state?: string }).state !== 'closed';
     // MERGE AUTHORITY IS DERIVED LIVE, not parsed out of the pull request body
     // (Codex on PR #145). The body records what the writer computed at PUBLICATION
     // time, and `BUILD_REQUIRES_OPERATOR_MERGE` is a mutable repository variable: flip
@@ -226,16 +359,76 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
     // waits for a human — worse than the guess this change removes (Codex on PR #166).
     // So: always read the step; consult the checkpoint only when it is what the answer
     // depends on.
+    //
+    // THE SAME RULE, GENERALIZED FOR THE PATH CHECKPOINT (T274, GHI #163 option 3).
+    // Every input to `resolveMergeAuthority` escalates or is absent, so the answer is
+    // KNOWABLE the moment any readable input escalates: a high-stakes step, a subject
+    // workflow in the diff (the namespace needs no setting to be recognised), a path
+    // inside a readable `CHECKPOINT_PATHS` glob, or a readable `true` in
+    // `BUILD_REQUIRES_OPERATOR_MERGE`. Only when every input we COULD read says
+    // "pre-authorized" and one input could not be read is the answer `unknown` — because
+    // the unread one might have been the escalation.
     let authority: DeliverablePrView['mergeAuthority'] = 'unknown';
-    if (marker) {
+    let mergeReason: string | null = null;
+    if (marker && !isOpen) {
+      // A SETTLED pull request's authority line is history, not a decision, and it is
+      // NOT re-derived (correctness review 2026-08-29). The first version re-ran
+      // `resolveMergeAuthority` for a merged PR with the diff input left EMPTY — and so
+      // told the operator who had merged a subject workflow by hand, because every
+      // gate said operator-merge-required, that "the approved plan pre-authorized this
+      // landing". A derivation from a partial input set is a false verdict, not a
+      // cheaper one. What the writer recorded on the body at publication is what the
+      // decision WAS; when the line is absent (a body edited by hand, a pre-T274
+      // deliverable) the honest answer is `unknown`.
+      const recorded = parseRecordedMergeAuthority(pr.body ?? '');
+      if (recorded) ({ authority, reason: mergeReason } = recorded);
+    } else if (marker) {
       const step = await stepForMarker(gh, repo, marker);
-      if (step && checkpoint === 'unreadable') {
-        // No opts: the high-stakes branch of the shared rule is reached without
-        // supplying a checkpoint we do not have. A step that is not high-stakes has an
-        // authority that genuinely depends on the unread setting — that is `unknown`.
-        if (step.high_stakes) authority = resolveMergeAuthority(step).authority;
-      } else if (step) {
-        authority = resolveMergeAuthority(step, { requiresOperatorMerge }).authority;
+      // THE DIFF IS READ WHETHER OR NOT THE STEP RESOLVED (correctness review
+      // 2026-08-29). `resolveMergeAuthority` promises the path checkpoint "is checked
+      // even when the STEP is unknown", and the gate and the merger honour that — but
+      // this listing used to gate the whole derivation on the step, so an unreadable
+      // plan plus a subject workflow in the diff read `unknown` here and
+      // `operator-merge-required` at build-merge for one pull request. Both are
+      // non-permissive, but the Builds page should name the path that waits.
+      //
+      // AND THE DIFF READ MAY FAIL WITHOUT TAKING THE LISTING DOWN. Every other input
+      // on this path degrades — the plan to `null`, the two variables to `unreadable` —
+      // and this one threw, so one 5xx (or a token without pull-request read) on ANY
+      // open deliverable rejected the whole listing, and with it `resolveVerifiedCommit`
+      // (lifecycle-gate L3 and the completion hook), whose answer never needed that
+      // diff. Unreadable ⇒ `unknown` for that row, honest and action-required.
+      const touched = await listPullRequestPathsOrNull(gh, repo, pr.number);
+      let checkpointPaths: ReturnType<typeof checkpointPathsTouched> | null = null;
+      let configUnreadable = false;
+      if (touched !== null) {
+        const config = touched.length > 0 ? await readCheckpointConfig() : [];
+        configUnreadable = config === 'unreadable';
+        // With an unreadable list, the operator globs are empty and this holds ONLY the
+        // namespace paths — which are knowable without the variable.
+        checkpointPaths = checkpointPathsTouched(touched, config === 'unreadable' ? [] : config);
+      }
+      if (step && (step.high_stakes || checkpoint === true)) {
+        // INDEPENDENT ESCALATION FIRST (Codex P2 on PR #175, 2026-08-30). A high-stakes
+        // step and a repository checkpoint set to `true` each require the operator's merge
+        // on their own; the diff can only ADD a reason, never remove one. So an unreadable
+        // diff must not turn a known "waits for you" into `unknown` — that is the same
+        // permissive fallback GHI #150 was filed about, one input over. Derive with the
+        // paths we have (none, when the read failed) and let the reason name what is
+        // certain; the path reason, if any, is the only thing the failed read cost.
+        ({ authority, reason: mergeReason } = resolveMergeAuthority(step, { requiresOperatorMerge, checkpointPaths: checkpointPaths ?? [] }));
+      } else if (checkpointPaths !== null) {
+        if (step) {
+          const unreadable = checkpoint === 'unreadable' || configUnreadable;
+          const knowable = !unreadable || checkpointPaths.length > 0;
+          if (knowable) {
+            ({ authority, reason: mergeReason } = resolveMergeAuthority(step, { requiresOperatorMerge, checkpointPaths }));
+          }
+        } else if (checkpointPaths.length > 0) {
+          // The step could not be read, but a checkpoint path does not depend on the
+          // plan: the answer is knowable, and it is the escalating one.
+          ({ authority, reason: mergeReason } = resolveMergeAuthority(null, { checkpointPaths }));
+        }
       }
     }
     views.push({
@@ -260,6 +453,7 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
       // stalled is the cheap error; leaving it silent is the expensive one.
       actionRequired: state === 'awaiting-merge' && authority !== 'pre-authorized',
       mergeAuthority: authority,
+      mergeReason,
       updatedAt: pr.updated_at,
     });
   }

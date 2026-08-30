@@ -15,4 +15,6 @@ executor:
   tier: in-sandbox              # gh-aw-compiled: containment is STRUCTURAL
   engine: claude                # per-workflow, compile-time; copilot|gemini|codex equally valid
   model: claude-haiku-4-5       # deliberately cheap — the tracer proves the seam, not the agent
-  requires_operator_merge: false # default: the approved plan pre-authorizes the merge (FR-062)
+  # There is deliberately no merge-checkpoint field here (GHI #163, 2026-08-29). Whether a
+  # deliverable waits for the operator's own merge is decided by the step, by what the
+  # change touches, and by the repository's BUILD_REQUIRES_OPERATOR_MERGE — not per agent.

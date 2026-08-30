@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@octokit/rest": "^21.0.0",
+    "yaml": "^2.9.0",
     "zod": "^3.24.0"
   }
 }

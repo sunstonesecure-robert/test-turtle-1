@@ -36,6 +36,12 @@ export const GuardrailedRunner = z
   })
   .strict();
 
+/**
+ * The executor object. Since 2026-08-29 (GHI #163) there is NO per-executor merge
+ * checkpoint field: merge authority is derived from the step (high-stakes), the paths
+ * the deliverable touches, and the repository-wide `BUILD_REQUIRES_OPERATOR_MERGE`.
+ * `.strict()` means a stale `requires_operator_merge:` line fails D4.
+ */
 export const ExecutorConfig = z
   .object({
     /** Recorded on every deliverable this executor produces (FR-065). */
@@ -53,15 +59,17 @@ export const ExecutorConfig = z
     image: z.string().min(1).optional(),
     /** Must exist in gh-aw's pinned AI-credits catalog or the proxy rejects the run. */
     model: z.string().min(1).optional(),
-    /**
-     * The FR-062 merge checkpoint, and it is escalation-only by construction: a
-     * `true` here ADDS an operator checkpoint. There is deliberately no value that
-     * removes one a gate demands — a step carrying an external authority's
-     * confirmation always waits for the operator, whatever this says.
-     */
-    requires_operator_merge: z.boolean().optional(),
     guardrailed_runner: GuardrailedRunner.optional(),
   })
+  // Deleted 2026-08-29 (GHI #163, option 2): `requires_operator_merge` used to live
+  // here as a per-executor FR-062 escalation. It was never read on the live path — the
+  // merge checkpoint is the REPOSITORY'S (`BUILD_REQUIRES_OPERATOR_MERGE`), plus
+  // escalation by what the change touches (a subject workflow or a `CHECKPOINT_PATHS`
+  // entry; GHI #174 D6.7). A knob that looked like it did something and did nothing is
+  // the worst kind of configuration. Because this object is `.strict()`, an executor
+  // file still carrying the field is now REFUSED by D4 ("Unrecognized key") rather
+  // than silently ignored — the operator learns the knob is gone at the gate, not by
+  // wondering why it had no effect.
   .strict()
   .superRefine((cfg, ctx) => {
     // FR-066, enforced at load rather than documented and hoped for. An executor

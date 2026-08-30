@@ -56,6 +56,40 @@ safe-outputs:
     title-prefix: "missing-data: "
   upload-artifact:
 network: defaults
+# NODE 24 FOR THE GATE TOOLCHAIN, AND ASKING FOR IT IN `steps:` IS WHAT DELETED IT
+# (Codex on PR #172).
+#
+# The obvious home for this is a setup-node step in `steps:` below, immediately before
+# the gates `npm ci`. That is where it was written, and the compiled workflow did not
+# contain it: gh-aw drops a custom `actions/setup-node` whose `node-version` equals the
+# runtime version it manages itself — reading it as redundant with its own step, which
+# it emits near the END of the block, after the gates `npm ci` and after the preflight.
+# So the gates installed and ran on whatever Node the runner shipped, while this file
+# read as though they ran on a pinned 24.
+#
+# The trap is that the step survived for as long as it was WRONG. It compiled through
+# untouched while it asked for 20; T265 bumped it to 24 and the compiler started
+# deleting it, and the recompile that finally published that (T267) is what put an
+# unpinned gate half on main. Established against v0.81.6 rather than assumed — the
+# same source compiled six ways: a step asking for 20, or for 22, survives wherever it
+# is written; one asking for 24 is removed whether it is pinned by the SHA below, by
+# the `v6.4.0` tag, or by a different setup-node SHA entirely.
+#
+# `pre-steps:` is not subject to that, and runs before every built-in step, so it is
+# where a Node pin for the gate half can be authored and survive a compile. The managed
+# step still runs later and still asks for 24; this one only has to get there first.
+# tests/unit/node-runtime-pins.test.ts asserts the resulting ORDER in the compiled
+# locks — the property that failed is ordering, and no reading of this source could
+# have shown it.
+pre-steps:
+  - name: Node 24 before the gate toolchain installs anything
+    uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+    with:
+      node-version: 24
+      # Nothing is checked out yet at this point in the job, so there is no lockfile
+      # for setup-node v6's default package-manager cache to hash. gh-aw's own managed
+      # setup-node steps disable it for the same reason.
+      package-manager-cache: false
 steps:
   # THE WORKTREE AND THE RULES ARE CHECKED OUT SEPARATELY, and only one of them is
   # historical (GHI #107). The gates run FIRST, out of a CURRENT checkout; the frozen
@@ -190,9 +224,8 @@ steps:
       # Deliberately never inputs.plan_ref: that is the defect this exists to remove.
       ref: ${{ inputs.gates_ref || github.event.repository.default_branch }}
       persist-credentials: false
-  - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-    with:
-      node-version: 24
+  # The Node pin for this `npm ci` and for the preflight below is in `pre-steps:`
+  # above, not here — a setup-node step in THIS block is deleted by the compiler.
   - run: npm ci
   - name: resolve the gate set (reported, so an absent gate cannot read as a passing one)
     id: gates
@@ -314,6 +347,13 @@ governance record lives here too: `plans/**`, `confirmations/**`, `evidence/**`,
 those paths are reserved.** A patch touching any of them is refused with the paths named, by
 `build-publish` and again by `deliverable-gate` **D5** — and D5 refuses it even if the step's
 declared scope named those paths, because a boundary a plan can widen is not a boundary.
+
+One exception, and only one: the operator's OWN deploy workflow may be delivered as
+`.github/workflows/subject_<name>.yml` (lowercase letters, digits and hyphens in the name) when the
+step's scope names exactly `.github/workflows/subject_*.yml` or that one file. Its content is judged
+before anything is written: read-only repository permissions, OIDC through the protected
+`subject-deploy` environment on a GitHub-hosted runner, every action pinned to a commit, no secrets,
+no oversight triggers — and it always waits for the operator's own merge.
 
 **A broken thing in the machinery is NOT yours to fix, however tempting.** A failing `tsc`, a
 deprecated action pin, a broken vendored import, a gate that looks wrong: report it and stay inside

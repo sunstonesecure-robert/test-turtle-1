@@ -3,15 +3,17 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { parseDeliverableMarker } from '../dashboard/lib/github/markers';
 import { readPlanAtRef } from '../dashboard/lib/github/plans';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
-import { resolveMergeAuthority } from '../dashboard/lib/github/builds';
+import { listPullRequestPaths, resolveMergeAuthority } from '../dashboard/lib/github/builds';
 import { deliverableGate } from './gates/deliverable-gate';
 import { refusalDetail } from './gates/lib/runner';
+import { checkpointPathsTouched, parseCheckpointPaths, CHECKPOINT_PATHS_VARIABLE } from './gates/lib/checkpoint-paths';
 
 /**
  * build-merge (T224) — the post-gate actor nobody had assigned.
  *
  * Two states were unreachable before this file existed (PR #115 Codex review):
- *   1. On the default `requires_operator_merge: false` path **nothing merged the
+ *   1. On the repository default path — `BUILD_REQUIRES_OPERATOR_MERGE` unset, no
+ *      checkpoint path touched, the step not high-stakes — **nothing merged the
  *      pull request.** `build-publish` opens it, `deliverable-gate` judges it,
  *      `resolveMergeAuthority` names the authority, and the dashboard deliberately
  *      shows no button for a pre-authorized PR — so the default tracer stalled
@@ -34,7 +36,12 @@ import { refusalDetail } from './gates/lib/runner';
  *
  * IT NEVER MERGES AN OPERATOR-REQUIRED PULL REQUEST. That PR waits for the human,
  * and the label transition still applies when they merge it — the close-event mode
- * does not care who did the merging, only that it happened.
+ * does not care who did the merging, only that it happened. Since 2026-08-29 (T274,
+ * GHI #163 option 3) "operator-required" is also decided by WHAT THE DIFF TOUCHES: a
+ * subject workflow (`.github/workflows/subject_*.yml`, FR-069) always waits, and so
+ * does any path inside a `CHECKPOINT_PATHS` glob — so this actor reads the pull
+ * request's files before it reads anything else, and a checkpoint path is a reason
+ * to stop, never a thing to merge around.
  *
  * WHY IT NEEDS NO RULESET BYPASS. `setup-repo.ts` grants the main ruleset's only
  * bypass to the repo-admin role; the `github-actions` Integration deliberately holds
@@ -64,12 +71,19 @@ async function setBuildLabel(gh: Octokit, repo: RepoRef, prNumber: number, label
   }
 }
 
+/** What the merger reads besides the pull request: the repository checkpoint and the
+ *  operator's CHECKPOINT_PATHS globs, both from the workflow's env. */
+export interface MergeOptions {
+  requiresOperatorMerge?: boolean;
+  checkpointGlobs?: readonly string[];
+}
+
 /** Mode 1 — merge a pre-authorized deliverable whose gate is green. */
 export async function mergeIfPreAuthorized(
   gh: Octokit,
   repo: RepoRef,
   branch: string,
-  opts: { requiresOperatorMerge?: boolean } = {},
+  opts: MergeOptions = {},
 ): Promise<MergeOutcome> {
   const { data: open } = await gh.pulls.list({ ...repo, head: `${repo.owner}:${branch}`, state: 'open', per_page: 10 });
   const pr = open[0];
@@ -81,7 +95,12 @@ export async function mergeIfPreAuthorized(
   }
   const plan = await readPlanAtRef(gh, repo, marker.planRef).catch(() => null);
   const step = plan?.steps.find((s) => s.id === marker.stepId) ?? null;
-  const { authority, reason } = resolveMergeAuthority(step, opts);
+  // The diff, read the same way the gate and the dashboard read it, so all three agree
+  // on what this change touches — a subject workflow or an operator-listed path makes
+  // it operator-required whatever the repository setting says (T274).
+  const touched = await listPullRequestPaths(gh, repo, pr.number);
+  const checkpointPaths = checkpointPathsTouched(touched, opts.checkpointGlobs ?? []);
+  const { authority, reason } = resolveMergeAuthority(step, { requiresOperatorMerge: opts.requiresOperatorMerge, checkpointPaths });
   if (authority === 'operator-merge-required') {
     // Not a failure — the intended state. The label stays `build:awaiting-merge`
     // and the portfolio surfaces it as action-required (FR-064).
@@ -140,7 +159,7 @@ export async function mergeIfPreAuthorized(
 export async function sweepMergeable(
   gh: Octokit,
   repo: RepoRef,
-  opts: { requiresOperatorMerge?: boolean } = {},
+  opts: MergeOptions = {},
 ): Promise<MergeOutcome[]> {
   // A thrown operational failure propagates out of here by design (see the catch in
   // `mergeIfPreAuthorized`): one unmergeable pull request is a result, but a broken
@@ -180,12 +199,16 @@ if (isMain) {
   const gh = createClient();
   const repo = { owner, repo: repoName };
   const requiresOperatorMerge = /^(1|true|yes)$/i.test(process.env.BUILD_REQUIRES_OPERATOR_MERGE ?? '');
+  // Passed through by the workflow as an env var of the same name as the repository
+  // variable (CONFIGURATION_GUIDE.md §3), next to BUILD_REQUIRES_OPERATOR_MERGE.
+  const checkpointGlobs = parseCheckpointPaths(process.env[CHECKPOINT_PATHS_VARIABLE]);
+  const opts: MergeOptions = { requiresOperatorMerge, checkpointGlobs };
   if (has('sweep')) {
     // A blocked pull request is NOT a failed sweep: it is a correct outcome recorded
     // (the gate is red, or the operator's merge is required). Exiting non-zero would
     // turn "waiting for a human" into a red run, which is exactly the misreading
     // FR-067 forbids on the operator's own surfaces.
-    void sweepMergeable(gh, repo, { requiresOperatorMerge })
+    void sweepMergeable(gh, repo, opts)
       .then((results) => {
         if (results.length === 0) console.log('no open deliverable pull requests — nothing to merge');
         for (const r of results) console.log(JSON.stringify(r));
@@ -197,7 +220,7 @@ if (isMain) {
   } else {
   const run = has('closed')
     ? transitionOnClose(gh, repo, Number(get('pr')))
-    : mergeIfPreAuthorized(gh, repo, get('branch') ?? '', { requiresOperatorMerge });
+    : mergeIfPreAuthorized(gh, repo, get('branch') ?? '', opts);
   run
     .then((result) => {
       switch (result.outcome) {

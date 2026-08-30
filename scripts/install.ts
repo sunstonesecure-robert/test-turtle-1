@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../dashboard/lib/github/client';
-import { TOOLCHAIN_DIRS, TEMPLATE_DIRS, TOOLCHAIN_FILES } from './install-manifest';
+import { TOOLCHAIN_DIRS, TEMPLATE_DIRS, TOOLCHAIN_FILES, SUBJECT_WORKFLOW_RE } from './install-manifest';
 
 /**
  * Product/target install step (T178, research.md "Product/target split"):
@@ -23,6 +23,12 @@ const PRODUCT_ROOT = resolve(new URL('..', import.meta.url).pathname);
  *  `node:fs`, Octokit, `import.meta.url`) into the dashboard's browser bundle.
  *  Re-exported here because callers have always read it from `scripts/install`. */
 export { TOOLCHAIN_DIRS, TEMPLATE_DIRS, INSTALLED_TEMPLATE_DIRS, TOOLCHAIN_FILES } from './install-manifest';
+/** The subject-workflow namespace (GHI #174 C′, FR-069) lives in the manifest for the
+ *  same reason: it is a manifest property (disjoint from what init installs), and the
+ *  dashboard bundle reads it through `reserved-paths`. Re-exported on its own line so
+ *  the drift guard in `tests/unit/dashboard-bundle-boundary.test.ts`, which pins the
+ *  line above verbatim, keeps holding. */
+export { SUBJECT_WORKFLOW_RE, isSubjectWorkflowPath } from './install-manifest';
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -34,13 +40,43 @@ function walk(dir: string): string[] {
   return out;
 }
 
+/**
+ * `init` must never install INTO the subject-workflow namespace (GHI #174 C′, FR-069).
+ *
+ * The reserved-path set carves `.github/workflows/subject_<name>.yml` out of
+ * `.github/**` on the strength of one invariant: nothing `init` installs can be in
+ * the namespace, because no installed template's basename contains `_`. The product's
+ * own tests assert that (`tests/unit/subject-workflow-namespace.test.ts`), but a test
+ * guards the product repo, not the checkout `npm run init` is actually run from — so
+ * the installer refuses too. Refusing here, before any tree is built, is what makes
+ * "namespace first, then the list" in `isReservedPath` safe: an installed file could
+ * otherwise be un-reserved by its own name and an agent build could overwrite it.
+ *
+ * The `_` rule is the broader of the two on purpose. `SUBJECT_WORKFLOW_RE` is what
+ * the gates read; the no-underscore convention is what keeps the two namespaces
+ * separable by eye, and a template named `sub_ject.yml` that happened to miss the
+ * regex would still erode it.
+ */
+function refuseIfInsideSubjectNamespace(targetPath: string, sourcePath: string): void {
+  const basename = targetPath.slice(targetPath.lastIndexOf('/') + 1);
+  if (SUBJECT_WORKFLOW_RE.test(targetPath) || basename.includes('_')) {
+    throw new Error(
+      `init refuses to install ${sourcePath} as ${targetPath}: installed template names are kebab-case and never ` +
+        'contain `_`, because `.github/workflows/subject_<name>.yml` is the namespace reserved for the operator’s own ' +
+        'deploy workflows (delivered by agent builds, judged by D6) and the two must stay disjoint. Rename the template.',
+    );
+  }
+}
+
 /** target-repo path → file content, from the local product checkout. */
 export function collectInstallFiles(productRoot: string = PRODUCT_ROOT): Map<string, string> {
   const files = new Map<string, string>();
   for (const templateDir of TEMPLATE_DIRS) {
     const src = join(productRoot, 'templates', templateDir);
     for (const file of walk(src)) {
-      files.set(`.github/${templateDir}/${relative(src, file)}`, readFileSync(file, 'utf8'));
+      const target = `.github/${templateDir}/${relative(src, file).replace(/\\/g, '/')}`;
+      refuseIfInsideSubjectNamespace(target, relative(productRoot, file));
+      files.set(target, readFileSync(file, 'utf8'));
     }
   }
   for (const dir of TOOLCHAIN_DIRS) {

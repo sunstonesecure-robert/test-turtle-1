@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { errorMessage, errorStatus } from '../../dashboard/lib/github/errors';
+import { listPullRequestPaths } from '../../dashboard/lib/github/builds';
 import { ApiUnavailableError, cliMain, printReport, refusalDetail, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
 import { DELIVERABLE_CATALOGUE } from './lib/catalogue';
 import {
@@ -12,13 +13,20 @@ import {
   resolveDeliveringStep,
   type DeliverablePr,
 } from './lib/checks-deliverable';
+import { checkD6SubjectWorkflowContent, subjectWorkflowPaths, type SubjectWorkflowFile } from './lib/checks-subject-workflow';
+import { checkpointPathsTouched, parseCheckpointPaths, CHECKPOINT_PATHS_VARIABLE } from './lib/checkpoint-paths';
+import { scannerRunner } from './lib/subject-workflow-scanners';
 
 /**
- * deliverable-gate (T208 + T239) — required status check on every
+ * deliverable-gate (T208 + T239 + T274) — required status check on every
  * `build/<slug>/<step-id>` pull request.
  *
  * This is the gate that decides whether an agent's actual work may land, and the
- * only gate in the system that reads a patch. Like every other family it reports
+ * only gate in the system that reads a patch. Since 2026-08-29 it also reads the
+ * CONTENT of one kind of file: a subject workflow (`.github/workflows/subject_*.yml`,
+ * FR-069) is the one part of `.github/` an agent may deliver, and D6 judges what such a
+ * file may do at runtime — D5 says where an agent may write, D6 says what a file
+ * written there may do (GHI #174). Like every other family it reports
  * EVERY declared gate on every run — a gate that does not apply says so by name, so
  * a report can never be read as "everything was checked" when it was not (GHI #108).
  *
@@ -81,14 +89,52 @@ export async function readExecutorConfig(
   }
 }
 
+/**
+ * The subject-workflow files D6 reads, as they are AT THE PULL REQUEST'S HEAD.
+ *
+ * Read from the head commit rather than from the patch artifact because the head is
+ * what merges — and only a VERIFIED 404 is a deletion (GHI #150): a path the diff
+ * lists that does not exist at the head was removed by this patch, and D6.1 is the only
+ * guard that applies to it. Every other failure is `ApiUnavailableError`, never
+ * `content: null` — an unreadable workflow judged as "deleted" would pass a gate that
+ * never saw it, which is the absent-≠-success mistake (GHI #108) on the one file class
+ * this gate exists to read.
+ */
+export async function readSubjectWorkflowFiles(
+  gh: Octokit,
+  repo: RepoRef,
+  paths: readonly string[],
+  ref: string,
+): Promise<SubjectWorkflowFile[]> {
+  const out: SubjectWorkflowFile[] = [];
+  for (const path of paths) {
+    try {
+      const { data } = await gh.repos.getContent({ ...repo, path, ref });
+      if (Array.isArray(data) || !('content' in data) || typeof data.content !== 'string') {
+        throw new ApiUnavailableError(`${path} at ${ref.slice(0, 8)} is not a readable file`);
+      }
+      out.push({ path, content: Buffer.from(data.content, 'base64').toString('utf8') });
+    } catch (error: unknown) {
+      if (error instanceof ApiUnavailableError) throw error;
+      if (errorStatus(error) === 404) {
+        out.push({ path, content: null });
+        continue;
+      }
+      throw new ApiUnavailableError(`could not read ${path} at ${ref.slice(0, 8)}: ${errorMessage(error)}`);
+    }
+  }
+  return out;
+}
+
 export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: number): Promise<GateReport> {
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
   // Every path the diff touches — added, modified, removed, renamed. `previous_filename`
   // is included deliberately: a rename WRITES both sides, so a patch that renames a
   // reserved file out of the way has touched it, and a gate that only saw the
-  // destination would let exactly that through.
-  const files = await gh.paginate(gh.pulls.listFiles, { ...repo, pull_number: prNumber, per_page: 100 });
-  const paths = [...new Set(files.flatMap((f) => [f.filename, ...(f.previous_filename ? [f.previous_filename] : [])]))];
+  // destination would let exactly that through. Shared with the merger and the
+  // dashboard listing (`listPullRequestPaths`) so the four readers of merge authority
+  // see the same diff.
+  const paths = await listPullRequestPaths(gh, repo, prNumber);
 
   const subject: DeliverablePr = {
     number: pr.number,
@@ -112,6 +158,18 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
   // ADD a checkpoint — nothing read here can remove one a gate demands, which is why
   // the high-stakes branch inside resolveMergeAuthority does not consult it.
   const requiresOperatorMerge = /^(1|true|yes)$/i.test(process.env.BUILD_REQUIRES_OPERATOR_MERGE ?? '');
+  // The checkpoint BY PATH (GHI #163 option 3, GHI #174 D6.7): a subject workflow in
+  // the diff always waits for the operator, and so does any path inside a glob the
+  // operator listed in the CHECKPOINT_PATHS repository variable — passed to this CLI as
+  // an env var of the same name by the workflow, like BUILD_REQUIRES_OPERATOR_MERGE.
+  // Read from the patch's ACTUAL files (`paths`, both sides of a rename), never from
+  // the declared scope — the same rule D5 follows, for the same reason.
+  const checkpointPaths = checkpointPathsTouched(paths, parseCheckpointPaths(process.env[CHECKPOINT_PATHS_VARIABLE]));
+
+  // D6's subjects: the namespace paths in the diff, read at the head commit. Computed
+  // before the catalogue runs so `skip` can say "no subject workflow in this patch" —
+  // a gate that does not apply says so by name rather than passing (GHI #108).
+  const subjectFiles = await readSubjectWorkflowFiles(gh, repo, subjectWorkflowPaths(paths), pr.head.sha);
 
   const noMarker = (): string | null =>
     d1.marker ? null : 'no deliverable:v1 marker on the pull request (D1), so there is nothing to judge this against';
@@ -125,7 +183,7 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
   const report = await runGateCatalogue(`#${prNumber} ${pr.head.ref}`, DELIVERABLE_CATALOGUE, [
     { id: 'D1', run: () => ({ id: d1.id, status: d1.status, requirement: d1.requirement, ...(d1.detail ? { detail: d1.detail } : {}) }) },
     { id: 'D2', skip: noStep, run: () => checkD2ScopeContainment(subject, step) },
-    { id: 'D3', skip: noStep, run: () => checkD3MergeAuthority(step, { requiresOperatorMerge }) },
+    { id: 'D3', skip: noStep, run: () => checkD3MergeAuthority(step, { requiresOperatorMerge, checkpointPaths }) },
     {
       id: 'D4',
       skip: noMarker,
@@ -143,6 +201,18 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
     // marker is missing, whose plan is unreadable, or whose step is a lie is exactly
     // the patch most worth asking the subject question about — so D5 always runs.
     { id: 'D5', run: () => checkD5SubjectBoundary(subject) },
+    // D6 — the content guards on the one part of `.github/` a deliverable may be
+    // (FR-069, GHI #174). Like D5 it needs no plan: a subject workflow is judged on
+    // what it DOES, whoever's step delivered it. `defaultBranch` is the branch this
+    // pull request lands on — the one a subject trigger may name (D6.2) — which is
+    // also what build-publish judged against (`ctx.base ?? 'main'`), so the writer and
+    // the gate cannot disagree about it. The scanners come from PATH at call time; when
+    // either is missing `scannerRunner()` is `null` and D6.5 FAILS closed.
+    {
+      id: 'D6',
+      skip: () => (subjectFiles.length === 0 ? 'no subject workflow in this patch' : null),
+      run: () => checkD6SubjectWorkflowContent(subjectFiles, { defaultBranch: pr.base.ref, scan: scannerRunner() }),
+    },
   ]);
   return { subject: report.subject, result: report.result, gates: report.gates };
 }
@@ -174,7 +244,7 @@ export async function sweepDeliverablePrs(
         status: 'completed',
         conclusion: report.result === 'pass' ? 'success' : 'failure',
         output: {
-          title: report.result === 'pass' ? 'D1–D5 green' : `refused: ${refusalDetail(report.gates)}`.slice(0, 120),
+          title: report.result === 'pass' ? 'D1–D6 green' : `refused: ${refusalDetail(report.gates)}`.slice(0, 120),
           // The gate's OWN sentences, never a paraphrase — the same rule every other
           // refusal surface in this system follows (GHI #127).
           summary: report.gates

@@ -10,7 +10,7 @@ import { pathsOutside, isRepoRelative, normalizePath } from './globs';
 // below, the `build-merge` writer, and the dashboard's deliverable list — and the
 // `deriveCompletionStatus` precedent puts a derivation with that profile in
 // `dashboard/lib/github/`, which gates import from rather than the other way round.
-import { resolveMergeAuthority } from '../../../dashboard/lib/github/builds';
+import { resolveMergeAuthority, type MergeAuthorityInputs } from '../../../dashboard/lib/github/builds';
 import { reservedPathsTouched, reservedRefusalDetail } from './reserved-paths';
 import { ApiUnavailableError, type GateResult } from './runner';
 
@@ -93,7 +93,7 @@ function isWriterIdentity(pr: Pick<DeliverablePr, 'authorLogin' | 'authorIsBot'>
  * of which a repository contributor can satisfy by hand. Open `build/<slug>/<step>`
  * off the frozen tag, paste a syntactically valid `deliverable:v1` marker naming a
  * real plan and a real in-scope step, touch only non-reserved paths in that scope, and
- * D1–D5 all pass — after which the `build-merge` sweep auto-merges it as
+ * D1–D6 all pass — after which the `build-merge` sweep auto-merges it as
  * pre-authorized. That is a route onto the default branch that bypasses the approval
  * path entirely, using our own merger as the vehicle, and it also lets a marker edit
  * misattribute the executor or point at a step with weaker gates.
@@ -356,7 +356,11 @@ export function checkD5SubjectBoundary(pr: DeliverablePr, extraReserved: readonl
  *  yet PERFORMED an operator-required merge is the merge event's business, not the
  *  gate's: blocking here would make a PR that is correctly waiting for a human look
  *  broken. */
-export function checkD3MergeAuthority(step: PlanStep | null, opts: { requiresOperatorMerge?: boolean } = {}): GateResult {
+// `opts` is the SAME input set the dashboard listing and the merger hand the shared
+// rule — the repository checkpoint and the checkpoint paths the patch touches
+// (T274). One type, so a new escalating input cannot reach one reader and not the
+// others.
+export function checkD3MergeAuthority(step: PlanStep | null, opts: MergeAuthorityInputs = {}): GateResult {
   if (!step) {
     return {
       id: 'D3',

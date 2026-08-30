@@ -45,7 +45,22 @@
  *  comparison here assumes. Anything that escapes the repo root is not normalized
  *  into safety — see `isRepoRelative`, which refuses it outright. */
 export function normalizePath(path: string): string {
-  return path.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '').replace(/\/+/g, '/');
+  return (
+    path
+      .trim()
+      .replace(/\\/g, '/')
+      .replace(/\/+/g, '/')
+      // EVERY `./` segment, not just one leading one (security review 2026-08-29):
+      // `././package.json` and `dashboard/./lib/x.ts` used to normalize to themselves,
+      // so `isReservedPath` said "not reserved" of the vendored toolchain while
+      // `subjectWorkflowPaths` — which normalizes twice — accepted a namespace path
+      // `checkpointPathsTouched` (once) did not. Two readers disagreeing about one
+      // string is the exact hole this module exists to close.
+      .replace(/^(?:\.\/)+/, '')
+      .replace(/\/(?:\.\/)+/g, '/')
+      .replace(/\/\.$/, '')
+      .replace(/^\/+/, '')
+  );
 }
 
 /**
@@ -67,7 +82,15 @@ export function isRepoRelative(path: string): boolean {
   if (raw.length === 0) return false;
   if (raw.startsWith('/')) return false;
   if (/^[a-zA-Z]:/.test(path.trim())) return false;
-  return !raw.split('/').includes('..');
+  // `.` segments are refused like `..` (security review 2026-08-29): git itself
+  // rejects `a/./b` and `././x` as invalid paths, and a spelling two readers could
+  // normalize differently is not repaired into agreement — it is refused, so every
+  // reader agrees by having nothing to read. The ONE `.` tolerated is a single leading
+  // `./`, the spelling `normalizePath` has always stripped and three suites pin as
+  // accepted. (`normalizePath` collapses the rest too, for the callers that normalize
+  // without asking this question first.)
+  const segments = raw.startsWith('./') ? raw.slice(2).split('/') : raw.split('/');
+  return !segments.some((seg) => seg === '..' || seg === '.');
 }
 
 /**

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentic-turtles/schemas/executor.schema.json",
   "title": "Agentic Turtles Executor Configuration",
-  "description": "WHICH agent builds (FR-059). Operator configuration, not a stored record. The system ships one conformant executor and requires none — anything runnable by GitHub Agentic Workflows that satisfies contracts/build-executor.md is legitimate, and the gates and the deterministic writer must not be able to tell the difference (SC-019). The shape exists so provenance is recordable (FR-065) and so one prohibition is enforceable at config load rather than trusted: the spawned tier's guardrailed runner (FR-066).",
+  "description": "WHICH agent builds (FR-059). Operator configuration, not a stored record. The system ships one conformant executor and requires none — anything runnable by GitHub Agentic Workflows that satisfies contracts/build-executor.md is legitimate, and the gates and the deterministic writer must not be able to tell the difference (SC-019). The shape exists so provenance is recordable (FR-065) and so one prohibition is enforceable at config load rather than trusted: the spawned tier's guardrailed runner (FR-066). Deleted 2026-08-29 (GHI #163, option 2): the per-executor `requires_operator_merge` field. Merge authority (FR-062) is derived from the step, the paths the deliverable touches, and the repository-wide BUILD_REQUIRES_OPERATOR_MERGE variable — never from executor config. additionalProperties is false, so an executor file still carrying the field is refused by D4 rather than silently ignored.",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "tier"],
@@ -15,10 +15,6 @@
     "engine": { "enum": ["copilot", "claude", "gemini", "codex"], "description": "gh-aw compile-time engine selection. Required for the in-sandbox tier — the constitution's standing multi-engine constraint is that this is selectable per workflow, so it must be stated." },
     "image": { "type": "string", "minLength": 1, "description": "Container image ref. Spawned tier only; gh-aw owns the image in-sandbox." },
     "model": { "type": "string", "minLength": 1, "description": "Must exist in gh-aw's pinned AI-credits catalog or the proxy rejects the run." },
-    "requires_operator_merge": {
-      "type": "boolean",
-      "description": "The FR-062 merge checkpoint, escalation-only by construction: true ADDS an operator checkpoint. No value removes one a gate demands — a step carrying an external authority's confirmation always waits for the operator, whatever this says."
-    },
     "guardrailed_runner": {
       "type": "object",
       "additionalProperties": false,

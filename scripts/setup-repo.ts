@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, repoFromEnv, type RepoRef } from '../dashboard/lib/github/client';
 import { ALL_LABELS } from '../dashboard/lib/github/labels';
-import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET, EVIDENCE_RULESET, REQUIRED_CHECK_CONTEXTS } from './gates/lib/readiness';
+import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET, EVIDENCE_RULESET, REQUIRED_CHECK_CONTEXTS, PRODUCT_ENVIRONMENTS, SUBJECT_DEPLOY_ENVIRONMENT } from './gates/lib/readiness';
 import { EVIDENCE_BRANCH, ensureEvidenceBranch } from '../dashboard/lib/github/evidence-store';
 import { runGates, printReport } from './gates/lib/runner';
 import { installOversightFiles } from './install';
@@ -30,7 +30,7 @@ interface RulesetShape {
 /**
  * Day-1 `init` (T017/T126, FR-028/FR-030): reconcile the repository to the
  * desired oversight state — idempotent, reports `already_initialized` when a
- * re-run changes nothing, never destructive. `--verify` runs readiness I1–I6.
+ * re-run changes nothing, never destructive. `--verify` runs readiness I1–I9.
  */
 
 export interface InitResult {
@@ -293,27 +293,153 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     throw error;
   }
 
-  // agent-build environment (PUT is idempotent, but only report a change when absent).
-  let hasEnv = true;
-  try {
-    await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}', {
-      ...repo,
-      environment_name: 'agent-build',
-    });
-  } catch (error: unknown) {
-    const status = errorStatus(error);
-    if (status === 404) hasEnv = false;
-    else if (status === 403) planLimited(error);
-    else throw error;
-  }
-  if (!hasEnv) {
-    await gh
-      .request('PUT /repos/{owner}/{repo}/environments/{environment_name}', {
+  // The two GitHub Environments the product needs (PUT is idempotent, but only report a
+  // change when something was absent):
+  //   agent-build     the build executor's environment (readiness I4)
+  //   subject-deploy  the operator's DEPLOY environment (readiness I9; T273, GHI #174).
+  //                   A subject workflow's OIDC job must name exactly this environment
+  //                   (D6.6) — its required reviewers are the per-deploy human approval,
+  //                   and its name is the OIDC subject the cloud role's trust policy pins
+  //                   to (`repo:<org>/<repo>:environment:subject-deploy`,
+  //                   CONFIGURATION_GUIDE.md §7).
+  //
+  // THE DEPLOY ENVIRONMENT IS NOT CREATED EMPTY (security review 2026-08-29). GitHub
+  // applies an environment's protections only where they are configured, and a fresh
+  // environment has none — so until the operator finished §7 by hand, a `pull_request`
+  // run of an agent's unmerged workflow could mint `environment:subject-deploy` OIDC
+  // from a `build/**` branch: the exact subject the trust policy is told to pin to,
+  // minted from output no human had read. The API CAN set the half that is a policy:
+  // `init` PUTs `deployment_branch_policy: custom` and adds the default branch as the
+  // one allowed deployment branch, so a deploy can only run from code that landed
+  // through the gates. Only the REVIEWERS genuinely need the UI, and readiness I9
+  // reports the environment unmet until they exist. A target initialized before
+  // 2026-08-29 gains the environment on re-run; one initialized between then and this
+  // fix gains the policy on re-run (reconciled, FR-030).
+  const { data: repository } = await gh.repos.get({ ...repo });
+  const defaultBranch = repository.default_branch;
+  for (const environment of PRODUCT_ENVIRONMENTS) {
+    type EnvironmentView = {
+      deployment_branch_policy?: { custom_branch_policies?: boolean } | null;
+      protection_rules?: {
+        type?: string;
+        wait_timer?: number;
+        prevent_self_review?: boolean;
+        reviewers?: { type?: string; reviewer?: { id?: number; login?: string; type?: string } }[];
+      }[];
+    } | null;
+    let existing: EnvironmentView = null;
+    let hasEnv = true;
+    try {
+      const { data } = await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}', {
         ...repo,
-        environment_name: 'agent-build',
-      })
-      .catch((error: unknown) => (errorStatus(error) === 403 ? missingAdminScope(error) : Promise.reject(error)));
-    changed.push('environment agent-build');
+        environment_name: environment,
+      });
+      existing = data as EnvironmentView;
+    } catch (error: unknown) {
+      const status = errorStatus(error);
+      if (status === 404) hasEnv = false;
+      else if (status === 403) planLimited(error);
+      else throw error;
+    }
+    const isDeploy = environment === SUBJECT_DEPLOY_ENVIRONMENT;
+    const needsPolicy = isDeploy && existing?.deployment_branch_policy?.custom_branch_policies !== true;
+    // WHAT A PUT REPLACES (2026-08-29, follow-up to the security review). GitHub's
+    // "create or update an environment" writes the WHOLE protection configuration: a
+    // rule the request omits is a rule the environment loses. So the re-run that adds
+    // the branch policy to an environment the operator had already given reviewers
+    // would silently strip those reviewers — the deploy leg's only human approval,
+    // removed by an idempotency pass that reported one harmless line. Every PUT below
+    // therefore re-sends what the GET returned (reviewers, wait timer, the self-review
+    // rule), and `init` adds exactly ONE thing of its own: when the deploy environment
+    // has NO reviewer, the person running init — the bootstrap PAT's owner — becomes
+    // the first one, so a fresh target is `ready` the moment init finishes instead of
+    // red on I9 until somebody visits the UI. An App installation token is not a
+    // person and cannot review a deployment (GET /user answers 403), so on that path
+    // nothing is added and readiness I9 keeps naming the UI step. Teammates are always
+    // added in the UI; init never removes a reviewer.
+    const rules = existing?.protection_rules ?? [];
+    const reviewerRule = rules.find((r) => r.type === 'required_reviewers');
+    const reviewers: { type: 'User' | 'Team'; id: number }[] = (reviewerRule?.reviewers ?? []).flatMap((r) => {
+      const id = r.reviewer?.id;
+      if (typeof id !== 'number') return [];
+      const type = (r.type ?? r.reviewer?.type) === 'Team' ? 'Team' : 'User';
+      return [{ type, id }];
+    });
+    const waitTimer = rules.find((r) => r.type === 'wait_timer')?.wait_timer;
+    const preventSelfReview = reviewerRule?.prevent_self_review;
+    let addedReviewer: string | null = null;
+    if (isDeploy && reviewers.length === 0) {
+      try {
+        const { data: me } = await gh.users.getAuthenticated();
+        if (me.type === 'User' && typeof me.id === 'number') {
+          reviewers.push({ type: 'User', id: me.id });
+          addedReviewer = me.login;
+        }
+      } catch (error: unknown) {
+        if (errorStatus(error) !== 403) throw error; // 403 = an installation token, not a person
+      }
+    }
+    if (!hasEnv || needsPolicy || addedReviewer !== null) {
+      await gh
+        .request('PUT /repos/{owner}/{repo}/environments/{environment_name}', {
+          ...repo,
+          environment_name: environment,
+          ...(isDeploy
+            ? {
+                deployment_branch_policy: { protected_branches: false, custom_branch_policies: true },
+                reviewers,
+                ...(waitTimer !== undefined ? { wait_timer: waitTimer } : {}),
+                ...(preventSelfReview !== undefined ? { prevent_self_review: preventSelfReview } : {}),
+              }
+            : {}),
+        })
+        .catch((error: unknown) => (errorStatus(error) === 403 ? missingAdminScope(error) : Promise.reject(error)));
+      if (!hasEnv) changed.push(`environment ${environment}`);
+      else if (needsPolicy) changed.push(`deployment branch policy on environment ${environment}`);
+      if (addedReviewer !== null) {
+        changed.push(
+          `environment ${environment}: @${addedReviewer} added as its first required reviewer (you — add teammates under Settings → Environments)`,
+        );
+      }
+    }
+    if (isDeploy) {
+      const { data: policies } = await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies', {
+        ...repo,
+        environment_name: environment,
+      });
+      const list = (policies as { branch_policies?: { id: number; name: string; type?: string }[] }).branch_policies ?? [];
+      const isDefault = (p: { name: string; type?: string }): boolean => p.name === defaultBranch && p.type !== 'tag';
+      if (!list.some(isDefault)) {
+        await gh
+          .request('POST /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies', {
+            ...repo,
+            environment_name: environment,
+            name: defaultBranch,
+            type: 'branch',
+          })
+          .catch((error: unknown) => (errorStatus(error) === 403 ? missingAdminScope(error) : Promise.reject(error)));
+        changed.push(`environment ${environment} deploys from ${defaultBranch} only`);
+      }
+      // "ONLY" MEANS ONLY (Codex P1 on PR #175, 2026-08-30). The first version made sure the
+      // default-branch policy EXISTED and reported the environment pinned — while a
+      // pre-existing policy such as `build/**` (the branch every deliverable is built on)
+      // stayed in force, so a deploy could run from unmerged output under a message
+      // that said otherwise. Reconciling a list means the list, not one entry: every
+      // policy that is not the default branch is removed, tag policies included. This is
+      // configuration, not a record — FR-042's never-delete is about the governance
+      // record, and an environment rule that widens the deploy surface is the opposite
+      // of one.
+      for (const extra of list.filter((p) => !isDefault(p))) {
+        await gh
+          .request('DELETE /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies/{branch_policy_id}', {
+            ...repo,
+            environment_name: environment,
+            branch_policy_id: extra.id,
+          })
+          .catch((error: unknown) => (errorStatus(error) === 403 ? missingAdminScope(error) : Promise.reject(error)));
+        changed.push(`environment ${environment}: removed deployment-branch policy \`${extra.name}\`${extra.type === 'tag' ? ' (tag)' : ''} — deploys from ${defaultBranch} only`);
+      }
+    }
   }
 
   // Install/update the governed-repo files (templates + gate toolchain) as one

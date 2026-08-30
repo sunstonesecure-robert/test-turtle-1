@@ -12,6 +12,13 @@
 #   D5  no path inside the RESERVED set — the installed oversight machinery and the
 #       governance record — read from the patch ALONE, never from the declared scope
 #       (FR-068)
+#   D6  a SUBJECT WORKFLOW — `.github/workflows/subject_<name>.yml`, the one part of
+#       `.github/` a deliverable may be — passes the content guards: triggers, permissions,
+#       secrets, pinned actions + actionlint/zizmor, environment (FR-069, GHI #174).
+#       Reports "no subject workflow in this patch" when none; never silently green.
+#   D3 also reads the patch since 2026-08-29: a subject workflow, or a path inside a glob
+#       the operator listed in the CHECKPOINT_PATHS repository variable, always waits for
+#       the operator's own merge (GHI #163 option 3).
 #
 # REGISTRATION IS HALF THE GATE. A deliverable-gate that runs without being REGISTERED
 # AS A REQUIRED CHECK reports its verdict and blocks nothing: D2 and D5 become
@@ -76,10 +83,43 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
-      - name: gate every open deliverable pull request (D1–D5) and record the verdict
+      # D6.5 — THE SCANNERS THE SUBJECT-WORKFLOW CONTENT GUARD RUNS (FR-069, GHI #174).
+      # A deliverable may be an operator deploy workflow (`.github/workflows/subject_*.yml`),
+      # and its content is read by D6: actionlint and zizmor are two of the six guards.
+      # Pinned exactly as .github/workflows/ci.yml pins them, for the reasons written there
+      # (zizmor publishes SLSA provenance, so `gh attestation verify` also checks WHO built
+      # it; bumping either means re-deriving the hash in the same commit).
+      # MISSING IS NOT PASSING (GHI #108): when either binary is absent from that directory
+      # the gate code hands D6 no scanner and D6.5 FAILS closed — so a download failure here
+      # fails the step rather than letting an unscanned workflow through.
+      # NOT `>> $GITHUB_PATH` (zizmor github-env, CI on PR #175): a run step that writes PATH
+      # for every later step is the code-execution class D6.5 refuses in a subject workflow;
+      # the directory is handed to the ONE step that reads it as `SUBJECT_SCANNERS_DIR`.
+      - name: install actionlint + zizmor (D6.5 scanners, pinned)
+        env:
+          ZIZMOR_VERSION: 1.29.0
+          ZIZMOR_SHA256: dd96df044a6e8538d5f423790f453bdd03d49e5b2bcc38214acc41a2f1297839
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # `gh attestation verify` authenticates its API read
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/scanners"
+          curl -sSfL --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP/scanners" actionlint
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/scanners/zizmor.tar.gz" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  $RUNNER_TEMP/scanners/zizmor.tar.gz" | sha256sum -c -
+          gh attestation verify "$RUNNER_TEMP/scanners/zizmor.tar.gz" --repo zizmorcore/zizmor
+          tar -xzf "$RUNNER_TEMP/scanners/zizmor.tar.gz" -C "$RUNNER_TEMP/scanners" zizmor
+      - name: gate every open deliverable pull request (D1–D6) and record the verdict
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBJECT_SCANNERS_DIR: ${{ runner.temp }}/scanners # D6.5 — where the install step put actionlint + zizmor
           BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+          # The operator's checkpoint paths (CONFIGURATION_GUIDE.md §3) — escalation-only,
+          # like the line above: a touched path inside one of these globs waits for the
+          # operator's merge. A subject workflow waits regardless of this value.
+          CHECKPOINT_PATHS: ${{ vars.CHECKPOINT_PATHS }}
         run: npx tsx scripts/gates/deliverable-gate.ts --sweep --repo "$GITHUB_REPOSITORY"
   deliverable-gate:
     # Only build/** PRs carry a deliverable to gate. Every other PR reports "skipped",
@@ -99,7 +139,7 @@ jobs:
       # `pull_request` event checks out the PR's MERGE COMMIT — candidate code — and
       # the step below then executes `scripts/gates/deliverable-gate.ts` out of it. A
       # `build/**` pull request could therefore ship a reserved-path change together
-      # with a neutered D1–D5 and have its own gate report the required check green.
+      # with a neutered D1–D6 and have its own gate report the required check green.
       # Worst on the operator-required path, where `build-merge` deliberately does
       # not merge and the human's decision is guided by exactly this check.
       #
@@ -116,9 +156,40 @@ jobs:
         with:
           node-version: 24
       - run: npm ci
-      - name: deliverable-gate (D1–D5)
+      # D6.5 — THE SCANNERS THE SUBJECT-WORKFLOW CONTENT GUARD RUNS (FR-069, GHI #174).
+      # A deliverable may be an operator deploy workflow (`.github/workflows/subject_*.yml`),
+      # and its content is read by D6: actionlint and zizmor are two of the six guards.
+      # Pinned exactly as .github/workflows/ci.yml pins them, for the reasons written there
+      # (zizmor publishes SLSA provenance, so `gh attestation verify` also checks WHO built
+      # it; bumping either means re-deriving the hash in the same commit).
+      # MISSING IS NOT PASSING (GHI #108): when either binary is absent from that directory
+      # the gate code hands D6 no scanner and D6.5 FAILS closed — so a download failure here
+      # fails the step rather than letting an unscanned workflow through.
+      # NOT `>> $GITHUB_PATH` (zizmor github-env, CI on PR #175): a run step that writes PATH
+      # for every later step is the code-execution class D6.5 refuses in a subject workflow;
+      # the directory is handed to the ONE step that reads it as `SUBJECT_SCANNERS_DIR`.
+      - name: install actionlint + zizmor (D6.5 scanners, pinned)
+        env:
+          ZIZMOR_VERSION: 1.29.0
+          ZIZMOR_SHA256: dd96df044a6e8538d5f423790f453bdd03d49e5b2bcc38214acc41a2f1297839
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # `gh attestation verify` authenticates its API read
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/scanners"
+          curl -sSfL --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+            | tar -xz -C "$RUNNER_TEMP/scanners" actionlint
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/scanners/zizmor.tar.gz" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  $RUNNER_TEMP/scanners/zizmor.tar.gz" | sha256sum -c -
+          gh attestation verify "$RUNNER_TEMP/scanners/zizmor.tar.gz" --repo zizmorcore/zizmor
+          tar -xzf "$RUNNER_TEMP/scanners/zizmor.tar.gz" -C "$RUNNER_TEMP/scanners" zizmor
+      - name: deliverable-gate (D1–D6)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBJECT_SCANNERS_DIR: ${{ runner.temp }}/scanners # D6.5 — where the install step put actionlint + zizmor
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
+          # See the sweep job: the operator's checkpoint paths, escalation-only.
+          CHECKPOINT_PATHS: ${{ vars.CHECKPOINT_PATHS }}
         run: npx tsx scripts/gates/deliverable-gate.ts --pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json

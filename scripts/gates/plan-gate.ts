@@ -135,7 +135,7 @@ export async function sweepNonPlanPrs(gh: Octokit, repo: RepoRef): Promise<{ prN
           'branch, so it carries no plan document and there is nothing for G1-G16 to read.\n\n' +
           'Recorded as `skipped` rather than `success` deliberately: this pull request was not gated, and a green ' +
           '`plan-gate` here would claim it was. Whatever governs this pull request is its own required check — for a ' +
-          '`build/**` deliverable that is `deliverable-gate` (D1–D5).',
+          '`build/**` deliverable that is `deliverable-gate` (D1–D6).',
       },
     });
     out.push({ prNumber: pr.number, wrote: true });

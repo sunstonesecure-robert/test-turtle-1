@@ -4,20 +4,28 @@ import { ALL_LABELS } from '../../../dashboard/lib/github/labels';
 import { EVIDENCE_BRANCH } from '../../../dashboard/lib/github/evidence-store';
 import type { GateResult } from './runner';
 import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
+import { AGENT_BUILD_ENVIRONMENT, SUBJECT_DEPLOY_ENVIRONMENT, PRODUCT_ENVIRONMENTS } from './environments';
 
 /**
  * Readiness checks (gate-checks-cli.md §4) — a pure function of live repo state,
  * never a stored flag. Shared by `init --verify` and the dashboard's
  * intake-refusal banner (FR-029), so UX preview and enforcement cannot drift.
  *
- * The set is I1–I8. **I7 was reserved and is now built** (2026-08-24, T222): the
+ * The set is I1–I9. **I7 was reserved and is now built** (2026-08-24, T222): the
  * deliverable-path check — the US18 workflows installed AND `deliverable-gate`
  * registered as a required status check. The evidence record store took I8 rather
  * than the then-free-looking I7 because a readiness id, once written into the
  * contract, is a stable identifier: reusing it would have made two different checks
  * answer to one name in the record. The out-of-order pair is the cost of having kept
- * that promise, and it is the cheaper cost.
+ * that promise, and it is the cheaper cost. **I9** (2026-08-29, T273, GHI #174) is the
+ * `subject-deploy` environment — the one a subject workflow's OIDC deploy job must
+ * name (D6.6), and the OIDC subject the operator's cloud role pins to.
  */
+
+/** The GitHub Environments `init` provisions and readiness asserts (I4, I9) — defined in
+ *  `environments.ts` so the pure D6 guard module can name `subject-deploy` too; re-exported
+ *  here for this module's existing importers. */
+export { AGENT_BUILD_ENVIRONMENT, SUBJECT_DEPLOY_ENVIRONMENT, PRODUCT_ENVIRONMENTS };
 
 /** Agentic workflows: gh-aw markdown compiled to pinned .lock.yml. */
 export const AGENTIC_WORKFLOWS = ['plan-propose', 'plan-revise', 'build-template'] as const;
@@ -59,7 +67,7 @@ export const DETERMINISTIC_WORKFLOWS = [
  * governed a build that could not produce anything and no surface said so.
  *
  * `build-publish`  the only writer of a deliverable branch and pull request
- * `deliverable-gate` the required check D1–D5, without which nothing judges a patch
+ * `deliverable-gate` the required check D1–D6, without which nothing judges a patch
  * `build-merge`    the actor that merges a pre-authorized deliverable and moves its
  *                  label — without it the default path stalls one step before
  *                  verification, forever
@@ -221,29 +229,26 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   const i3 = rulesetVerdict(MAIN_RULESET, `missing ruleset: ${MAIN_RULESET} (required plan-gate check)`);
   results.push({ id: 'I3', status: i3.status, requirement: 'FR-028', ...(i3.detail ? { detail: i3.detail } : {}) });
 
-  // I4 — agent-build environment exists (environments are also plan-gated on private repos)
-  let hasEnv = false;
-  let envDetail = 'agent-build environment missing';
-  try {
-    await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}', {
-      ...repo,
-      environment_name: 'agent-build',
-    });
-    hasEnv = true;
-  } catch (error: unknown) {
-    const status = errorStatus(error);
-    if (status === 403) {
-      envDetail = `environments unavailable on this plan — upgrade to GitHub Pro / a paid org plan or make the repository public`;
-    } else if (status !== 404) {
-      throw error;
+  // One environment's verdict (environments are plan-gated on private repos, like
+  // rulesets — a 403 is an unmet item naming the plan, never a crash). Shared by I4 and
+  // I9 so the two environments the product needs are judged by one rule.
+  const environmentVerdict = async (name: string, purpose: string): Promise<{ status: 'pass' | 'fail'; detail?: string }> => {
+    try {
+      await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}', { ...repo, environment_name: name });
+      return { status: 'pass' };
+    } catch (error: unknown) {
+      const status = errorStatus(error);
+      if (status === 403) {
+        return { status: 'fail', detail: 'environments unavailable on this plan — upgrade to GitHub Pro / a paid org plan or make the repository public' };
+      }
+      if (status !== 404) throw error;
+      return { status: 'fail', detail: `${name} environment missing (${purpose}) — re-run \`npm run init\`` };
     }
-  }
-  results.push({
-    id: 'I4',
-    status: hasEnv ? 'pass' : 'fail',
-    requirement: 'FR-028',
-    ...(hasEnv ? {} : { detail: envDetail }),
-  });
+  };
+
+  // I4 — agent-build environment exists
+  const i4 = await environmentVerdict(AGENT_BUILD_ENVIRONMENT, 'the build executor runs in it');
+  results.push({ id: 'I4', status: i4.status, requirement: 'FR-028', ...(i4.detail ? { detail: i4.detail } : {}) });
 
   // I5 — every oversight workflow present: compiled .lock.yml (agentic) / .yml (deterministic)
   const missingLocks: string[] = [];
@@ -404,6 +409,87 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     requirement: 'FR-021',
     ...(evidenceUnmet.length ? { detail: evidenceUnmet.join(' · ') } : {}),
   });
+
+  // I9 — the `subject-deploy` environment exists AND IS A GATE (T273, FR-069, GHI #174;
+  // tightened by the security review of 2026-08-29). A subject workflow's OIDC job must
+  // name exactly this environment (D6.6): its required reviewers are the per-deploy
+  // human approval, and its name is the OIDC subject the operator's cloud role pins its
+  // trust policy to. An environment that EXISTS with no reviewer and no branch policy
+  // approves nothing and pins nothing — GitHub mints the token for any job that names
+  // it — so "exists" was the absent-≠-success reading GHI #108 forbids. Three halves,
+  // reported apart because they need different actions:
+  //   missing              → re-run `npm run init` (every target initialized before 2026-08-29)
+  //   no branch policy     → re-run `npm run init` (it pins the default branch; targets from 2026-08-29)
+  //   no required reviewer → `init` adds the person running it as the first one when it holds
+  //                          a personal token; an App token cannot, and then only the UI can
+  //                          (CONFIGURATION_GUIDE.md §7 step 1)
+  // Until all three hold, a deploy leg with nowhere SAFE to deploy through is the I7
+  // shape again: everything up to the last step works and the last step must not.
+  const i9 = await (async (): Promise<{ status: 'pass' | 'fail'; detail?: string }> => {
+    type EnvironmentView = {
+      protection_rules?: { type?: string; reviewers?: unknown[] }[];
+      deployment_branch_policy?: { custom_branch_policies?: boolean } | null;
+    };
+    let env: EnvironmentView;
+    try {
+      const { data } = await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}', {
+        ...repo,
+        environment_name: SUBJECT_DEPLOY_ENVIRONMENT,
+      });
+      env = data as EnvironmentView;
+    } catch (error: unknown) {
+      const status = errorStatus(error);
+      if (status === 403) {
+        return { status: 'fail', detail: 'environments unavailable on this plan — upgrade to GitHub Pro / a paid org plan or make the repository public' };
+      }
+      if (status !== 404) throw error;
+      return {
+        status: 'fail',
+        detail: `${SUBJECT_DEPLOY_ENVIRONMENT} environment missing (the environment an agent-delivered deploy workflow deploys through, with the reviewers you set) — re-run \`npm run init\``,
+      };
+    }
+    const unmet: string[] = [];
+    const reviewers = (env.protection_rules ?? []).find((r) => r.type === 'required_reviewers');
+    if (!reviewers || !Array.isArray(reviewers.reviewers) || reviewers.reviewers.length === 0) {
+      unmet.push(
+        `${SUBJECT_DEPLOY_ENVIRONMENT} environment exists but has NO required reviewers — an environment with no reviewer approves nothing, so a deploy through it would need no human. ` +
+          `\`npm run init\` run with your own token adds you as the first reviewer; otherwise add them under Settings → Environments → ${SUBJECT_DEPLOY_ENVIRONMENT} → Required reviewers (CONFIGURATION_GUIDE.md §7)`,
+      );
+    }
+    if (env.deployment_branch_policy?.custom_branch_policies !== true) {
+      unmet.push(
+        `${SUBJECT_DEPLOY_ENVIRONMENT} environment has no deployment-branch policy, so a deploy could run from a build/** branch — re-run \`npm run init\` (it pins the environment to the default branch)`,
+      );
+    } else {
+      // THE MODE IS NOT THE POLICY (Codex P2 on PR #175, 2026-08-30). `custom_branch_policies:
+      // true` says the environment HAS a list; it says nothing about what is on it. A list
+      // without the default branch blocks the completion hook's own dispatch; a list with
+      // `build/**` on it lets a deploy run from unmerged output — and this item used to call
+      // both "pass". So the list is read, and I9 asks the two questions init answers: is
+      // the default branch on it, and is anything else.
+      const { data: repository } = await gh.repos.get({ ...repo });
+      const defaultBranch = repository.default_branch;
+      const { data: policies } = await gh.request('GET /repos/{owner}/{repo}/environments/{environment_name}/deployment-branch-policies', {
+        ...repo,
+        environment_name: SUBJECT_DEPLOY_ENVIRONMENT,
+      });
+      const list = (policies as { branch_policies?: { name: string; type?: string }[] }).branch_policies ?? [];
+      const isDefault = (p: { name: string; type?: string }): boolean => p.name === defaultBranch && p.type !== 'tag';
+      if (!list.some(isDefault)) {
+        unmet.push(
+          `${SUBJECT_DEPLOY_ENVIRONMENT} environment's deployment-branch policy does not allow \`${defaultBranch}\` — the completion hook dispatches from that branch and GitHub would refuse the deploy — re-run \`npm run init\` (it adds the policy)`,
+        );
+      }
+      const extras = list.filter((p) => !isDefault(p));
+      if (extras.length > 0) {
+        unmet.push(
+          `${SUBJECT_DEPLOY_ENVIRONMENT} environment also allows deployments from ${extras.map((p) => `\`${p.name}\`${p.type === 'tag' ? ' (tag)' : ''}`).join(', ')} — a deploy could run from an unmerged branch — re-run \`npm run init\` (it removes every policy but \`${defaultBranch}\`)`,
+        );
+      }
+    }
+    return unmet.length === 0 ? { status: 'pass' } : { status: 'fail', detail: unmet.join(' · ') };
+  })();
+  results.push({ id: 'I9', status: i9.status, requirement: 'FR-069', ...(i9.detail ? { detail: i9.detail } : {}) });
 
   return results;
 }

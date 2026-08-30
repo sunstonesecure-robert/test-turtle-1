@@ -5,7 +5,7 @@
 This holds conformant executor *configurations*. The project ships one and requires
 none: any executor runnable by GitHub Agentic Workflows that satisfies the contract is
 a legitimate choice, and the deterministic writer (`build-publish`) and the gates
-(`deliverable-gate` D1–D5) must not be able to tell which one produced a patch
+(`deliverable-gate` D1–D6) must not be able to tell which one produced a patch
 (FR-059, SC-019).
 
 `tracer-hello.yml` is an **example**. It is not a requirement, not a default anyone
@@ -47,3 +47,23 @@ The operator's own software — yes. The oversight machinery and the governance 
 by `build-publish` before a branch exists and again by `deliverable-gate` **D5**
 (FR-068). A change to the machinery is a pull request against the **product**
 repository, released and re-installed by `npm run init`.
+
+**The one path under `.github/` an executor MAY deliver** *(2026-08-29, GHI #174)*:
+the operator's own deploy workflow, at `.github/workflows/subject_<name>.yml` and
+nowhere else. It is the operator's software in the same sense their CDK is — and
+GitHub runs workflows from nowhere else, so the namespace is a product convention,
+not a widening of the boundary. What such a file may contain is judged by
+`deliverable-gate` **D6** (triggers, permissions, secrets, pinned actions, a
+protected environment for any cloud token) and by `build-publish` before a branch
+exists, and it always waits for the operator's own merge. The reference example
+lives in `examples/subject-workflows/` — EXAMPLE ONLY, like this directory's.
+
+## What an executor config does NOT decide
+
+Whether a deliverable waits for the operator's merge. That is decided by the
+repository (`BUILD_REQUIRES_OPERATOR_MERGE`), by what the change touches
+(`CHECKPOINT_PATHS`, a subject workflow) and by the step (a high-stakes
+confirmation) — never by the executor's own file. A per-executor merge field
+used to be accepted here and read by nothing; it was removed on 2026-08-29
+(GHI #163), and a config still carrying it is refused at **D4** with the line
+named.

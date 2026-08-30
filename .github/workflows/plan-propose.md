@@ -97,6 +97,14 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    against them is real — a live run did exactly that, proposing a change to the installed
    dashboard, and every gate agreed (GHI #141).
 
+   One exception, and only one: the operator's OWN deploy workflow may be delivered as
+   `.github/workflows/subject_<name>.yml` (lowercase letters, digits and hyphens in the name).
+   Scope such a step EXACTLY `.github/workflows/subject_*.yml` or that one file — any wider
+   `.github/` glob is refused. Its content must hold read-only repository permissions, deploy
+   through the protected `subject-deploy` environment via OIDC on a GitHub-hosted runner, pin
+   every action to a commit, read no secrets and react to no oversight event; and it always
+   waits for the operator's own merge.
+
    So: no step may declare a `scope` reaching into those paths. Plan gate **G16** refuses such a
    plan at approval, and deliverable gate **D5** refuses such a patch at delivery regardless of
    what any scope says. If the workload issue itself asks for a change to the machinery, pose it
