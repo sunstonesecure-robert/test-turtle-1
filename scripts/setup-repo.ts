@@ -1,7 +1,20 @@
 import type { Octokit } from '@octokit/rest';
 import { createClient, repoFromEnv, type RepoRef } from '../dashboard/lib/github/client';
 import { ALL_LABELS } from '../dashboard/lib/github/labels';
-import { checkReadiness, unmetItems, PLAN_RULESET, CURRENT_RULESET, MAIN_RULESET, EVIDENCE_RULESET, REQUIRED_CHECK_CONTEXTS, PRODUCT_ENVIRONMENTS, SUBJECT_DEPLOY_ENVIRONMENT } from './gates/lib/readiness';
+import {
+  checkReadiness,
+  unmetItems,
+  PLAN_RULESET,
+  CURRENT_RULESET,
+  MAIN_RULESET,
+  EVIDENCE_RULESET,
+  REQUIRED_CHECK_CONTEXTS,
+  PRODUCT_ENVIRONMENTS,
+  SUBJECT_DEPLOY_ENVIRONMENT,
+  ACTIONS_CAN_OPEN_PRS_RECORD,
+  formatCanOpenPrsRecord,
+  parseCanOpenPrsRecord,
+} from './gates/lib/readiness';
 import { EVIDENCE_BRANCH, ensureEvidenceBranch } from '../dashboard/lib/github/evidence-store';
 import { runGates, printReport } from './gates/lib/runner';
 import { installOversightFiles } from './install';
@@ -291,6 +304,50 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
   } catch (error: unknown) {
     if (errorStatus(error) === 403) missingAdminScope(error);
     throw error;
+  }
+
+  // RECORD WHAT WAS JUST VERIFIED, for the readers that cannot look (T278, operator
+  // finding 2026-08-30). Reaching this line means the setting is ON: the block above
+  // either found it true or PUT it true, and every failure there throws. `init` is the
+  // only run that can see this setting at all — it holds the admin-scoped bootstrap
+  // token — so it is the only place the answer can be captured for `/workloads` and for
+  // `npm run init -- --verify` on the ordinary credential, both of which get a 403 from
+  // the endpoint itself. Readiness I7 reads the record ONLY when the live read fails,
+  // and reports it as a record with its date, never as a live check.
+  //
+  // THE TIMESTAMP IS REFRESHED ON EVERY RUN, and that is deliberate: "last verified"
+  // means the last time init actually looked, not the first. It is NOT reported in
+  // `changed`, because `alreadyInitialized` describes the governed repo's desired
+  // STATE and a verification date is not part of it — a re-run that changes nothing
+  // still reports `already_initialized`, which is the contract T178 pinned.
+  try {
+    let recorded: { value: boolean; at: string | null } | null = null;
+    try {
+      const { data } = await gh.actions.getRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD });
+      recorded = parseCanOpenPrsRecord(data.value);
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 404) throw error; // 404 = never recorded, the first-run case
+    }
+    const value = formatCanOpenPrsRecord(true, new Date().toISOString());
+    if (recorded === null) await gh.actions.createRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD, value });
+    else await gh.actions.updateRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD, value });
+    if (recorded?.value !== true) {
+      changed.push(`recorded that Actions may create pull requests (${ACTIONS_CAN_OPEN_PRS_RECORD}) — readiness reads it when a credential cannot see the setting`);
+    }
+  } catch (error: unknown) {
+    // WAIVED, NOT FATAL, and not silent. Repository variables are a SEPARATE
+    // fine-grained permission from Administration, so a bootstrap token scoped exactly
+    // as DEPLOY.md §2 described before today can set the permission and still not be
+    // able to record it. Failing init over the record would be worse than the gap it
+    // closes — everything else init does is unaffected — so it is reported as a waived
+    // target with the remedy, and readiness says the item is unverifiable until it is
+    // done. Anything that is not an authorization answer still throws.
+    if (errorStatus(error) !== 403) throw error;
+    skipped.push(
+      `could not record the Actions-can-open-pull-requests verification (${ACTIONS_CAN_OPEN_PRS_RECORD}): the bootstrap ` +
+        'token lacks **Variables: rw**. Grant it and re-run — until then readiness I7 reports that half as unverifiable ' +
+        'for every credential that cannot read the setting directly',
+    );
   }
 
   // The two GitHub Environments the product needs (PUT is idempotent, but only report a

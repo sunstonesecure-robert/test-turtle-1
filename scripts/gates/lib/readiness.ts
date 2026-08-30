@@ -147,6 +147,99 @@ export const VERIFIED_WORKFLOW_FILES: readonly string[] = [
   ...DELIVERABLE_WORKFLOWS.map((w) => `${w}.yml`),
 ];
 
+/**
+ * The repository variable `init` writes to record what it VERIFIED about the
+ * "Allow GitHub Actions to create and approve pull requests" setting (T278, operator
+ * finding 2026-08-30; the precondition GHI #149 calls the deliverable path's hard
+ * blocker).
+ *
+ * NOT AN OPERATOR KNOB — a record. Every other variable in `CONFIGURATION_GUIDE.md` §3
+ * is something the operator sets and the product reads; this one the product writes and
+ * the product reads. It exists because the setting itself lives behind an endpoint that
+ * needs **Administration**, which the day-to-day credential deliberately does not carry
+ * (FR-042 at the credential layer) — so the two surfaces that ask about it (`/workloads`
+ * on every render, and `npm run init -- --verify` run with the ordinary credential as
+ * DEPLOY.md documents) can never read it directly. Editing it by hand tells readiness a
+ * lie; re-run `init`, which is the only thing that writes it.
+ *
+ * Value: `<true|false> <ISO-8601>` — the answer, and when `init` took it.
+ */
+export const ACTIONS_CAN_OPEN_PRS_RECORD = 'OVERSIGHT_ACTIONS_CAN_OPEN_PRS';
+
+export function formatCanOpenPrsRecord(value: boolean, at: string): string {
+  return `${value} ${at}`;
+}
+
+/** Parse the record. `null` for anything this did not write — an unparsable value is
+ *  never read as `false` (that would turn a typo into a blocker) nor as `true` (that
+ *  would turn one into a green light); the caller reports it as unverifiable. */
+export function parseCanOpenPrsRecord(raw: string): { value: boolean; at: string | null } | null {
+  const [head, ...rest] = raw.trim().split(/\s+/);
+  if (head !== 'true' && head !== 'false') return null;
+  const at = rest.join(' ').trim();
+  return { value: head === 'true', at: at.length > 0 ? at : null };
+}
+
+/** What I7 could establish about the setting, and HOW — the source is part of the
+ *  answer, because a recorded fact and a live read are not the same claim. */
+export type CanOpenPrs =
+  | { source: 'live'; value: boolean }
+  | { source: 'recorded'; value: boolean; at: string | null }
+  | { source: 'unverifiable'; why: string };
+
+/**
+ * The live endpoint first, the record second, and an honest refusal third.
+ *
+ * The live read WINS whenever it works (during `init`, or a verify run with an
+ * admin-scoped token): a snapshot must never override an answer we can see now.
+ */
+export async function resolveCanOpenPrs(gh: Octokit, repo: RepoRef): Promise<CanOpenPrs> {
+  try {
+    const { data } = await gh.request('GET /repos/{owner}/{repo}/actions/permissions/workflow', { ...repo });
+    return { source: 'live', value: (data as { can_approve_pull_request_reviews?: boolean }).can_approve_pull_request_reviews ?? false };
+  } catch (error: unknown) {
+    const status = errorStatus(error);
+    // 403 = this credential is not an admin (the ordinary case). 404 = the endpoint is
+    // not there. Anything else is an operational failure and is not swallowed.
+    if (status !== 403 && status !== 404) throw error;
+  }
+  const cannotSee =
+    'this credential cannot read the repository\'s Actions permissions (that endpoint needs Administration, which the ' +
+    'day-to-day token deliberately lacks)';
+  try {
+    const { data } = await gh.actions.getRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD });
+    const parsed = parseCanOpenPrsRecord(data.value);
+    if (!parsed) {
+      return {
+        source: 'unverifiable',
+        why:
+          `${cannotSee}, and the \`${ACTIONS_CAN_OPEN_PRS_RECORD}\` record does not parse ("${data.value}") — ` +
+          '`npm run init` is the only thing that writes it; re-run it rather than editing the variable by hand',
+      };
+    }
+    return { source: 'recorded', value: parsed.value, at: parsed.at };
+  } catch (error: unknown) {
+    const status = errorStatus(error);
+    if (status === 404) {
+      return {
+        source: 'unverifiable',
+        why:
+          `${cannotSee}, and \`init\` has recorded no answer — re-run \`npm run init\` with the admin-scoped bootstrap ` +
+          'token: it sets the permission and records what it verified, so this item can be answered afterwards',
+      };
+    }
+    if (status === 403) {
+      return {
+        source: 'unverifiable',
+        why:
+          `${cannotSee}, and the \`${ACTIONS_CAN_OPEN_PRS_RECORD}\` record it writes is unreadable too — grant the ` +
+          'fine-grained **Variables: read** permission this token is documented to carry (CONFIGURATION_GUIDE.md §1)',
+      };
+    }
+    throw error;
+  }
+}
+
 export const PLAN_RULESET = 'oversight: protect plan branches';
 /** LEGACY (pre-2026-07-11, GHI #44): the CURRENT pointer file is gone — the
  *  official version is derived from frozen tags. The name survives only so
@@ -368,24 +461,35 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   const mainEnforcement = rulesetVerdict(MAIN_RULESET, `missing ruleset: ${MAIN_RULESET}`);
   // Can Actions open a pull request at all? Without this, build-publish writes the
   // branch and then 403s at POST /pulls — loud on the run, invisible everywhere else.
-  let canOpenPrs: boolean | null = null;
-  try {
-    const { data } = await gh.request('GET /repos/{owner}/{repo}/actions/permissions/workflow', { ...repo });
-    canOpenPrs = (data as { can_approve_pull_request_reviews?: boolean }).can_approve_pull_request_reviews ?? false;
-  } catch (error: unknown) {
-    if (errorStatus(error) === 403 || errorStatus(error) === 404) canOpenPrs = null;
-    else throw error;
-  }
+  //
+  // AND THE READER USUALLY CANNOT SEE IT (operator finding, 2026-08-30, first render of
+  // /workloads after a re-init). The endpoint needs Administration. This used to set
+  // `canOpenPrs = null` on the 403 and add NO unmet item — so the half of I7 that exists
+  // to catch GHI #149's hard blocker reported nothing whenever it could not look, which
+  // is exactly the absent-≠-success reading GHI #108 forbids, and the sibling unreadable
+  // input in this very function (`registered === null`) IS reported. Proven with a probe
+  // before it was fixed: setting OFF → I7 failed with the remedy; setting UNREADABLE →
+  // I7 passed with no detail at all.
+  //
+  // `resolveCanOpenPrs` asks the live endpoint, falls back to what `init` recorded, and
+  // refuses to guess when neither can be read. A recorded answer is never dressed as a
+  // live one: it carries its date and the fact that nothing has re-checked it since — an
+  // admin can flip the switch in the UI at any moment, which is the known cost of a
+  // record over a check, stated rather than hidden.
+  const canOpenPrs = await resolveCanOpenPrs(gh, repo);
+  const recordedOn = canOpenPrs.source === 'recorded' && canOpenPrs.at ? ` on ${canOpenPrs.at}` : '';
   const deliverableUnmet = [
     ...(missingDeliverable.length ? [`missing deliverable-path workflows: ${missingDeliverable.join(', ')}`] : []),
-    ...(canOpenPrs === false
+    ...(canOpenPrs.source !== 'unverifiable' && canOpenPrs.value === false
       ? [
           'GitHub Actions is NOT permitted to create pull requests on this repository — build-publish will write the ' +
             'deliverable branch and then fail at POST /pulls, so no deliverable can ever be reviewed or merged. Enable ' +
             'Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull ' +
-            'requests", or re-run `npm run init` with an admin-scoped token',
+            'requests", or re-run `npm run init` with an admin-scoped token' +
+            (canOpenPrs.source === 'recorded' ? ` (recorded by \`npm run init\`${recordedOn})` : ''),
         ]
       : []),
+    ...(canOpenPrs.source === 'unverifiable' ? [canOpenPrs.why] : []),
     ...(mainEnforcement.status === 'fail' && mainEnforcement.detail && !planLimitDetail ? [mainEnforcement.detail] : []),
     ...(planLimitDetail || registered === null
       ? [planLimitDetail ?? 'rulesets unreadable on this plan — the required-check registration cannot be verified']
@@ -396,11 +500,21 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
           ]
         : []),
   ];
+  // A PASS CAN CARRY A CAVEAT. When the answer came from the record rather than the
+  // endpoint, the item is met — and saying so without saying HOW would be the same
+  // silence one layer up. Notes ride the detail on a pass as well as a failure.
+  const deliverableNotes =
+    canOpenPrs.source === 'recorded' && canOpenPrs.value === true
+      ? [
+          `Actions may create pull requests — recorded by \`npm run init\`${recordedOn}, not re-read just now (this ` +
+            'credential cannot see the setting). An admin who turns it off in the GitHub UI will not show up here until the next `init`',
+        ]
+      : [];
   results.push({
     id: 'I7',
     status: deliverableUnmet.length === 0 ? 'pass' : 'fail',
     requirement: 'FR-028',
-    ...(deliverableUnmet.length ? { detail: deliverableUnmet.join(' · ') } : {}),
+    ...(deliverableUnmet.length || deliverableNotes.length ? { detail: [...deliverableUnmet, ...deliverableNotes].join(' · ') } : {}),
   });
 
   results.push({

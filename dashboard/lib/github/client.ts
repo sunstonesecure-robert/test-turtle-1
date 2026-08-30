@@ -59,6 +59,17 @@ export function createClient(opts: ClientOptions = {}): Octokit {
     // of that says only "403 with id BD64:…", which sends the operator to the
     // network tab to work out which setting it was about. Scoped to that one path:
     // a 403 anywhere else is still an unhandled authorization failure and still logs.
+    //
+    // A SECOND, for the same reason (operator finding, 2026-08-30, first render after a
+    // re-init): a 403 on `actions/permissions/workflow`. Readiness **I7** reads that
+    // endpoint to ask whether Actions may open pull requests at all — and it needs
+    // Administration scope, which the day-to-day dashboard token deliberately does NOT
+    // carry (FR-042 at the credential layer). `/workloads` calls `checkReadiness` on
+    // every render, so a correctly-configured target throws this 403 every time and the
+    // overlay fired on a page that had rendered perfectly. `checkReadiness` already
+    // catches it. What it does with it — treat "could not read" as "fine" — is a
+    // separate defect and is NOT fixed by silencing the line; see the readiness note at
+    // that call site.
     log: {
       debug: () => {},
       info: () => {},
@@ -67,6 +78,7 @@ export function createClient(opts: ClientOptions = {}): Octokit {
         if (typeof args[0] !== 'string') return void console.error(...args);
         if (/ - (?:304|404) with id /.test(args[0])) return;
         if (/\/actions\/variables\/[^ ]* - 403 with id /.test(args[0])) return;
+        if (/\/actions\/permissions\/workflow - 403 with id /.test(args[0])) return;
         console.error(...args);
       },
     },
