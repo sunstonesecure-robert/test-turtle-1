@@ -322,15 +322,22 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
   // still reports `already_initialized`, which is the contract T178 pinned.
   try {
     let recorded: { value: boolean; at: string | null } | null = null;
+    // EXISTS and PARSES are different questions (Codex P2 on PR #176). Collapsing them
+    // meant a variable holding a value this did not write — a hand-edit, or a future
+    // format — took the create branch, GitHub answered 409, and `init` ABORTED. Which
+    // made readiness's own prescribed remedy for a malformed record ("re-run init")
+    // the one thing that could not work.
+    let exists = false;
     try {
       const { data } = await gh.actions.getRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD });
+      exists = true;
       recorded = parseCanOpenPrsRecord(data.value);
     } catch (error: unknown) {
       if (errorStatus(error) !== 404) throw error; // 404 = never recorded, the first-run case
     }
     const value = formatCanOpenPrsRecord(true, new Date().toISOString());
-    if (recorded === null) await gh.actions.createRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD, value });
-    else await gh.actions.updateRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD, value });
+    if (exists) await gh.actions.updateRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD, value });
+    else await gh.actions.createRepoVariable({ ...repo, name: ACTIONS_CAN_OPEN_PRS_RECORD, value });
     if (recorded?.value !== true) {
       changed.push(`recorded that Actions may create pull requests (${ACTIONS_CAN_OPEN_PRS_RECORD}) — readiness reads it when a credential cannot see the setting`);
     }
@@ -342,11 +349,23 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     // closes — everything else init does is unaffected — so it is reported as a waived
     // target with the remedy, and readiness says the item is unverifiable until it is
     // done. Anything that is not an authorization answer still throws.
-    if (errorStatus(error) !== 403) throw error;
+    // A 404 from the WRITE path is a different answer from the 404 the read treats as
+    // "never recorded": the endpoint itself is not there (Codex P2 on PR #176 — a GHES
+    // target reached through `GITHUB_API_URL` whose variables API is unsupported, and
+    // any case where the repository moved mid-run). Waived for the same reason as the
+    // 403: an optional record must not be able to fail the whole of `init`, whose other
+    // targets are unaffected. Everything else still throws.
+    const status = errorStatus(error);
+    if (status !== 403 && status !== 404) throw error;
     skipped.push(
-      `could not record the Actions-can-open-pull-requests verification (${ACTIONS_CAN_OPEN_PRS_RECORD}): the bootstrap ` +
-        'token lacks **Variables: rw**. Grant it and re-run — until then readiness I7 reports that half as unverifiable ' +
-        'for every credential that cannot read the setting directly',
+      status === 403
+        ? `could not record the Actions-can-open-pull-requests verification (${ACTIONS_CAN_OPEN_PRS_RECORD}): the bootstrap ` +
+            'token lacks **Variables: rw**. Grant it and re-run — until then readiness I7 reports that half as unverifiable ' +
+            'for every credential that cannot read the setting directly'
+        : `could not record the Actions-can-open-pull-requests verification (${ACTIONS_CAN_OPEN_PRS_RECORD}): the repository ` +
+            'variables API answered 404 — it is unavailable at this API base (a GHES target reached through `GITHUB_API_URL` ' +
+            'may not support it). Everything else initialized; readiness I7 reports that half as unverifiable for every ' +
+            'credential that cannot read the setting directly',
     );
   }
 

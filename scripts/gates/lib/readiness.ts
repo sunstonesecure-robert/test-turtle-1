@@ -611,3 +611,21 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
 export function unmetItems(results: GateResult[]): string[] {
   return results.filter((r) => r.status === 'fail').map((r) => `${r.id}: ${r.detail ?? 'unmet'}`);
 }
+
+/**
+ * What a MET item still had to say — the caveats a pass carries (Codex P2 on PR #176).
+ *
+ * `unmetItems` answers "what is broken", and the surfaces that consume it show nothing
+ * at all when everything passes. So a detail on a passing item — I7's "this came from a
+ * record, not a live read" — reached no operator: the caveat existed in the report and
+ * was invisible on the page the operator actually looks at, which is the shape of
+ * silence this whole task was about.
+ *
+ * NO GATE ID IN THE STRING, unlike `unmetItems`: these are rendered as operator copy,
+ * where an identifier is noise (the house rule established in `21789ff`). Every other
+ * readiness item sets a detail only when something is wrong, so in practice this is the
+ * conditional-pass channel and nothing else — pinned by a test rather than assumed.
+ */
+export function readinessNotes(results: GateResult[]): string[] {
+  return results.filter((r) => r.status === 'pass' && r.detail).map((r) => r.detail!);
+}
