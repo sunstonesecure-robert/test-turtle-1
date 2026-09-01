@@ -1,6 +1,6 @@
 import { createClient } from '../../dashboard/lib/github/client';
 import { getApprovalRecord } from '../../dashboard/lib/github/approval';
-import { freezeApprovedPlan, readPlanAtRef } from '../../dashboard/lib/github/plans';
+import { freezeApprovedPlan, parsePlanRef, readPlanAtRef } from '../../dashboard/lib/github/plans';
 import { errorMessage } from '../../dashboard/lib/github/errors';
 
 /**
@@ -32,7 +32,15 @@ async function main(): Promise<void> {
 
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: Number(prArg) });
   const head = pr.head.ref;
-  const m = /^plan\/([a-z0-9-]+)\/v(\d+)$/.exec(head);
+  // ONE parser for the ref grammar (T279). This used to carry its own, looser
+  // `[a-z0-9-]+` capture — the very duplication `slugFromPlanRef`'s docblock records as
+  // removed — which read `plan/-demo/v1` as the slug `-demo`. It would then have cut a
+  // frozen tag naming a slug the namespace readers answer null for, so D5 would reserve
+  // all of `.github/**` for that workload and D1 would refuse the deliverable outright.
+  // Fail-closed, but two parsers for one grammar is how a gate and a view come to
+  // disagree about which workload a run belongs to — and the namespace decision now
+  // rests on this grammar.
+  const m = parsePlanRef(head);
   if (!m || !pr.merged_at) {
     console.log(`not an approval merge (head=${head}, merged=${Boolean(pr.merged_at)}) — nothing to do`);
     return;
@@ -42,8 +50,8 @@ async function main(): Promise<void> {
   const plan = await readPlanAtRef(gh, repo, head);
 
   const { tagRef } = await freezeApprovedPlan(gh, repo, {
-    slug: m[1]!,
-    version: Number(m[2]),
+    slug: m.slug,
+    version: m.version,
     mergeSha: record.mergeSha,
     andonIssue: plan.andon_issue,
     approver: record.approver,

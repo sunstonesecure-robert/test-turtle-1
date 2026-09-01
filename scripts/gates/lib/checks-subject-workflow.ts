@@ -1,5 +1,5 @@
 import { isAlias, isMap, isNode, isPair, isScalar, parseDocument, visit, type Scalar } from 'yaml';
-import { isSubjectWorkflowPath } from '../../install-manifest';
+import { isSubjectWorkflowPath, subjectWorkflowName } from '../../install-manifest';
 import { SUBJECT_DEPLOY_ENVIRONMENT } from './environments';
 import { isRepoRelative, normalizePath } from './globs';
 import { scopeReachesReserved } from './reserved-paths';
@@ -16,9 +16,22 @@ import type { GateResult } from './runner';
  * FR-068 reserved the directory wholesale, which kept the machinery safe and made the
  * deploy leg of the north star unreachable: an agent could never deliver the workflow
  * that deploys what it built (GHI #174). The namespace
- * `.github/workflows/subject_<name>.yml` (`SUBJECT_WORKFLOW_RE`, install-manifest)
- * is the carve-out, and THIS module is what makes the carve-out safe. D5 says WHERE an
- * agent may write; D6 says WHAT a file written there may do at runtime.
+ * `.github/workflows/<workload-slug>_<name>.yml` (`subjectWorkflowRe`, install-manifest;
+ * slug-scoped by operator decision 2026-09-01, T279) is the carve-out, and THIS module
+ * is what makes the carve-out safe. D5 says WHERE an agent may write; D6 says WHAT a
+ * file written there may do at runtime.
+ *
+ * WHICH WORKLOAD'S NAMESPACE — AND WHY THE SLUG IS REQUIRED HERE, NOT OPTIONAL. There
+ * is one namespace per workload now, so "is this file in the namespace?" is not a
+ * question this module can answer alone; `ctx.slug` and the `subjectWorkflowPaths`
+ * argument say whose. Neither has a default, deliberately, because NEITHER DEFAULT IS
+ * SAFE: an omitted slug read as "empty namespace" would make `subjectWorkflowPaths`
+ * return nothing and D6 report `not-applicable` — a workflow file delivered and never
+ * read, the absent-≠-success shape (GHI #108) on the one file class this gate exists
+ * for — while reading it as "any namespace" would have D6 judge files this workload has
+ * no authority over. So the compiler asks every caller, and `null` is an explicit answer
+ * ("no workload"), not a forgotten one. Both callers always have it: the plan ref
+ * (`deliverable-gate`, from D1's marker; `build-publish`, from the patch's plan ref).
  *
  * THE PROPERTY THE GUARDS COMPOSE TO. With D6.3 holding, a subject workflow's only
  * write surface at runtime is the cloud, reached through OIDC into THE environment a
@@ -81,6 +94,15 @@ export interface ScanFinding {
 export interface SubjectGuardContext {
   /** the repository's default branch — the only branch a subject trigger may name */
   defaultBranch: string;
+  /**
+   * WHICH WORKLOAD delivered these files — its slug, which is the prefix of the one
+   * namespace it may write into (`.github/workflows/<slug>_<name>.yml`, T279). Taken
+   * from the plan ref (`slugFromPlanRef`), which is authoritative. REQUIRED, and `null`
+   * is an explicit "no workload" rather than an omission: with `null` every file fails
+   * D6.1, because an unknown workload has an empty namespace. It reaches the D6.1
+   * refusal too, so the name the refusal offers is one THIS workload can actually use.
+   */
+  slug: string | null;
   /** the operator's own additional reserved areas (`withExtraReserved`, FR-068(d)) */
   extraReserved?: readonly string[];
   /** injected scanner runner over the files; `null`/absent = scanners unavailable,
@@ -175,14 +197,19 @@ const isStr = (v: unknown): v is string => typeof v === 'string';
 const show = (v: unknown): string => JSON.stringify(v) ?? String(v);
 
 /**
- * Which of these paths are subject workflows — the ones D6 reads.
+ * Which of these paths are subject workflows OF THIS WORKLOAD — the ones D6 reads.
  *
  * Deliberately NOT "which are under `.github/workflows/`": a `.github/**` path outside
  * the namespace is reserved and is D5's refusal, phrased by D5 with the namespace
  * route. This function never returns it, so D6 and D5 cannot disagree about a file.
+ *
+ * `slug` is REQUIRED (see the module docblock, T279): it is the same slug D5 was given,
+ * so the two gates read one namespace and a file cannot be permitted by D5 and then
+ * left unjudged by D6. `null` ⇒ the empty namespace ⇒ no file is a subject workflow,
+ * which is consistent with D5, where `null` reserves the whole directory.
  */
-export function subjectWorkflowPaths(paths: readonly string[]): string[] {
-  return paths.filter((p) => isRepoRelative(p) && isSubjectWorkflowPath(normalizePath(p)));
+export function subjectWorkflowPaths(paths: readonly string[], slug: string | null): string[] {
+  return paths.filter((p) => isRepoRelative(p) && isSubjectWorkflowPath(normalizePath(p), slug));
 }
 
 /**
@@ -217,12 +244,16 @@ export async function checkD6SubjectWorkflowContent(
     // D6.1 — the namespace. A file handed to D6 that is not a subject workflow is a
     // caller error as much as a content error, and it is refused rather than judged:
     // judging it would imply the guards make a reserved path acceptable.
-    if (!isRepoRelative(file.path) || !isSubjectWorkflowPath(path)) {
+    if (!isRepoRelative(file.path) || !isSubjectWorkflowPath(path, ctx.slug)) {
       violations.push({
         guard: 'D6.1',
         path: file.path,
-        what: 'is not inside the subject-workflow namespace',
-        why: 'an operator deploy workflow must be named `.github/workflows/subject_<name>.yml` (lowercase, digits and hyphens) — every other `.github/**` path is reserved (FR-068)',
+        // The refusal names THIS WORKLOAD'S prefix, never a generic one and never
+        // another workload's (GHI #127, T279): a route the reader would be refused for
+        // following is what teaches people to disable the check. With no slug it renders
+        // the `<workload-slug>` placeholder, which reads as one.
+        what: 'is not inside this workload’s subject-workflow namespace',
+        why: `an operator deploy workflow must be named \`.github/workflows/${subjectWorkflowName(ctx.slug, '<name>')}\` — this workload's own slug, then \`_\`, then lowercase letters, digits and hyphens — every other \`.github/**\` path is reserved, including another workload's prefix (FR-068)`,
       });
       continue;
     }
@@ -550,7 +581,7 @@ function guardTriggers(on: unknown, ctx: SubjectGuardContext, v: (g: GuardId, wh
           );
           continue;
         }
-        const reaches = scopeReachesReserved([entry], ctx.extraReserved ?? []);
+        const reaches = scopeReachesReserved([entry], { extra: ctx.extraReserved ?? [], slug: ctx.slug });
         if (reaches.length > 0) {
           v(
             'D6.2',

@@ -49,14 +49,18 @@ by `build-publish` before a branch exists and again by `deliverable-gate` **D5**
 repository, released and re-installed by `npm run init`.
 
 **The one path under `.github/` an executor MAY deliver** *(2026-08-29, GHI #174)*:
-the operator's own deploy workflow, at `.github/workflows/subject_<name>.yml` and
-nowhere else. It is the operator's software in the same sense their CDK is — and
-GitHub runs workflows from nowhere else, so the namespace is a product convention,
-not a widening of the boundary. What such a file may contain is judged by
+the operator's own deploy workflow, at `.github/workflows/<workload-slug>_<name>.yml`
+and nowhere else — the prefix is the delivering workload's OWN slug, so workload
+`demo7` may deliver `demo7_lza-deploy.yml` and may not deliver `demo8_lza-deploy.yml`.
+It is the operator's software in the same sense their CDK is — and GitHub runs
+workflows from nowhere else, so the namespace is a product convention, not a widening
+of the boundary. An executor that cannot name the workload has no namespace at all:
+every `.github/**` path is then reserved. What such a file may contain is judged by
 `deliverable-gate` **D6** (triggers, permissions, secrets, pinned actions, a
 protected environment for any cloud token) and by `build-publish` before a branch
 exists, and it always waits for the operator's own merge. The reference example
-lives in `examples/subject-workflows/` — EXAMPLE ONLY, like this directory's.
+lives in `examples/subject-workflows/your-workload_deploy-aws-lza.yml` — EXAMPLE ONLY,
+like this directory's; the `your-workload` prefix is renamed to the workload's slug.
 
 ## What an executor config does NOT decide
 

@@ -1,7 +1,10 @@
 # plan-publish — deterministic writer for agent-proposed plans (plain Actions
 # YAML, no LLM — by design: the plan-propose agentic job is read-only and its
 # safe outputs cannot push branches). On plan-propose completion: downloads the
-# uploaded plan.json artifact, validates it against schemas/plan.schema.json,
+# uploaded plan.json artifact, validates it with the PlanDoc parser in schemas/plan.ts
+# (the zod mirror of schemas/plan.schema.json — the mirror is what every validator in
+# the product actually runs; the two copies have diverged on `feature` and that is
+# reported, not fixed, in T279),
 # locates the run's Andon break (andon:v1 header, else the gh-aw footer link to
 # this triggering run — the safe-output sanitizer strips agent HTML comments, so
 # the publisher injects the canonical header), patches the real andon_issue

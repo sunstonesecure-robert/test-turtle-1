@@ -48,7 +48,8 @@ permissions:
   contents: read
   issues: write # workload:* labels + event comments — this workflow is their ONLY writer
   actions: write # cancel in-flight runs on workload cancel (SC-014); on complete, `workflow_dispatch`
-  #   the operator's subject workflows (`.github/workflows/subject_*.yml`) with the plan ref and
+  #   THIS workload's own subject workflows (`.github/workflows/<workload-slug>_*.yml`, T279 —
+  #   never another workload's) with the plan ref and
   #   the verified merged commit (FR-070, GHI #174 §3). GitHub's anti-recursion rule exempts
   #   workflow_dispatch, so GITHUB_TOKEN should suffice — PB-017 verifies that live.
   checks: read # L3 reads the frozen plan SHA's vt-* check runs (FR-034). Specifying

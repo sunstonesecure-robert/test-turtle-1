@@ -128,8 +128,16 @@ jobs:
           path="candidate/plan.json"
           if [ -n "$slug" ] && [ -f "candidate/plans/$slug/plan.json" ]; then path="candidate/plans/$slug/plan.json"; fi
           echo "path=$path" >> "$GITHUB_OUTPUT"
+      # `--plan-ref` is the HEAD BRANCH, not the document: G16 reads the workload slug
+      # out of it to decide whose subject-workflow namespace this plan may declare
+      # (T279). It has to come from the ref because `plan.feature` is a field INSIDE the
+      # document under review, and a hand-crafted `plan/**` branch could carry another
+      # workload's slug there — which would hand this approval that workload's
+      # namespace. Same env-var discipline as the step above: a branch name is
+      # attacker-influenced text and is never interpolated into a shell command.
       - name: plan-gate (G1, G2–G4, G7–G11)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PLAN_PATH: ${{ steps.plan.outputs.path }}
-        run: npx tsx scripts/gates/plan-gate.ts --plan "$PLAN_PATH" --repo "$GITHUB_REPOSITORY" --json
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: npx tsx scripts/gates/plan-gate.ts --plan "$PLAN_PATH" --plan-ref "$HEAD_REF" --repo "$GITHUB_REPOSITORY" --json

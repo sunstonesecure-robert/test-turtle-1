@@ -1,7 +1,9 @@
 import type { PlanDoc } from '../../../schemas/plan';
 import type { GateResult } from './runner';
-import { isSubjectWorkflowScope } from '../../install-manifest';
-import { scopeReachesReserved, PRODUCT_PR_ROUTE } from './reserved-paths';
+import { slugFromPlanRef } from '../../../dashboard/lib/github/plans';
+import { isSubjectWorkflowScope, subjectWorkflowName } from '../../install-manifest';
+import { scopeReachesReserved, subjectWorkflowRoute, PRODUCT_PR_ROUTE } from './reserved-paths';
+import { normalizePath } from './globs';
 
 /**
  * Scope-commitment checks G2–G4 (gate-checks-cli.md §1, US2: FR-009…FR-012).
@@ -139,8 +141,46 @@ export function checkG4SinglePassFail(plan: PlanDoc): GateResult {
  * D5 still backs this up unconditionally, so the machinery is safe either way. But
  * "the reserved paths are safe" is a much weaker promise than "the deliverable stays
  * where the plan said", and only this gate can require the second.
+ *
+ * WHOSE NAMESPACE (T279, operator decision 2026-09-01). The one carve-out from the
+ * reserved set is per workload — `.github/workflows/<workload-slug>_<name>.yml` — so
+ * this gate cannot ask "is that glob in the namespace?" without knowing WHICH WORKLOAD
+ * this plan belongs to. Two sources, in order:
+ *
+ *   1. `opts.planRef`, the plan ref the gate is judging (`plan/<slug>/v<N>`), threaded
+ *      in from `plan-gate.ts`. AUTHORITATIVE wherever it exists: the ref is the branch
+ *      and the tag the approval merges, so it is a fact about the workload rather than
+ *      a field inside the document being judged.
+ *   2. `plan.feature`, which `plan-propose` requires to be exactly the workload slug and
+ *      the publisher refuses otherwise — the fallback for a caller that has only the
+ *      document: a direct `plan-gate` CLI call outside Actions, or a unit call. No
+ *      dashboard code calls this check, so nothing else is holding the fallback open
+ *      (corrected 2026-09-01: the earlier note claimed a dashboard preview did).
+ *
+ * If neither is a valid slug the answer is null, which is the empty namespace: every
+ * `.github/` glob then reaches the reserved set and the plan is refused. Strict by
+ * default, like every other reader (see `reserved-paths.ts`).
+ *
+ * This is a per-workload BLAST RADIUS, not just ergonomics: workload `demo7` may
+ * declare `.github/workflows/demo7_*.yml` and is refused `.github/workflows/demo8_*.yml`
+ * — another workload's deploy leg, which this plan has no more authority over than it
+ * has over the gates.
  */
-export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly string[] = []): GateResult {
+export function checkG16SubjectBoundary(
+  plan: PlanDoc,
+  opts: {
+    /** the operator's own additional reserved areas (`withExtraReserved`, FR-068(d)) */
+    extra?: readonly string[];
+    /** the plan ref being judged (`plan/<slug>/v<N>`) — the authoritative source of the
+     *  workload slug; `plan.feature` is the fallback. See the docblock. */
+    planRef?: string | null;
+  } = {},
+): GateResult {
+  const { extra = [], planRef = null } = opts;
+  // Both candidates are handed to the namespace helpers UNVALIDATED and validated
+  // there, in the one place a slug is ever judged (`install-manifest.ts`): anything
+  // that is not a slug is the same answer as no slug at all — the empty namespace.
+  const slug = slugFromPlanRef(planRef) ?? plan.feature ?? null;
   // A step with no scope makes no containment promise, and at approval time there is
   // no compatibility reason to accept one.
   const unscoped = plan.steps.filter((s) => (s.scope ?? []).length === 0).map((s) => s.id);
@@ -159,11 +199,23 @@ export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly s
   }
   const scoped = plan.steps;
   const offenders: string[] = [];
+  const offendingGlobs: string[] = [];
   for (const step of scoped) {
-    const reaching = scopeReachesReserved(step.scope ?? [], extraReserved);
-    for (const glob of reaching) offenders.push(`${step.id} → ${glob}`);
+    const reaching = scopeReachesReserved(step.scope ?? [], { extra, slug });
+    for (const glob of reaching) {
+      offenders.push(`${step.id} → ${glob}`);
+      offendingGlobs.push(glob);
+    }
   }
   if (offenders.length > 0) {
+    // A scope aimed under `.github/` gets the namespace route as well as the product-PR
+    // one, and the route names THIS workload's prefix (GHI #127, T279): the likeliest
+    // reason a step declares a workflow glob is that it was asked to deliver a deploy
+    // leg, and there is a right way to do that. Offering a prefix this workload cannot
+    // use — a generic one, or another workload's — sends the operator round the loop
+    // into a second refusal, which is how a route that is not followable teaches people
+    // to disable the check.
+    const underGithub = offendingGlobs.some((g) => normalizePath(g).startsWith('.github/'));
     return {
       id: 'G16',
       status: 'fail',
@@ -171,13 +223,15 @@ export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly s
       detail:
         `${offenders.length} declared scope(s) reach the installed oversight machinery or the governance record: ` +
         `${offenders.join('; ')}. A plan's subject is the operator's OWN software; approving this one would ` +
-        `authorize the system to change the gates, workflows, schemas, or records that govern it. ${PRODUCT_PR_ROUTE}`,
+        `authorize the system to change the gates, workflows, schemas, or records that govern it. ${PRODUCT_PR_ROUTE}` +
+        (underGithub ? ` ${subjectWorkflowRoute(slug)}` : ''),
     };
   }
   // A namespace scope is accepted by NAME, and the name is a glob wider than the rule
-  // (`subject_*.yml` covers `subject_x.lock.yml`, which the namespace does not) — so
-  // the pass says what the delivery gate will hold the step to (Codex on PR #175).
-  const namespaced = scoped.filter((s) => (s.scope ?? []).some((g) => isSubjectWorkflowScope(g))).map((s) => s.id);
+  // (`demo7_*.yml` covers `demo7_x.lock.yml`, which the namespace does not) — so the
+  // pass says what the delivery gate will hold the step to (Codex on PR #175), and says
+  // it with THIS workload's own prefix rather than a generic one (T279).
+  const namespaced = scoped.filter((s) => (s.scope ?? []).some((g) => isSubjectWorkflowScope(g, slug))).map((s) => s.id);
   return {
     id: 'G16',
     status: 'pass',
@@ -185,7 +239,7 @@ export function checkG16SubjectBoundary(plan: PlanDoc, extraReserved: readonly s
     detail:
       `${scoped.length} scoped step(s), none reaching the installed machinery or the governance record` +
       (namespaced.length > 0
-        ? `. ${namespaced.join(', ')} may deliver a subject workflow: the file must be named .github/workflows/subject_<name>.yml — lowercase letters, digits and hyphens, no other dot — or D5 refuses it at delivery as reserved`
+        ? `. ${namespaced.join(', ')} may deliver a subject workflow: the file must be named .github/workflows/${subjectWorkflowName(slug, '<name>')} — this workload's own slug, then \`_\`, then lowercase letters, digits and hyphens, no other dot — or D5 refuses it at delivery as reserved`
         : ''),
   };
 }

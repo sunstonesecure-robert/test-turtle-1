@@ -102,8 +102,9 @@ export const DELIVERABLE_CATALOGUE: readonly DeclaredGate[] = [
   { id: 'D4', requirement: 'FR-065' },
   { id: 'D5', requirement: 'FR-068' },
   // D6 — the SUBJECT-WORKFLOW CONTENT guards (FR-069, GHI #174 C′, added 2026-08-29).
-  // D5 says WHERE an agent may write: everything under `.github/**` except the
-  // `subject_<name>.yml` namespace. D6 says WHAT a file written into that namespace
+  // D5 says WHERE an agent may write: everything under `.github/**` except this
+  // workload's own `<workload-slug>_<name>.yml` namespace (T279). D6 says WHAT a file
+  // written into that namespace
   // may do at runtime — triggers, permissions, secrets, pinned actions, an approved
   // environment — because a workflow is the one deliverable that changes what runs
   // with which credentials. It sits after D5 for the same reason D5 sits after D4:

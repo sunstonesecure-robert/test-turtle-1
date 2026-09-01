@@ -12,7 +12,8 @@
 #   D5  no path inside the RESERVED set — the installed oversight machinery and the
 #       governance record — read from the patch ALONE, never from the declared scope
 #       (FR-068)
-#   D6  a SUBJECT WORKFLOW — `.github/workflows/subject_<name>.yml`, the one part of
+#   D6  a SUBJECT WORKFLOW — `.github/workflows/<workload-slug>_<name>.yml` (the delivering
+#       workload's own slug, T279), the one part of
 #       `.github/` a deliverable may be — passes the content guards: triggers, permissions,
 #       secrets, pinned actions + actionlint/zizmor, environment (FR-069, GHI #174).
 #       Reports "no subject workflow in this patch" when none; never silently green.
@@ -84,7 +85,7 @@ jobs:
           node-version: 24
       - run: npm ci
       # D6.5 — THE SCANNERS THE SUBJECT-WORKFLOW CONTENT GUARD RUNS (FR-069, GHI #174).
-      # A deliverable may be an operator deploy workflow (`.github/workflows/subject_*.yml`),
+      # A deliverable may be an operator deploy workflow (`.github/workflows/<workload-slug>_*.yml`),
       # and its content is read by D6: actionlint and zizmor are two of the six guards.
       # Pinned exactly as .github/workflows/ci.yml pins them, for the reasons written there
       # (zizmor publishes SLSA provenance, so `gh attestation verify` also checks WHO built
@@ -157,7 +158,7 @@ jobs:
           node-version: 24
       - run: npm ci
       # D6.5 — THE SCANNERS THE SUBJECT-WORKFLOW CONTENT GUARD RUNS (FR-069, GHI #174).
-      # A deliverable may be an operator deploy workflow (`.github/workflows/subject_*.yml`),
+      # A deliverable may be an operator deploy workflow (`.github/workflows/<workload-slug>_*.yml`),
       # and its content is read by D6: actionlint and zizmor are two of the six guards.
       # Pinned exactly as .github/workflows/ci.yml pins them, for the reasons written there
       # (zizmor publishes SLSA provenance, so `gh attestation verify` also checks WHO built

@@ -15,7 +15,7 @@
 #              request: that one waits for the human, and the label transition below
 #              still applies when they merge it themselves. Operator-required is also
 #              decided by WHAT THE DIFF TOUCHES (GHI #163 option 3, GHI #174): a subject
-#              workflow `.github/workflows/subject_<name>.yml` always waits, and so does
+#              workflow `.github/workflows/<workload-slug>_<name>.yml` always waits, and so does
 #              a path inside a CHECKPOINT_PATHS glob.
 #   transition on the pull_request close event — flips build:awaiting-merge to
 #              build:merged (or build:refused when closed unmerged), whoever merged it.

@@ -36,7 +36,7 @@ import type { ScanFinding, SubjectWorkflowFile } from './checks-subject-workflow
  * WHY THE FILES ARE WRITTEN UNDER THEIR OWN `.github/workflows/` PATH. Both tools
  * classify a file by where it sits: zizmor treats `.github/workflows/*.yml` as a
  * workflow and `action.yml` as an action, and actionlint's checks are workflow-shaped.
- * A subject workflow written to `<tmp>/subject_x.yml` would be scanned as the wrong
+ * A subject workflow written to `<tmp>/demo7_x.yml` would be scanned as the wrong
  * kind of thing, or not at all.
  */
 

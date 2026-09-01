@@ -6,6 +6,7 @@ import { errorMessage } from '../dashboard/lib/github/errors';
 import { resolveCurrent, tagTargetSha } from '../dashboard/lib/github/plans';
 import { resolveVerifiedCommit } from '../dashboard/lib/github/builds';
 import { dispatchSubjectWorkflows, type DispatchSubjectWorkflowsResult } from '../dashboard/lib/github/subject-workflows';
+import { subjectWorkflowName } from './install-manifest';
 
 /**
  * Lifecycle apply CLI — invoked ONLY by the workload-lifecycle workflow after
@@ -19,22 +20,30 @@ import { dispatchSubjectWorkflows, type DispatchSubjectWorkflowsResult } from '.
  *
  * AND, AFTER A SUCCESSFUL `complete`, THE DEPLOY HOOK (T273/T274, FR-070, GHI #174
  * §3). A subject workflow — the operator's own deploy, delivered by an agent into
- * `.github/workflows/subject_<name>.yml` and merged by the operator — never fires on
- * the automated path by itself: `build-merge` merges with GITHUB_TOKEN and GitHub emits
- * no `push` for that. So completion is where the product starts it: every subject
- * workflow declaring the `plan_ref` and `commit` inputs is `workflow_dispatch`ed with
- * the official plan ref and the VERIFIED MERGED COMMIT — the same commit L3 just read
- * its check runs from, so what deploys is exactly what was verified (FR-063).
+ * `.github/workflows/<workload-slug>_<name>.yml` and merged by the operator — never
+ * fires on the automated path by itself: `build-merge` merges with GITHUB_TOKEN and
+ * GitHub emits no `push` for that. So completion is where the product starts it: every
+ * subject workflow OF THE COMPLETING WORKLOAD declaring the `plan_ref` and `commit`
+ * inputs is `workflow_dispatch`ed with the official plan ref and the VERIFIED MERGED
+ * COMMIT — the same commit L3 just read its check runs from, so what deploys is exactly
+ * what was verified (FR-063).
+ *
+ * "OF THE COMPLETING WORKLOAD" IS LOAD-BEARING (T279, operator decision 2026-09-01).
+ * The namespace is the workload's own slug, so `demo7`'s completion starts `demo7_*.yml`
+ * and nothing else. Under the old shared prefix this hook dispatched every subject
+ * workflow in the repository, handing one workload's plan ref and merged commit to
+ * another workload's deploy — a tree that deploy's own operator never approved.
  *
  * WHAT IT RECORDS, AND WHERE. On the workload issue, one comment: each dispatched
  * workflow with both values; each skipped one with why (no dispatch inputs, or the
- * operator disabled it in the Actions UI); or "no subject workflows exist in this
- * repository"; or — when the workload completed on the pre-US18 compatibility shim with
- * no merged deliverable — that nothing was dispatched and why. Absent ≠ success (GHI
- * #108): there is no silent branch. ANY API error after the transition — resolving the
- * plan, the verified commit or the default branch, as much as the dispatch itself — is
- * commented FIRST and then fails the run: the transition already happened and must not
- * be undone by a failed side effect; the red run and the comment are the signal.
+ * operator disabled it in the Actions UI); or that this workload owns none, naming the
+ * prefix its own would carry; or — when the workload completed on the pre-US18
+ * compatibility shim with no merged deliverable — that nothing was dispatched and why.
+ * Absent ≠ success (GHI #108): there is no silent branch. ANY API error after the
+ * transition — resolving the plan, the verified commit or the default branch, as much
+ * as the dispatch itself — is commented FIRST and then fails the run: the transition
+ * already happened and must not be undone by a failed side effect; the red run and the
+ * comment are the signal.
  */
 
 const ACTIONS = ['activate', 'complete', 'cancel', 'defer', 'reactivate', 'archive'];
@@ -43,7 +52,13 @@ const ACTIONS = ['activate', 'complete', 'cancel', 'defer', 'reactivate', 'archi
  *  reader is the operator (house rule). */
 export const NO_MERGED_DELIVERABLE_NOTE =
   'no subject workflow was dispatched: this workload completed with no merged deliverable';
-export const NO_SUBJECT_WORKFLOWS_NOTE = 'no subject workflows exist in this repository';
+/** Said of THIS WORKLOAD, not of the repository (T279). The namespace is per-workload
+ *  (`<slug>_<name>.yml`), so a repository can hold another workload's deploy workflow
+ *  and still have nothing for this completion to start — and a record that claimed the
+ *  repository had none would be false about a file the operator can see in the Actions
+ *  tab. The prefix this workload's own workflows carry is named at the call site, so
+ *  the sentence also says the way out. */
+export const NO_SUBJECT_WORKFLOWS_NOTE = 'this workload owns no subject workflow in this repository';
 
 export type CompletionDispatchOutcome =
   | { kind: 'no-plan'; comment: string }
@@ -134,7 +149,7 @@ export async function dispatchOnCompletion(
     // workflows or to READ one — before any dispatch was attempted. Comment first, then
     // let the caller fail the run.
     return failAfterCommenting(
-      `**Deploy hook FAILED** — could not list or read the subject workflows for plan \`${planRef}\` at commit ` +
+      `**Deploy hook FAILED** — could not list or read this workload's subject workflows for plan \`${planRef}\` at commit ` +
         `\`${verified.sha.slice(0, 8)}\`: ${errorMessage(error)}. NO subject workflow was dispatched. The completion itself stands; ` +
         'this run is red so the failure is seen, and re-running the complete transition is refused by the gate, so once the ' +
         'cause is fixed dispatch your subject workflows by hand (Actions → the workflow → Run workflow).',
@@ -144,7 +159,13 @@ export async function dispatchOnCompletion(
 
   const lines = [`**Deploy hook** — plan \`${planRef}\`, verified commit \`${verified.sha.slice(0, 8)}\` (PR #${verified.prNumber ?? '?'}).`];
   if (result.none) {
-    lines.push('', NO_SUBJECT_WORKFLOWS_NOTE + ' — nothing to dispatch.');
+    lines.push(
+      '',
+      `${NO_SUBJECT_WORKFLOWS_NOTE} — nothing to dispatch. A deploy workflow this workload can start is named ` +
+        `\`.github/workflows/${subjectWorkflowName(slug, '<name>')}\` (this workload's own slug is the prefix); a ` +
+        'workflow under any other name belongs to another workload or to the oversight machinery, and this hook ' +
+        'does not start it.',
+    );
   } else {
     for (const d of result.dispatched) {
       lines.push('', `- dispatched \`${d.path}\` with \`plan_ref=${planRef}\` and \`commit=${verified.sha}\``);

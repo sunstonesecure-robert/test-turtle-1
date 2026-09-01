@@ -4,6 +4,8 @@ import {
   INSTALLED_TEMPLATE_DIRS,
   isSubjectWorkflowPath,
   isSubjectWorkflowScope,
+  subjectWorkflowName,
+  subjectWorkflowScopeGlobs,
 } from '../../install-manifest';
 import { matchesAny, normalizePath, isRepoRelative } from './globs';
 
@@ -28,22 +30,34 @@ import { matchesAny, normalizePath, isRepoRelative } from './globs';
  * `TOOLCHAIN_DIRS` is exported in the first place). So the set is computed from the
  * installer's own manifest: whatever `init` installs is, by construction, reserved.
  *
- * WHAT THE SET IS. `installed ∪ governance record ∪ (.github/** minus the
+ * WHAT THE SET IS. `installed ∪ governance record ∪ (.github/** minus THIS WORKLOAD'S
  * subject-workflow namespace)`. The subtraction is the ONE structural exception
  * (GHI #174 option C′, FR-069, 2026-08-29), and it is a product convention rather
- * than a configuration: `.github/workflows/subject_<name>.yml` is where the operator's
- * OWN deploy workflows live — the software the agents build, not the machinery that
- * judges it — and GitHub runs workflows from nowhere else, so the platform fixes the
- * path. The namespace is disjoint from what `init` installs by construction (no
- * installed template's basename contains `_`; asserted at product build time in
+ * than a configuration: `.github/workflows/<workload-slug>_<name>.yml` is where the
+ * operator's OWN deploy workflows live — the software the agents build, not the
+ * machinery that judges it — and GitHub runs workflows from nowhere else, so the
+ * platform fixes the path. The namespace is disjoint from what `init` installs by
+ * construction (no installed template's basename contains `_`, and a slug never
+ * contains one either; asserted at product build time in
  * `tests/unit/subject-workflow-namespace.test.ts` and refused at install time by
  * `collectInstallFiles`), so carving it out removes NO installed file from the set.
+ *
+ * THE SUBTRACTION IS PER WORKLOAD, AND EMPTY BY DEFAULT (operator decision 2026-09-01,
+ * T279). Every question here takes an optional `slug`, and WITHOUT ONE THE NAMESPACE IS
+ * EMPTY: all of `.github/**` is reserved, exactly as before the carve-out existed. That
+ * is deliberate and load-bearing — a caller that has not threaded the slug through gets
+ * the strict answer, never the permissive one, so forgetting to pass it can only ever
+ * refuse work that would have been allowed, never allow work that should be refused.
+ * It also bounds the blast radius: workload `demo7` can be told `demo7_deploy.yml` is
+ * not reserved, and is still refused `demo8_deploy.yml` — another workload's file.
  *
  * WHY IT CANNOT BE SHRUNK. There is STILL no configuration knob and no subtract API.
  * A denylist configuration can weaken is not a control — the same escalation-only
  * argument FR-062 makes about merge authority, applied to paths. The namespace is
- * not a knob: its prefix is fixed in the install manifest, nothing at runtime can
- * move it or widen it, and an operator who wants the namespace reserved TOO may say
+ * not a knob: its shape is fixed in the install manifest, the only thing runtime
+ * supplies is WHICH workload is asking (and an unrecognizable answer means "no
+ * workload", which reserves MORE, not less), and an operator who wants the namespace
+ * reserved TOO may say
  * so through `withExtraReserved` — the one direction that is legitimate, an operator
  * adding their own protected areas.
  *
@@ -125,7 +139,7 @@ export function reservedPaths(extra: readonly string[] = []): string[] {
  * nothing removes from it. There is deliberately no counterpart to this function.
  *
  * This includes the namespace: an operator who lists
- * `.github/workflows/subject_*.yml` here has reserved it, and the predicate honours
+ * `.github/workflows/demo7_*.yml` here has reserved it, and the predicate honours
  * that — the carve-out yields to `extra`, never the other way round.
  */
 export function withExtraReserved(extra: readonly string[]): string[] {
@@ -133,19 +147,65 @@ export function withExtraReserved(extra: readonly string[]): string[] {
 }
 
 /**
+ * What the reserved questions need beyond the path itself.
+ *
+ * An options object rather than a second and third positional argument, because the
+ * two are not interchangeable and a caller must not be able to pass one where the
+ * other was meant: `extra` WIDENS the set, `slug` NARROWS it, and a slug landing in
+ * the `extra` position (or an `extra` array landing in the slug's) would be the one
+ * mistake with a silent, wrong-direction result.
+ *
+ * BOTH FIELDS ARE OPTIONAL AND BOTH DEFAULT TO THE STRICT ANSWER: no `extra` adds
+ * nothing, and no `slug` means the subject-workflow namespace is EMPTY — every
+ * `.github/**` path reserved (T279; see the module docblock). Never give `slug` a
+ * default value here.
+ */
+export interface ReservedPathOptions {
+  /** the operator's own additional reserved areas (`withExtraReserved`, FR-068(d)) */
+  extra?: readonly string[];
+  /**
+   * WHICH WORKLOAD is asking — its slug, which is the prefix of the one namespace
+   * carved out of `.github/**` for it. Absent, `null`, or not a valid slug all mean
+   * the same thing: no namespace, nothing carved out. Callers get it from the plan
+   * ref wherever one exists (`slugFromPlanRef`), which is the authoritative source.
+   */
+  slug?: string | null;
+}
+
+/**
  * THE RESERVED DECISION. Is this one path reserved?
  *
- * Order matters and is the whole design: a path inside the subject-workflow
+ * Order matters and is the whole design: a path inside THIS WORKLOAD'S subject-workflow
  * namespace is NOT reserved by virtue of `.github/workflows` or `.github/**` alone —
  * those two entries are what the namespace is carved out of — but it IS reserved if
  * the operator's `extra` reaches it. Installed files never need the order question
- * answered: none can be in the namespace (disjoint by construction, see the module
+ * answered: none can be in any namespace (disjoint by construction, see the module
  * docblock), so "namespace first, then the list" cannot un-reserve anything `init`
  * wrote. If that invariant ever broke, `collectInstallFiles` would have refused to
  * install and the product's own tests would be red before it did.
+ *
+ * With no `slug` the first branch is unreachable — the fail-closed default — so this
+ * answers `true` for every `.github/**` path, including one that would be in some
+ * OTHER workload's namespace. That is the correct answer to "may THIS build write
+ * this file", which is the only question anyone asks it.
+ *
+ * A path that does not stay inside the repository is RESERVED, before any of that
+ * (security review 2026-09-01, T279). The namespace branch is the only branch that can
+ * answer "not reserved", and `isSubjectWorkflowPath` normalizes a leading `/` away — so
+ * `/.github/workflows/demo7_x.yml` reads as in-namespace and would come back
+ * un-reserved, while `/.github/workflows/plan-gate.yml` stays reserved. That is exactly
+ * the class `isRepoRelative` exists to close (see its docblock: "asking `normalizePath`
+ * about `/etc/passwd` yields `etc/passwd`, which looks perfectly repo-relative"), and
+ * the carve-out must not re-open it. Refused, never repaired: a path outside the
+ * checkout has no meaningful answer to "is it in the namespace?", and today only the
+ * ORDER of the deliverable gate's checks keeps it from mattering. `subjectWorkflowPaths`
+ * already pre-checks the same thing, so this is also what stops the two readers
+ * disagreeing about one string.
  */
-export function isReservedPath(path: string, extra: readonly string[] = []): boolean {
-  if (isSubjectWorkflowPath(path)) return matchesAny(path, extra, true);
+export function isReservedPath(path: string, opts: ReservedPathOptions = {}): boolean {
+  const { extra = [], slug = null } = opts;
+  if (!isRepoRelative(path)) return true;
+  if (isSubjectWorkflowPath(path, slug)) return matchesAny(path, extra, true);
   return matchesAny(path, reservedPaths(extra), true);
 }
 
@@ -157,8 +217,8 @@ export function isReservedPath(path: string, extra: readonly string[] = []): boo
  * from the gate that decided (the `refusalDetail` lesson, GHI #127). Goes through
  * the predicate so D5 and `isReservedPath` cannot disagree about the namespace.
  */
-export function reservedPathsTouched(paths: readonly string[], extra: readonly string[] = []): string[] {
-  return paths.filter((p) => isReservedPath(p, extra));
+export function reservedPathsTouched(paths: readonly string[], opts: ReservedPathOptions = {}): string[] {
+  return paths.filter((p) => isReservedPath(p, opts));
 }
 
 /** Does one declared glob reach any of these reserved patterns? The two-direction
@@ -202,24 +262,29 @@ function globReaches(g: string, reserved: readonly string[]): boolean {
  * The second direction is what catches the wide declarations, and it is why this is
  * not `reservedPathsTouched` with a different argument.
  *
- * THE NAMESPACE, AT PROPOSAL. A scope confined to the subject-workflow namespace —
- * an exact `subject_<name>.yml` path or one of `SUBJECT_WORKFLOW_SCOPE_GLOBS`, and
- * nothing else — does NOT reach the reserved set (unless `extra` reaches it: the
- * carve-out yields to the operator, as in `isReservedPath`). Any other glob under
- * `.github/` still reaches: `.github/workflows/*.yml` would swallow `plan-gate.yml`,
- * and `.github/workflows/subject_*.lock.yml` names compiled agentic locks, which are
- * machinery. G16 accepts only what it can prove stays inside the namespace by
- * inspection — an exact string — because a glob it merely BELIEVES stays inside is
- * how an approved scope becomes a licence (the bare-name lesson, Codex on PR #145).
+ * THE NAMESPACE, AT PROPOSAL. A scope confined to THIS WORKLOAD'S subject-workflow
+ * namespace — an exact `<slug>_<name>.yml` path or one of
+ * `subjectWorkflowScopeGlobs(slug)`, and nothing else — does NOT reach the reserved set
+ * (unless `extra` reaches it: the carve-out yields to the operator, as in
+ * `isReservedPath`). Any other glob under `.github/` still reaches:
+ * `.github/workflows/*.yml` would swallow `plan-gate.yml`,
+ * `.github/workflows/demo7_*.lock.yml` names compiled agentic locks, which are
+ * machinery, and `.github/workflows/demo8_*.yml` is ANOTHER WORKLOAD'S namespace —
+ * which this plan has no more authority over than it has over the gates (T279).
+ * G16 accepts only what it can prove stays inside the namespace by inspection — an
+ * exact string — because a glob it merely BELIEVES stays inside is how an approved
+ * scope becomes a licence (the bare-name lesson, Codex on PR #145). With no `slug`
+ * nothing is confined to a namespace, so every `.github/` glob reaches.
  */
-export function scopeReachesReserved(scope: readonly string[], extra: readonly string[] = []): string[] {
+export function scopeReachesReserved(scope: readonly string[], opts: ReservedPathOptions = {}): string[] {
+  const { extra = [], slug = null } = opts;
   const reserved = reservedPaths(extra);
   return scope.filter((glob) => {
     const g = glob.trim();
     if (g.length === 0) return false;
     // A namespace scope is judged against the operator's additions ONLY — the same
     // order `isReservedPath` applies to a real path, so G16 and D5 agree.
-    if (isSubjectWorkflowScope(g)) return globReaches(g, extra);
+    if (isSubjectWorkflowScope(g, slug)) return globReaches(g, extra);
     return globReaches(g, reserved);
   });
 }
@@ -244,25 +309,52 @@ export const PRODUCT_PR_ROUTE =
  * that only offered the product-PR route would teach an operator whose agent is
  * building their LZA deploy leg that the product forbids it — it does not; it
  * forbids it under the wrong name.
+ *
+ * A FUNCTION OF THE SLUG, because the name it offers must be a name this workload can
+ * actually use (T279). Telling `demo7` to write `subject_deploy.yml` — or worse,
+ * `demo8_deploy.yml` — sends the operator round the loop again through a second
+ * refusal, which is precisely the failure GHI #127 named: a route that is not
+ * followable teaches people to disable the check. With no slug to name, it renders the
+ * `<workload-slug>` placeholder, which reads as one.
  */
-export const SUBJECT_WORKFLOW_ROUTE =
-  'The operator’s OWN CI/CD for the software the agents build — validate, synth, deploy — may be delivered ' +
-  'as a subject workflow: an operator deploy workflow must be named `.github/workflows/subject_<name>.yml` ' +
-  '(lowercase letters, digits and hyphens in the name). Its content is judged by the D6 content guards ' +
-  '(read-only repository permissions, OIDC through a protected environment, pinned actions, no secrets, ' +
-  'no oversight triggers) and it always waits for the operator’s own merge.';
+export function subjectWorkflowRoute(slug?: string | null): string {
+  // The SCOPE half of the way out. This route is appended to two different refusals: D5
+  // refuses a PATH, where naming the file rule is the whole answer, and G16 refuses a
+  // declared GLOB — where it is not. A planner told only how to NAME the file still has
+  // to guess what scope would be accepted, and the accepted scope is now slug-dependent
+  // and therefore unguessable (T279). So the sentence names it, built from
+  // `subjectWorkflowScopeGlobs` rather than re-spelled, so the accepted set has exactly
+  // one spelling. Omitted when there is no slug: with none, no scope IS accepted, and
+  // offering a placeholder glob would be a route that cannot be followed (GHI #127).
+  const globs = subjectWorkflowScopeGlobs(slug ?? '');
+  return (
+    'The operator’s OWN CI/CD for the software the agents build — validate, synth, deploy — may be delivered ' +
+    `as a subject workflow: an operator deploy workflow must be named \`.github/workflows/${subjectWorkflowName(slug, '<name>')}\` ` +
+    '— this workload’s own slug, then `_`, then lowercase letters, digits and hyphens. The prefix is what records ' +
+    'which workload authorized the file, and a workload may deliver under no other prefix. ' +
+    (globs.length > 0
+      ? `A plan step that will deliver one declares its scope as exactly \`${globs.join('` or `')}\`, or the one ` +
+        'file by name — any wider `.github/` glob is refused, and another workload’s prefix is not this plan’s to ' +
+        'declare. '
+      : '') +
+    'Its content is judged ' +
+    'by the D6 content guards (read-only repository permissions, OIDC through a protected environment, pinned ' +
+    'actions, no secrets, no oversight triggers) and it always waits for the operator’s own merge.'
+  );
+}
 
 /** The paths a deliverable may never touch, phrased for a human, with the route out.
  *  When an offending path is under `.github/workflows/`, the refusal also names the
  *  namespace: the likeliest reason an agent wrote a workflow file is that it was
- *  asked to deliver a deploy leg, and there IS a right way to do that. */
-export function reservedRefusalDetail(offending: readonly string[], subject = 'the patch'): string {
+ *  asked to deliver a deploy leg, and there IS a right way to do that — under THIS
+ *  workload's prefix, which is why the slug is threaded this far (T279). */
+export function reservedRefusalDetail(offending: readonly string[], subject = 'the patch', slug: string | null = null): string {
   const underWorkflows = offending.some((p) => normalizePath(p).startsWith('.github/workflows/'));
   return (
     `${subject} touches ${offending.length} reserved path(s): ${offending.join(', ')} — ` +
     'the installed oversight machinery and the governance record, which are what JUDGE this build ' +
     `rather than what it builds (FR-068). ${PRODUCT_PR_ROUTE}` +
-    (underWorkflows ? ` ${SUBJECT_WORKFLOW_ROUTE}` : '')
+    (underWorkflows ? ` ${subjectWorkflowRoute(slug)}` : '')
   );
 }
 

@@ -10,7 +10,8 @@
 # schemas/deliverable.schema.json, bind its plan_ref to the commit the build actually
 # ran on, refuse any path outside the delivering step's declared scope (D2's rule) or
 # inside the reserved set (D5's rule, FR-068), refuse a subject workflow
-# (`.github/workflows/subject_<name>.yml` — the one part of `.github/` a deliverable may
+# (`.github/workflows/<workload-slug>_<name>.yml`, this workload's own slug — the one part of
+# `.github/` a deliverable may
 # be) whose content fails the D6 guards (FR-069, GHI #174), then create
 # build/<slug>/<step-id> off the FROZEN TAG'S COMMIT — so the head is a DESCENDANT of the frozen commit, never an
 # alteration of it (FR-007 as amended) — and open the pull request with the executor's
@@ -65,7 +66,7 @@ jobs:
           node-version: 24
       - run: npm ci
       # D6.5 — THE SCANNERS THE SUBJECT-WORKFLOW CONTENT GUARD RUNS (FR-069, GHI #174).
-      # A deliverable may be an operator deploy workflow (`.github/workflows/subject_*.yml`),
+      # A deliverable may be an operator deploy workflow (`.github/workflows/<workload-slug>_*.yml`),
       # and its content is read by D6: actionlint and zizmor are two of the six guards.
       # Pinned exactly as .github/workflows/ci.yml pins them, for the reasons written there
       # (zizmor publishes SLSA provenance, so `gh attestation verify` also checks WHO built

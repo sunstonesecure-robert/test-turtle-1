@@ -349,11 +349,19 @@ those paths are reserved.** A patch touching any of them is refused with the pat
 declared scope named those paths, because a boundary a plan can widen is not a boundary.
 
 One exception, and only one: the operator's OWN deploy workflow may be delivered as
-`.github/workflows/subject_<name>.yml` (lowercase letters, digits and hyphens in the name) when the
-step's scope names exactly `.github/workflows/subject_*.yml` or that one file. Its content is judged
-before anything is written: read-only repository permissions, OIDC through the protected
-`subject-deploy` environment on a GitHub-hosted runner, every action pinned to a commit, no secrets,
-no oversight triggers — and it always waits for the operator's own merge.
+`.github/workflows/<workload-slug>_<name>.yml` — **THIS workload's slug**, then `_`, then a name of
+lowercase letters, digits and hyphens — when the step's scope names exactly
+`.github/workflows/<workload-slug>_*.yml` or that one file. The slug is the `<slug>` in the plan ref
+you are building from (`plan/<slug>/v<N>`) and the plan document's `feature`; for a plan tagged
+`plan/demo7/v3` the only workflow you may write is `.github/workflows/demo7_<name>.yml`. The prefix
+is not a fixed word and it is not another workload's slug: another workload's prefix is reserved
+against this build exactly as `.github/**` is, and a file under it is refused with your own prefix
+named as the way out. Writing your own prefix is also what makes the completion hook deploy this
+workload's software and nothing else. Take the exact glob from the step's declared `scope` rather
+than reconstructing it. Its content is judged before anything is written: read-only repository
+permissions, OIDC through the protected `subject-deploy` environment on a GitHub-hosted runner,
+every action pinned to a commit, no secrets, no oversight triggers — and it always waits for the
+operator's own merge.
 
 **A broken thing in the machinery is NOT yours to fix, however tempting.** A failing `tsc`, a
 deprecated action pin, a broken vendored import, a gate that looks wrong: report it and stay inside

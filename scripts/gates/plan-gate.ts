@@ -24,14 +24,30 @@ import {
  * plan delivers carries contradicting evidence raised after the plan was written,
  * G16 no step's declared scope reaches the installed oversight machinery or the
  * governance record (FR-068 — the SUBJECT boundary, so the operator is never asked
- * to approve the system rewriting its own controls).
+ * to approve the system rewriting its own controls), judged against THIS workload's
+ * own subject-workflow namespace (T279).
  *
  * G12 is NOT in the set and its number is not reused: the intent-drift gate is
  * deferred to GHI #28 with its detection mechanism unsettled, and two gates sharing
  * an id across the history is worse than a gap in the sequence.
  */
 
-export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, planLabel: string): Promise<GateReport> {
+/**
+ * `planLabel` is what the report is titled with, and for every caller that gates a real
+ * approval it IS the plan ref (`plan/<slug>/v<N>`) — which is why it doubles as the
+ * default `planRef`. G16 needs the ref because the subject-workflow namespace is per
+ * workload now (T279) and the ref is the authoritative statement of which workload this
+ * plan belongs to; a label that is not a ref (the CLI's `--plan <path>`) yields no slug
+ * and G16 falls back to `plan.feature`. `planRef` is separable so the CLI can pass the
+ * head ref explicitly (`--plan-ref`) while still titling the report with the file it read.
+ */
+export async function planGate(
+  gh: Octokit,
+  repo: RepoRef,
+  rawPlan: unknown,
+  planLabel: string,
+  planRef: string | null = planLabel,
+): Promise<GateReport> {
   const g1 = checkG1Schema(rawPlan);
   const plan = g1.plan;
 
@@ -72,7 +88,7 @@ export async function planGate(gh: Octokit, repo: RepoRef, rawPlan: unknown, pla
     // G16 asks what the plan is ABOUT, which is a different question from every gate
     // above it and the one nothing asked until GHI #141 (FR-068). Pure: it reads the
     // declared scopes and the derived reserved set, no API call.
-    { id: 'G16', skip: unparsed, run: () => checkG16SubjectBoundary(plan!) },
+    { id: 'G16', skip: unparsed, run: () => checkG16SubjectBoundary(plan!, { planRef }) },
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };
 }
@@ -169,10 +185,27 @@ if (isMain && process.argv.includes('--sweep-non-plan')) {
   void cliMain(async (args) => {
     const planPath = args.get('plan');
     const repoArg = args.get('repo');
-    if (!planPath || !repoArg) throw new UsageError('plan-gate --plan <path/to/plan.json> --repo <owner/repo> [--json]');
+    if (!planPath || !repoArg) {
+      throw new UsageError('plan-gate --plan <path/to/plan.json> [--plan-ref plan/<slug>/v<N>] --repo <owner/repo> [--json]');
+    }
     const [owner, repo] = repoArg.split('/');
     if (!owner || !repo) throw new UsageError(`invalid --repo: ${repoArg}`);
     const raw = JSON.parse(await readFile(planPath, 'utf8'));
-    return planGate(createClient(), { owner, repo }, raw, planPath);
+    // `--plan-ref` is the approval BRANCH this document came from, and G16 reads the
+    // workload slug out of it to know which subject-workflow namespace this plan may
+    // declare (T279). The installed `plan-gate.yml` passes it. It is not merely a
+    // convenience: `plan.feature` — the fallback — is a field INSIDE the document under
+    // review, so a hand-crafted `plan/demo7/v1` branch whose document says
+    // `feature: demo8` would otherwise be approved into demo8's namespace. Hence the
+    // env fallback below: a caller that forgets the flag still gets the BRANCH rather
+    // than the document, because `GITHUB_HEAD_REF` is the same value the workflow
+    // passes and is set by Actions itself on a `pull_request` run. Neither present —
+    // a direct CLI call outside Actions — falls back to `plan.feature`, and an
+    // unrecognizable answer there means "no workload", which reserves MORE of
+    // `.github/**`, never less.
+    // `||`, not `??`: an EMPTY `--plan-ref ""` (the shape a workflow edit that broke
+    // the env var would produce) is no ref at all, not a ref that happens to be empty.
+    const planRef = args.get('plan-ref')?.trim() || process.env.GITHUB_HEAD_REF?.trim() || null;
+    return planGate(createClient(), { owner, repo }, raw, planPath, planRef);
   });
 }

@@ -2,25 +2,38 @@ import type { Octokit } from '@octokit/rest';
 import { parse } from 'yaml';
 import type { RepoRef } from './client';
 import { errorMessage, errorStatus } from './errors';
-import { isSubjectWorkflowPath } from '../../../scripts/install-manifest';
+import { isSubjectWorkflowPath, SUBJECT_WORKFLOW_SLUG_RE, subjectWorkflowName } from '../../../scripts/install-manifest';
 
 /**
  * THE COMPLETION → DISPATCH HOOK (T273, FR-070, GHI #174 §3).
  *
  * A subject workflow — the operator's own deploy, delivered by an agent into
- * `.github/workflows/subject_<name>.yml` and merged by the operator — never fires on
- * the automated path by itself. `build-merge` merges with `GITHUB_TOKEN`, and GitHub
- * emits no `push` event for a `GITHUB_TOKEN` write (the anti-recursion rule GHI #160
- * ran into). So the product owns one small piece regardless of who authored the
- * workflow: on a workload's `complete` transition, `workflow_dispatch` every subject
- * workflow that declares the two inputs the hook passes, with the official plan ref
- * and the verified merged commit.
+ * `.github/workflows/<workload-slug>_<name>.yml` (workload `demo7` owns `demo7_*.yml`,
+ * and nothing else) and merged by the operator — never fires on the automated path by
+ * itself. `build-merge` merges with `GITHUB_TOKEN`, and GitHub emits no `push` event
+ * for a `GITHUB_TOKEN` write (the anti-recursion rule GHI #160 ran into). So the
+ * product owns one small piece regardless of who authored the workflow: on a workload's
+ * `complete` transition, `workflow_dispatch` every subject workflow that declares the
+ * two inputs the hook passes, with the official plan ref and the verified merged
+ * commit.
  *
  * WHY `workflow_dispatch` AND NOT `push`. GitHub's anti-recursion rule explicitly
  * exempts `workflow_dispatch` (and `repository_dispatch`): a `GITHUB_TOKEN` with
  * `actions: write` may start a run that way even though it may not cause one through
  * `push`. Documented by GitHub; PB-017 verifies it live before anything relies on it,
  * because PB-002 showed `workflow_run` behaving differently from its documentation.
+ *
+ * WHY THE NAMESPACE IS PER-WORKLOAD, AND WHY THIS MODULE IS WHERE IT MATTERS MOST
+ * (operator decision 2026-09-01, T279; GHI #174 follow-on). The prefix used to be
+ * the literal `subject_`, shared by every workload in the repository, and this hook had
+ * no slug to filter on. So the completion of workload A dispatched EVERY `subject_*`
+ * workflow in the repository — including one delivered by workload B — with A's plan
+ * ref and A's merged commit as inputs. That is not a listing bug with a cosmetic
+ * consequence: `plan_ref` and `commit` are what a deploy workflow deploys FROM, so B's
+ * deploy ran against a tree B never verified, on a completion nobody asked it about.
+ * The slug is therefore a REQUIRED parameter of the listing below, not an optional
+ * filter: the question "which workflows may this completion start?" has no safe answer
+ * when the workload is unknown.
  *
  * WHY THE INPUTS ARE A CONTRACT. GitHub answers 422 for an input the workflow does
  * not declare, so the hook sends EXACTLY `plan_ref` and `commit` and dispatches only
@@ -40,7 +53,8 @@ export const SUBJECT_DISPATCH_INPUTS = ['plan_ref', 'commit'] as const;
 export interface SubjectWorkflow {
   /** GitHub's workflow id — what `createWorkflowDispatch` keys on */
   id: number;
-  /** `.github/workflows/subject_<name>.yml` */
+  /** `.github/workflows/<workload-slug>_<name>.yml` — inside the COMPLETING workload's
+   *  own namespace; a workflow of any other workload is never listed here */
   path: string;
   /** the workflow's `name:` (or its path when it has none), for the operator's record */
   name: string;
@@ -50,7 +64,18 @@ export interface SubjectWorkflow {
 }
 
 /**
- * Every workflow whose path is in the subject namespace — active or not.
+ * Every workflow in THIS WORKLOAD'S subject namespace (`<slug>_<name>.yml`) — active or
+ * not.
+ *
+ * `slug` IS REQUIRED, and it is the whole point (T279; see the module docblock). The
+ * listing answers "which workflows may this workload's completion start?", and the
+ * only correct answer for an unknown workload is not "all of them" — it is a refusal.
+ * So an invalid slug THROWS here, before any API call: `isSubjectWorkflowPath` fails
+ * closed to `false` for an unvalidated slug, which would have made this return `[]`,
+ * and `[]` is reported by the caller as *"nothing to dispatch"* — a false statement
+ * about the repository (GHI #108: absent ≠ success, and a wrong reason is worse than
+ * an error). The caller (`scripts/lifecycle-apply.ts`) already records a failure to
+ * LIST as its own kind of failure, comments it on the workload issue and exits red.
  *
  * NOT filtered to `active` (correctness review 2026-08-29). The first version dropped
  * disabled workflows here, and the completion record then said "no subject workflows
@@ -61,10 +86,17 @@ export interface SubjectWorkflow {
  * with the state named. Paginated: a governed repo carries every installed oversight
  * workflow too, and those outnumber one page.
  */
-export async function listSubjectWorkflows(gh: Octokit, repo: RepoRef): Promise<SubjectWorkflow[]> {
+export async function listSubjectWorkflows(gh: Octokit, repo: RepoRef, slug: string): Promise<SubjectWorkflow[]> {
+  if (typeof slug !== 'string' || !SUBJECT_WORKFLOW_SLUG_RE.test(slug)) {
+    throw new Error(
+      `\`${slug}\` is not a workload slug, so there is no namespace to list: a workload's deploy workflows are the ` +
+        `files named \`.github/workflows/${subjectWorkflowName(null, '<name>')}\` with its own slug in place of the ` +
+        'placeholder (lower-case letters, digits and dashes). Nothing was listed and nothing was dispatched.',
+    );
+  }
   const workflows = await gh.paginate(gh.actions.listRepoWorkflows, { ...repo, per_page: 100 });
   return workflows
-    .filter((w) => isSubjectWorkflowPath(w.path))
+    .filter((w) => isSubjectWorkflowPath(w.path, slug))
     .map((w) => ({ id: w.id, path: w.path, name: w.name || w.path, state: w.state }));
 }
 
@@ -145,8 +177,10 @@ export async function readDispatchInputs(gh: Octokit, repo: RepoRef, path: strin
 }
 
 export interface DispatchSubjectWorkflowsOptions {
-  /** the workload this dispatch is on behalf of — for the caller's record; GitHub does
-   *  not receive it (the input set is closed: `plan_ref` and `commit`, D6.2) */
+  /** the workload this dispatch is on behalf of — and therefore WHICH WORKFLOWS ARE
+   *  DISPATCHED: the namespace is `<slug>_*.yml`, so a workflow another workload
+   *  delivered is not this completion's to start (T279). GitHub never receives the slug
+   *  itself; the input set is closed (`plan_ref` and `commit`, D6.2). */
   slug: string;
   /** the official plan ref (`plan/<slug>/v<n>`) — `inputs.plan_ref` */
   planRef: string;
@@ -162,7 +196,7 @@ export interface DispatchSubjectWorkflowsResult {
   dispatched: { path: string; id: number }[];
   /** present but not started, each with the reason the record carries */
   skipped: { path: string; why: string }[];
-  /** true when the repository has NO subject workflow at all, active OR disabled — said
+  /** true when THIS WORKLOAD owns no subject workflow at all, active OR disabled — said
    *  explicitly so the completion record can say "nothing to dispatch" rather than
    *  nothing (GHI #108); a disabled one exists and is reported in `skipped` */
   none: boolean;
@@ -173,7 +207,9 @@ export interface DispatchSubjectWorkflowsResult {
 }
 
 /**
- * Dispatch every qualifying subject workflow with `{ plan_ref, commit }` on `ref`.
+ * Dispatch every qualifying subject workflow OF `opts.slug` with `{ plan_ref, commit }`
+ * on `ref` — never another workload's, whose deploy would otherwise run against a tree
+ * this completion verified and its own operator never approved (T279).
  *
  * Sequential and in listing order, so a partial failure leaves a legible prefix: the
  * workflows before the failing one ran, the ones after did not. API errors from the
@@ -187,8 +223,11 @@ export async function dispatchSubjectWorkflows(
   repo: RepoRef,
   opts: DispatchSubjectWorkflowsOptions,
 ): Promise<DispatchSubjectWorkflowsResult> {
-  const workflows = await listSubjectWorkflows(gh, repo);
-  // `none` is computed over the UNFILTERED namespace: a disabled workflow exists.
+  const workflows = await listSubjectWorkflows(gh, repo, opts.slug);
+  // `none` is computed over the whole of THIS WORKLOAD's namespace, unfiltered by state:
+  // a disabled workflow exists. It does not mean the repository is empty — another
+  // workload's deploy may well sit next to it, and starting that one was the defect
+  // T279 closed.
   const result: DispatchSubjectWorkflowsResult = { dispatched: [], skipped: [], none: workflows.length === 0, failed: [] };
   for (const w of workflows) {
     if (w.state !== 'active') {

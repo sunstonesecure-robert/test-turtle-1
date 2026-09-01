@@ -11,7 +11,7 @@ import { pathsOutside, isRepoRelative, normalizePath } from './globs';
 // `deriveCompletionStatus` precedent puts a derivation with that profile in
 // `dashboard/lib/github/`, which gates import from rather than the other way round.
 import { resolveMergeAuthority, type MergeAuthorityInputs } from '../../../dashboard/lib/github/builds';
-import { reservedPathsTouched, reservedRefusalDetail } from './reserved-paths';
+import { reservedPathsTouched, reservedRefusalDetail, type ReservedPathOptions } from './reserved-paths';
 import { ApiUnavailableError, type GateResult } from './runner';
 
 /**
@@ -328,8 +328,18 @@ export function checkD2ScopeContainment(pr: DeliverablePr, step: PlanStep | null
  * Note what is NOT a parameter: the step, and therefore the declared scope. That is
  * the check, not an omission. A boundary a plan can widen is not a boundary, and D2
  * above already asks the question a scope can answer.
+ *
+ * `opts.slug` IS a parameter, and it is the one thing runtime supplies: WHICH WORKLOAD
+ * this patch belongs to, which is the prefix of the one namespace carved out of
+ * `.github/**` for it (`.github/workflows/<slug>_<name>.yml`, FR-069 as amended by
+ * T279). The caller takes it from the plan ref D1 resolved — the authoritative source
+ * wherever one exists — and ABSENT IS THE STRICT ANSWER: no slug means no namespace,
+ * so every `.github/**` path is reserved, exactly as before the carve-out existed. A
+ * gate that forgot to thread it refuses a legitimate build, visibly; it never admits a
+ * workflow file nobody authorized. Note this is still not a widening knob: another
+ * workload's prefix is as reserved here as `plan-gate.yml` is.
  */
-export function checkD5SubjectBoundary(pr: DeliverablePr, extraReserved: readonly string[] = []): GateResult {
+export function checkD5SubjectBoundary(pr: DeliverablePr, opts: ReservedPathOptions = {}): GateResult {
   const traversal = pr.paths.filter((p) => !isRepoRelative(p));
   if (traversal.length > 0) {
     return {
@@ -339,9 +349,18 @@ export function checkD5SubjectBoundary(pr: DeliverablePr, extraReserved: readonl
       detail: `patch names path(s) that escape the repository: ${traversal.join(', ')} — refused outright`,
     };
   }
-  const offending = reservedPathsTouched(pr.paths.map(normalizePath), extraReserved);
+  const offending = reservedPathsTouched(pr.paths.map(normalizePath), opts);
   if (offending.length > 0) {
-    return { id: 'D5', status: 'fail', requirement: 'FR-068', detail: reservedRefusalDetail(offending) };
+    // The slug reaches the REFUSAL too, not just the decision: a refusal under
+    // `.github/workflows/` names the way out, and the name it offers has to be one this
+    // workload can actually use (`demo7_<name>.yml`, never a generic prefix or another
+    // workload's) — GHI #127, T279.
+    return {
+      id: 'D5',
+      status: 'fail',
+      requirement: 'FR-068',
+      detail: reservedRefusalDetail(offending, 'the patch', opts.slug ?? null),
+    };
   }
   return {
     id: 'D5',

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../dashboard/lib/github/client';
-import { TOOLCHAIN_DIRS, TEMPLATE_DIRS, TOOLCHAIN_FILES, SUBJECT_WORKFLOW_RE } from './install-manifest';
+import { TOOLCHAIN_DIRS, TEMPLATE_DIRS, TOOLCHAIN_FILES } from './install-manifest';
 
 /**
  * Product/target install step (T178, research.md "Product/target split"):
@@ -28,7 +28,7 @@ export { TOOLCHAIN_DIRS, TEMPLATE_DIRS, INSTALLED_TEMPLATE_DIRS, TOOLCHAIN_FILES
  *  dashboard bundle reads it through `reserved-paths`. Re-exported on its own line so
  *  the drift guard in `tests/unit/dashboard-bundle-boundary.test.ts`, which pins the
  *  line above verbatim, keeps holding. */
-export { SUBJECT_WORKFLOW_RE, isSubjectWorkflowPath } from './install-manifest';
+export { SUBJECT_WORKFLOW_SLUG_RE, subjectWorkflowRe, isSubjectWorkflowPath } from './install-manifest';
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -41,29 +41,38 @@ function walk(dir: string): string[] {
 }
 
 /**
- * `init` must never install INTO the subject-workflow namespace (GHI #174 C′, FR-069).
+ * `init` must never install INTO A SUBJECT-WORKFLOW NAMESPACE (GHI #174 C′, FR-069).
  *
- * The reserved-path set carves `.github/workflows/subject_<name>.yml` out of
+ * The reserved-path set carves `.github/workflows/<workload-slug>_<name>.yml` out of
  * `.github/**` on the strength of one invariant: nothing `init` installs can be in
- * the namespace, because no installed template's basename contains `_`. The product's
- * own tests assert that (`tests/unit/subject-workflow-namespace.test.ts`), but a test
- * guards the product repo, not the checkout `npm run init` is actually run from — so
- * the installer refuses too. Refusing here, before any tree is built, is what makes
- * "namespace first, then the list" in `isReservedPath` safe: an installed file could
- * otherwise be un-reserved by its own name and an agent build could overwrite it.
+ * ANY workload's namespace, because no installed template's basename contains `_`. The
+ * product's own tests assert that (`tests/unit/subject-workflow-namespace.test.ts`),
+ * but a test guards the product repo, not the checkout `npm run init` is actually run
+ * from — so the installer refuses too. Refusing here, before any tree is built, is
+ * what makes "namespace first, then the list" in `isReservedPath` safe: an installed
+ * file could otherwise be un-reserved by its own name and an agent build could
+ * overwrite it.
  *
- * The `_` rule is the broader of the two on purpose. `SUBJECT_WORKFLOW_RE` is what
- * the gates read; the no-underscore convention is what keeps the two namespaces
- * separable by eye, and a template named `sub_ject.yml` that happened to miss the
- * regex would still erode it.
+ * THE RULE IS THE UNDERSCORE, AND IT HAS TO BE (T279). The namespace check this used to
+ * ALSO run needed a slug, and the installer has none: `init` vendors one file set into a
+ * repository that may hold any number of workloads, none of which exist yet at install
+ * time. So the slug-shaped question is unanswerable here — and unnecessary, because the
+ * `_` rule is strictly stronger than every namespace at once. A slug can never contain
+ * `_` (`SUBJECT_WORKFLOW_SLUG_RE`), so `<slug>_<name>.yml` always contains one, so a
+ * basename with no `_` is outside every namespace for every slug, present and future.
+ * That is the whole disjointness argument, and it is why dropping the slug-dependent
+ * half of this check loses nothing: the half that remains is the half that was doing
+ * the work. It is also broader than any regex — a template named `sub_ject.yml` would
+ * match no namespace and still erode the convention the gates read by eye.
  */
 function refuseIfInsideSubjectNamespace(targetPath: string, sourcePath: string): void {
   const basename = targetPath.slice(targetPath.lastIndexOf('/') + 1);
-  if (SUBJECT_WORKFLOW_RE.test(targetPath) || basename.includes('_')) {
+  if (basename.includes('_')) {
     throw new Error(
       `init refuses to install ${sourcePath} as ${targetPath}: installed template names are kebab-case and never ` +
-        'contain `_`, because `.github/workflows/subject_<name>.yml` is the namespace reserved for the operator’s own ' +
-        'deploy workflows (delivered by agent builds, judged by D6) and the two must stay disjoint. Rename the template.',
+        'contain `_`, because `.github/workflows/<workload-slug>_<name>.yml` is the namespace reserved for the ' +
+        'operator’s own deploy workflows (delivered by agent builds, judged by D6) and the two must stay disjoint. ' +
+        'Rename the template.',
     );
   }
 }

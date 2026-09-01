@@ -98,12 +98,17 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    dashboard, and every gate agreed (GHI #141).
 
    One exception, and only one: the operator's OWN deploy workflow may be delivered as
-   `.github/workflows/subject_<name>.yml` (lowercase letters, digits and hyphens in the name).
-   Scope such a step EXACTLY `.github/workflows/subject_*.yml` or that one file — any wider
-   `.github/` glob is refused. Its content must hold read-only repository permissions, deploy
-   through the protected `subject-deploy` environment via OIDC on a GitHub-hosted runner, pin
-   every action to a commit, read no secrets and react to no oversight event; and it always
-   waits for the operator's own merge.
+   `.github/workflows/${{ inputs.workload }}_<name>.yml` — **this workload's slug**, then `_`,
+   then a name of lowercase letters, digits and hyphens. The prefix is not a fixed word and it is
+   not another workload's slug: workload `${{ inputs.workload }}` owns
+   `.github/workflows/${{ inputs.workload }}_*.yml` and nothing else under `.github/`. That is
+   what bounds the damage a mistaken plan can do — you can only aim at names this workload
+   authorized — and it is what makes completion deploy this workload's software and no one
+   else's. Scope such a step EXACTLY `.github/workflows/${{ inputs.workload }}_*.yml` or that one
+   file — any wider `.github/` glob, and any other workload's prefix, is refused. Its content must
+   hold read-only repository permissions, deploy through the protected `subject-deploy` environment
+   via OIDC on a GitHub-hosted runner, pin every action to a commit, read no secrets and react to
+   no oversight event; and it always waits for the operator's own merge.
 
    So: no step may declare a `scope` reaching into those paths. Plan gate **G16** refuses such a
    plan at approval, and deliverable gate **D5** refuses such a patch at delivery regardless of

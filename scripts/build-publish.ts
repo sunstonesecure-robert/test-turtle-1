@@ -45,7 +45,7 @@ import { scannerRunner } from './gates/lib/subject-workflow-scanners';
  *   • any path falls outside the delivering step's declared scope (FR-061)
  *   • any path is inside the RESERVED set — the installed oversight machinery or the
  *     governance record (FR-068), regardless of what the scope says
- *   • a subject workflow (`.github/workflows/subject_<name>.yml`, the one part of
+ *   • a subject workflow (`.github/workflows/<workload-slug>_<name>.yml`, the one part of
  *     `.github/` a deliverable may be — FR-069, GHI #174) whose CONTENT fails any D6
  *     guard: a trigger outside push/pull_request/workflow_dispatch, a write scope, a
  *     secret, an unpinned action, a scanner finding, an OIDC job with no environment
@@ -230,9 +230,13 @@ export async function publishDeliverable(
   // scope could have made it acceptable.
   // Only now — every path is known repo-relative, so normalizing cannot launder one.
   const paths = rawPaths.map(normalizePath);
-  const reserved = reservedPathsTouched(paths);
+  // The slug is this workload's — already parsed from the patch's own plan ref above —
+  // and it is what names the one namespace carved out of `.github/**` for it (T279).
+  // It reaches the REFUSAL as well as the decision, so a patch that wrote a workflow
+  // under the wrong name is told the name it could have used (GHI #127).
+  const reserved = reservedPathsTouched(paths, { slug });
   if (reserved.length > 0) {
-    return refuse(gh, repo, reportOn, reservedRefusalDetail(reserved, 'deliverable.patch'));
+    return refuse(gh, repo, reportOn, reservedRefusalDetail(reserved, 'deliverable.patch', slug));
   }
   const scope = step.scope ?? [];
   if (scope.length > 0) {
@@ -260,7 +264,7 @@ export async function publishDeliverable(
   // come from PATH; when either is missing D6.5 FAILS closed and the patch is refused
   // rather than published unscanned (GHI #108). A refused subject workflow therefore
   // produces no branch — the property this whole pre-write block exists for.
-  const subjectPaths = new Set(subjectWorkflowPaths(paths));
+  const subjectPaths = new Set(subjectWorkflowPaths(paths, slug));
   if (subjectPaths.size > 0) {
     const subjectFiles: SubjectWorkflowFile[] = [
       ...patch.files
@@ -274,7 +278,7 @@ export async function publishDeliverable(
         .filter((p) => subjectPaths.has(p))
         .map((p) => ({ path: p, content: null })),
     ];
-    const d6 = await checkD6SubjectWorkflowContent(subjectFiles, { defaultBranch: base, scan: scannerRunner() });
+    const d6 = await checkD6SubjectWorkflowContent(subjectFiles, { defaultBranch: base, slug, scan: scannerRunner() });
     if (d6.status !== 'pass') {
       // The gate's OWN sentences (GHI #127): every violated guard, named, with the way out.
       return refuse(

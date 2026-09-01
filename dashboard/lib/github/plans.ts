@@ -36,8 +36,24 @@ export function planBranch(slug: string, version: number): string {
  * disagree about which workload a run belongs to.
  */
 export function slugFromPlanRef(ref: string | null | undefined): string | null {
+  return parsePlanRef(ref)?.slug ?? null;
+}
+
+/**
+ * The whole ref, parsed once: `{ slug, version }`, or null when it is not a plan ref.
+ *
+ * Same anchored grammar as `slugFromPlanRef` — which is now a projection of this — so a
+ * caller that needs the VERSION too (`post-merge-freeze`, which cuts the frozen tag from
+ * the merged approval branch) does not have to spell the grammar a second time. It did,
+ * with the looser `[a-z0-9-]+` capture this module's docblock above says was removed, and
+ * so it would have frozen `plan/-demo/v1` under the slug `-demo` — a tag no namespace
+ * reader can read back, because `slugFromPlanRef` answers null for it (T279: the
+ * namespace decision now rests on this grammar, so there must be exactly one of it).
+ */
+export function parsePlanRef(ref: string | null | undefined): { slug: string; version: number } | null {
   if (!ref) return null;
-  return /^plan\/([a-z0-9][a-z0-9-]*)\/v\d+$/.exec(ref)?.[1] ?? null;
+  const m = /^plan\/([a-z0-9][a-z0-9-]*)\/v(\d+)$/.exec(ref);
+  return m ? { slug: m[1]!, version: Number(m[2]) } : null;
 }
 
 /**

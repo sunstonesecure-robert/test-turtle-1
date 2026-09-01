@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { errorMessage, errorStatus } from '../../dashboard/lib/github/errors';
 import { listPullRequestPaths } from '../../dashboard/lib/github/builds';
+import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
 import { ApiUnavailableError, cliMain, printReport, refusalDetail, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
 import { DELIVERABLE_CATALOGUE } from './lib/catalogue';
 import {
@@ -21,14 +22,16 @@ import { scannerRunner } from './lib/subject-workflow-scanners';
  * deliverable-gate (T208 + T239 + T274) — required status check on every
  * `build/<slug>/<step-id>` pull request.
  *
- * This is the gate that decides whether an agent's actual work may land, and the
- * only gate in the system that reads a patch. Since 2026-08-29 it also reads the
- * CONTENT of one kind of file: a subject workflow (`.github/workflows/subject_*.yml`,
+ * This is the gate that decides whether an agent's actual work may land, and the only
+ * gate in the system that reads a patch. Since 2026-08-29 it also reads the CONTENT of
+ * one kind of file: a subject workflow (`.github/workflows/<workload-slug>_*.yml`,
  * FR-069) is the one part of `.github/` an agent may deliver, and D6 judges what such a
  * file may do at runtime — D5 says where an agent may write, D6 says what a file
- * written there may do (GHI #174). Like every other family it reports
- * EVERY declared gate on every run — a gate that does not apply says so by name, so
- * a report can never be read as "everything was checked" when it was not (GHI #108).
+ * written there may do (GHI #174). That namespace is per workload since 2026-09-01
+ * (T279), so this gate resolves WHICH workload from D1's marker before D5 and D6 are
+ * asked anything. Like every other family it reports EVERY declared gate on every run —
+ * a gate that does not apply says so by name, so a report can never be read as
+ * "everything was checked" when it was not (GHI #108).
  *
  * REGISTRATION IS HALF THE GATE. A `deliverable-gate` that runs on a build PR
  * without being REGISTERED AS A REQUIRED CHECK reports its verdict and blocks
@@ -154,6 +157,14 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
   // each check, is what stops four gates disagreeing about which step this is.
   const d1 = await checkD1Provenance(gh, repo, subject);
   const { step } = await resolveDeliveringStep(gh, repo, d1.marker);
+  // WHICH WORKLOAD this patch belongs to, and therefore which subject-workflow namespace
+  // is carved out of `.github/**` for it (T279). THE PLAN REF IS THE SOURCE, and it is
+  // the marker's — the same marker D1 just judged, which only the deterministic writer
+  // emits. A missing or malformed marker yields `null`, which is the EMPTY namespace:
+  // D5 then reserves all of `.github/**` and D6 refuses every file handed to it. That
+  // is the fail-closed direction, and it is the right one — a patch whose provenance
+  // D1 could not establish is the last patch that should be granted a carve-out.
+  const slug = slugFromPlanRef(d1.marker?.planRef);
   // The per-workflow merge checkpoint (FR-062). Escalation-only: this can only ever
   // ADD a checkpoint — nothing read here can remove one a gate demands, which is why
   // the high-stakes branch inside resolveMergeAuthority does not consult it.
@@ -169,7 +180,7 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
   // D6's subjects: the namespace paths in the diff, read at the head commit. Computed
   // before the catalogue runs so `skip` can say "no subject workflow in this patch" —
   // a gate that does not apply says so by name rather than passing (GHI #108).
-  const subjectFiles = await readSubjectWorkflowFiles(gh, repo, subjectWorkflowPaths(paths), pr.head.sha);
+  const subjectFiles = await readSubjectWorkflowFiles(gh, repo, subjectWorkflowPaths(paths, slug), pr.head.sha);
 
   const noMarker = (): string | null =>
     d1.marker ? null : 'no deliverable:v1 marker on the pull request (D1), so there is nothing to judge this against';
@@ -200,7 +211,7 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
     // need the plan to have resolved; D5 needs nothing but the paths. A patch whose
     // marker is missing, whose plan is unreadable, or whose step is a lie is exactly
     // the patch most worth asking the subject question about — so D5 always runs.
-    { id: 'D5', run: () => checkD5SubjectBoundary(subject) },
+    { id: 'D5', run: () => checkD5SubjectBoundary(subject, { slug }) },
     // D6 — the content guards on the one part of `.github/` a deliverable may be
     // (FR-069, GHI #174). Like D5 it needs no plan: a subject workflow is judged on
     // what it DOES, whoever's step delivered it. `defaultBranch` is the branch this
@@ -211,7 +222,7 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
     {
       id: 'D6',
       skip: () => (subjectFiles.length === 0 ? 'no subject workflow in this patch' : null),
-      run: () => checkD6SubjectWorkflowContent(subjectFiles, { defaultBranch: pr.base.ref, scan: scannerRunner() }),
+      run: () => checkD6SubjectWorkflowContent(subjectFiles, { defaultBranch: pr.base.ref, slug, scan: scannerRunner() }),
     },
   ]);
   return { subject: report.subject, result: report.result, gates: report.gates };

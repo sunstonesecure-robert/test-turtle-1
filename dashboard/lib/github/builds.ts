@@ -30,9 +30,9 @@ export interface MergeAuthorityInputs {
   /** the repository's `BUILD_REQUIRES_OPERATOR_MERGE` Actions variable (FR-062) */
   requiresOperatorMerge?: boolean;
   /** the checkpoint paths THIS PATCH touches, each with why it waits — a subject
-   *  workflow, or a path inside a `CHECKPOINT_PATHS` glob (`checkpointPathsTouched`,
-   *  GHI #163 option 3 / GHI #174 D6.7). Read from the pull request's actual files,
-   *  never from the declared scope. */
+   *  workflow of the delivering workload (`<slug>_<name>.yml`), or a path inside a
+   *  `CHECKPOINT_PATHS` glob (`checkpointPathsTouched`, GHI #163 option 3 / GHI #174
+   *  D6.7). Read from the pull request's actual files, never from the declared scope. */
   checkpointPaths?: readonly CheckpointPath[];
 }
 
@@ -53,16 +53,17 @@ export interface MergeAuthorityInputs {
  * spend a real authority's answer on a diff no human read — the confirmation would
  * attest to an intent while the code went unreviewed.
  *
- * WHY THE PATH BRANCH SITS SECOND, ABOVE THE REPOSITORY SETTING (GHI #163 option 3,
- * GHI #174 D6.7). The deliverable that most needs a human to read it is identified by
- * WHAT IT CHANGES — an agent-authored GitHub Actions workflow decides what runs with
- * which credentials the moment it lands, and an IAM or organization config is the
- * same shape of change in the cloud. So the namespace `.github/workflows/subject_*`
- * always waits, whatever `BUILD_REQUIRES_OPERATOR_MERGE` says, and the operator may
- * add their own paths. It is checked even when the STEP is unknown: a checkpoint by
- * path does not depend on which plan step produced the change, and answering
- * "pre-authorized" about a subject workflow because the plan could not be read would
- * be the absent-≠-success mistake applied to a merge decision.
+ * WHY THE PATH BRANCH SITS SECOND, ABOVE THE REPOSITORY SETTING (GHI #163 option 3, GHI
+ * #174 D6.7). The deliverable that most needs a human to read it is identified by WHAT
+ * IT CHANGES — an agent-authored GitHub Actions workflow decides what runs with which
+ * credentials the moment it lands, and an IAM or organization config is the same shape
+ * of change in the cloud. So a workload's own workflow namespace
+ * (`.github/workflows/<workload-slug>_*`, T279) always waits, whatever
+ * `BUILD_REQUIRES_OPERATOR_MERGE` says, and the operator may add their own paths. It is
+ * checked even when the STEP is unknown: a checkpoint by path does not depend on which
+ * plan step produced the change, and answering "pre-authorized" about a subject
+ * workflow because the plan could not be read would be the absent-≠-success mistake
+ * applied to a merge decision.
  *
  * THE REASONS CARRY NO GATE OR REQUIREMENT IDS (house rule, 2026-08-29). They reach
  * the Builds page verbatim — the operator is told in plain words which path waits and
@@ -406,6 +407,19 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
         configUnreadable = config === 'unreadable';
         // With an unreadable list, the operator globs are empty and this holds ONLY the
         // namespace paths — which are knowable without the variable.
+        //
+        // NO SLUG IS THREADED HERE, DELIBERATELY (T279; the reasoning lives in
+        // `checkpoint-paths.ts`'s docblock, where the rule is). Everywhere else the
+        // workload slug is threaded through because an absent one must fail CLOSED —
+        // an empty namespace reserves and refuses MORE. In this position the same
+        // default would fail OPEN: "not in the namespace" here means *not a
+        // checkpoint*, so a listing that forgot the slug would quietly stop telling the
+        // operator that an agent-authored deploy workflow is waiting for them, and
+        // would still typecheck. So the question asked of the diff is ANY workload's
+        // namespace, which no caller can narrow by accident — and a file carrying
+        // another workload's prefix could not have been delivered anyway (D5 refuses
+        // it), so the wider set costs nothing and the promise holds whoever's prefix
+        // the file carries.
         checkpointPaths = checkpointPathsTouched(touched, config === 'unreadable' ? [] : config);
       }
       if (step && (step.high_stakes || checkpoint === true)) {

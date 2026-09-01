@@ -38,7 +38,8 @@ import { checkpointPathsTouched, parseCheckpointPaths, CHECKPOINT_PATHS_VARIABLE
  * and the label transition still applies when they merge it — the close-event mode
  * does not care who did the merging, only that it happened. Since 2026-08-29 (T274,
  * GHI #163 option 3) "operator-required" is also decided by WHAT THE DIFF TOUCHES: a
- * subject workflow (`.github/workflows/subject_*.yml`, FR-069) always waits, and so
+ * subject workflow (`.github/workflows/<workload-slug>_*.yml`, FR-069; ANY workload's
+ * prefix — see `checkpoint-paths.ts`, T279) always waits, and so
  * does any path inside a `CHECKPOINT_PATHS` glob — so this actor reads the pull
  * request's files before it reads anything else, and a checkpoint path is a reason
  * to stop, never a thing to merge around.
