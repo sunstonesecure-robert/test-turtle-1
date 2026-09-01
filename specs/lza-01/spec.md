@@ -22,7 +22,7 @@
 
 **Initial GovCloud OUs:** `Security` and `Infrastructure`; `Infrastructure` is intentionally empty until workload accounts are added later.
 
-**Normal operator entry point after one-time OIDC bootstrap:** `.github/workflows/09-deploy-platform.yml`
+**Normal operator entry point after one-time OIDC bootstrap:** the delivered form of `09-deploy-platform.yml` — see Section 1.1 for the required filename prefix
 
 **AWS-side source/configuration storage:** Amazon S3 only; no CodeCommit and no CodeConnections
 
@@ -73,6 +73,51 @@ Treat every numbered statement in this document as an implementation requirement
 - **REQ-037:** Phase 3 is the only intended workflow phase that may create, update, or reset the Control Tower landing zone. Phase 4 MUST render the Control Tower state implied by `global-config.yaml` and prove it is semantically identical to the live Phase 3 landing zone before starting LZA.
 - **REQ-038:** The LZA configuration MUST explicitly set `controlTower.landingZone.accountAutoEnrollment: true`; relying on an omitted/default value is prohibited because pinned LZA `v1.16.1` compares this property and can call `UpdateLandingZone` when it differs.
 - **REQ-039:** Phase 4 MUST snapshot `ListLandingZoneOperations` before and after the LZA installer/core executions and fail if a new `CREATE`, `UPDATE`, or `RESET` landing-zone operation was initiated during the Phase 4 interval.
+
+### 1.1 Governed-repository path constraints
+
+*(Added 2026-09-01.)* This repository is governed by an agent-oversight system that vendors its own
+toolchain into the target and treats those paths as **reserved**: an agent may not write the gates,
+the workflows that judge it, or the governance record. Three directories this document originally
+used are reserved, so the layout below is normative and replaces them. The constraint is not a
+preference — a plan whose step scope names a reserved path is refused at approval, and a patch that
+touches one is refused at delivery, whatever the plan declared.
+
+- **REQ-040:** Shell entry points MUST live under `deploy/scripts/`, never `scripts/` (reserved: the
+  vendored gate toolchain). Wherever this document writes `deploy/scripts/<name>.sh`, that is the
+  literal path.
+- **REQ-041:** Repository JSON Schemas MUST live under `deployment/schemas/`, never `schemas/`
+  (reserved: the vendored schemas).
+- **REQ-042:** The agent MUST NOT create composite actions under `.github/actions/`. That path is
+  reserved, and a workflow referencing a local action (`uses: ./…`) is refused by the workflow
+  content guards regardless. Setup logic MUST be inlined into each workflow or invoked as a script
+  under `deploy/scripts/`.
+- **REQ-043:** Every workflow this document names as `NN-name.yml` MUST be delivered as
+  **`<workload-slug>_NN-name.yml`** inside `.github/workflows/`, where `<workload-slug>` is the slug
+  of the oversight workload that delivers the file (kebab-case: `[a-z0-9][a-z0-9-]*`). That prefix is
+  the only namespace an agent may write a workflow into; every other `.github/**` path is reserved.
+  A phase delivered by workload `lza-phase1` therefore ships
+  `.github/workflows/lza-phase1_04-phase1-vend-govcloud-accounts.yml`.
+- **REQ-044:** The agent MUST NOT create or modify a root `package.json`, `package-lock.json`,
+  `tsconfig.json`, or `tsconfig.base.json` (reserved toolchain manifests). Node and Yarn work happens
+  inside the vendored `vendor/lza` checkout, which is unaffected.
+- **REQ-045:** Any workflow job that mints a cloud credential (`id-token: write`) MUST name the
+  `subject-deploy` GitHub Environment and run on a GitHub-hosted runner. That environment carries
+  required reviewers, so **each phase pauses for a human approval before it touches an account**.
+  This satisfies rather than violates REQ-003: the approval is a GitHub deployment gate, not an AWS
+  console action, and no AWS resource is created, edited, or inspected through a console.
+- **REQ-046:** Delivered workflow permissions MUST be drawn only from `contents: read`,
+  `id-token: write`, `actions: read`, `packages: read`, and `deployments: write`. A workflow that
+  needs a repository write scope is outside what an agent may deliver here and MUST be reported
+  rather than attempted.
+- **REQ-047:** `config/`, `control-tower/`, `deployment/`, `deploy/`, `infra/`, `policies/`,
+  `tests/`, `build/`, `vendor/`, `lza.lock`, and `Makefile` are unreserved and unchanged by these
+  constraints.
+
+Two rules this oversight system already enforces coincide with rules stated above, and the agent
+satisfies both at once: every third-party action pinned to a full 40-character commit SHA
+(**REQ-008**), and every verification test executable with a nonzero exit status on failure
+(**REQ-005**).
 
 ---
 
@@ -281,20 +326,17 @@ The completed repository MUST contain at least this structure:
 ```text
 .
 ├── .github/
-│   ├── actions/
-│   │   ├── setup-lza/action.yml
-│   │   └── setup-aws-cli/action.yml
-│   └── workflows/
-│       ├── 00-discover-oidc-sub.yml
-│       ├── 01-pr-validate.yml
-│       ├── 02-test-commercial-oidc.yml
-│       ├── 03-test-govcloud-oidc.yml
-│       ├── 04-phase1-vend-govcloud-accounts.yml
-│       ├── 05-phase2-provision-govcloud-organization.yml
-│       ├── 06-phase3-deploy-control-tower.yml
-│       ├── 07-phase4-deploy-lza.yml
-│       ├── 08-verify-platform.yml
-│       └── 09-deploy-platform.yml
+│   └── workflows/                       [only the <workload-slug>_ namespace; REQ-042, REQ-043]
+│       ├── <workload-slug>_00-discover-oidc-sub.yml
+│       ├── <workload-slug>_01-pr-validate.yml
+│       ├── <workload-slug>_02-test-commercial-oidc.yml
+│       ├── <workload-slug>_03-test-govcloud-oidc.yml
+│       ├── <workload-slug>_04-phase1-vend-govcloud-accounts.yml
+│       ├── <workload-slug>_05-phase2-provision-govcloud-organization.yml
+│       ├── <workload-slug>_06-phase3-deploy-control-tower.yml
+│       ├── <workload-slug>_07-phase4-deploy-lza.yml
+│       ├── <workload-slug>_08-verify-platform.yml
+│       └── <workload-slug>_09-deploy-platform.yml
 ├── config/
 │   ├── accounts-config.yaml
 │   ├── global-config.yaml
@@ -330,14 +372,14 @@ The completed repository MUST contain at least this structure:
 │   ├── govcloud-validation-role-policy.json
 │   ├── govcloud-lza-role-policy.json
 │   └── lza-cloudformation-execution-policy.json
-├── schemas/
+├── deployment/schemas/                  [NOT schemas/ — reserved; REQ-041]
 │   ├── deployment-evidence.schema.json
 │   ├── deployment-state.schema.json
 │   ├── landing-zone-manifest.schema.json
 │   ├── baselines.schema.json
 │   ├── controls.schema.json
 │   └── ownership-matrix.schema.json
-├── scripts/
+├── deploy/scripts/                      [NOT scripts/ — reserved; REQ-040]
 │   ├── common.sh
 │   ├── assert-prerequisites.sh
 │   ├── discover-oidc-sub.sh
@@ -654,7 +696,7 @@ Pinned reference semantics are demonstrated in the AWS LZA Universal Configurati
 
 ### 7.1 Offline repository validation
 
-`scripts/validate-config-offline.sh` MUST run without AWS credentials and perform:
+`deploy/scripts/validate-config-offline.sh` MUST run without AWS credentials and perform:
 
 1. Exact LZA tag/commit verification.
 2. Node/Yarn lock verification.
@@ -669,7 +711,7 @@ The offline gate MUST NOT falsely claim that the exact LZA validator succeeded, 
 
 ### 7.2 Live LZA validation
 
-After GovCloud OIDC exists, `scripts/validate-config-live.sh` MUST assume the read-only `GitHubGovCloudConfigValidationRole` and run the exact pinned validator:
+After GovCloud OIDC exists, `deploy/scripts/validate-config-live.sh` MUST assume the read-only `GitHubGovCloudConfigValidationRole` and run the exact pinned validator:
 
 ```bash
 #!/usr/bin/env bash
@@ -710,7 +752,7 @@ PARTITION=aws-us-gov AWS_REGION=us-gov-west-1 ACCOUNT_ID="${GOVCLOUD_MANAGEMENT_
 
 ### 7.3 LZA-to-Control-Tower no-op validation
 
-Before Phase 4 can deploy the installer, `scripts/verify-lza-control-tower-noop.sh` MUST:
+Before Phase 4 can deploy the installer, `deploy/scripts/verify-lza-control-tower-noop.sh` MUST:
 
 1. Render `build/control-tower/lza-control-tower-projection.json` from the validated `global-config.yaml`, `accounts-config.yaml`, and API-resolved account IDs.
 2. Read the live landing zone with `get-landing-zone` and canonicalize only the fields that pinned LZA `v1.16.1` manages.
@@ -832,7 +874,7 @@ aws sts get-caller-identity --profile commercial-bootstrap --region us-east-1
 
 ### 9.2 Commercial Organization
 
-`scripts/ensure-commercial-organization.sh` MUST:
+`deploy/scripts/ensure-commercial-organization.sh` MUST:
 
 - **P1-010:** Call `describe-organization` in `us-east-1`.
 - **P1-011:** Create an all-features organization only if none exists.
@@ -841,13 +883,13 @@ aws sts get-caller-identity --profile commercial-bootstrap --region us-east-1
 
 ### 9.3 Commercial GitHub OIDC
 
-`scripts/bootstrap-commercial-oidc.sh` MUST:
+`deploy/scripts/bootstrap-commercial-oidc.sh` MUST:
 
 - **P1-020:** Consume the exact discovered GitHub OIDC `sub`.
 - **P1-021:** Create/reuse the IAM OIDC provider.
 - **P1-022:** Create `GitHubCommercialGovCloudAccountVendingRole` with only Organizations/account-read and `CreateGovCloudAccount` permissions.
 - **P1-023:** Restrict trust with exact `aud` and exact `sub`.
-- **P1-024:** Run `.github/workflows/02-test-commercial-oidc.yml` and require success before vending accounts.
+- **P1-024:** Run `.github/workflows/<workload-slug>_02-test-commercial-oidc.yml` and require success before vending accounts.
 
 ### 9.4 First GovCloud management pair
 
@@ -880,7 +922,7 @@ aws organizations create-gov-cloud-account \
 - **P1-043:** Capture `CreateAccountStatus.Id` and poll `describe-create-account-status`.
 - **P1-044:** On success, record both commercial and GovCloud account IDs.
 - **P1-045:** On failure, report `FailureReason`; do not retry with another email.
-- **P1-046:** The Phase 1 workflow MUST be `.github/workflows/04-phase1-vend-govcloud-accounts.yml`.
+- **P1-046:** The Phase 1 workflow MUST be `.github/workflows/<workload-slug>_04-phase1-vend-govcloud-accounts.yml`.
 
 ### 9.6 Phase 1 done gate
 
@@ -911,7 +953,7 @@ Using the initial access key and secret key provided in the AWS GovCloud onboard
   - `GitHubGovCloudConfigValidationRole` for read-only Organizations/STS validation;
   - `GitHubGovCloudLzaDeployRole` for S3, CloudFormation, CodePipeline, CodeBuild, logs, and LZA evidence.
 - **P2-004:** Create `LzaCloudFormationExecutionRole`, trusted by CloudFormation, and limit `iam:PassRole` from the GitHub LZA role to exact approved service roles.
-- **P2-005:** Run `.github/workflows/03-test-govcloud-oidc.yml` for all three roles.
+- **P2-005:** Run `.github/workflows/<workload-slug>_03-test-govcloud-oidc.yml` for all three roles.
 - **P2-006:** Deactivate the onboarding access key, rerun OIDC tests, then delete the inactive key.
 - **P2-007:** Remove local temporary credential material.
 
@@ -943,7 +985,7 @@ For each of `LogArchive` and `Audit`:
 
 ### 10.5 Phase 2 workflow and gate
 
-The workflow MUST be `.github/workflows/05-phase2-provision-govcloud-organization.yml`.
+The workflow MUST be `.github/workflows/<workload-slug>_05-phase2-provision-govcloud-organization.yml`.
 
 Phase 2 succeeds only when:
 
@@ -966,7 +1008,7 @@ no onboarding access key remains active
 
 ### 11.1 Preflight state inspection
 
-Before any Control Tower mutation, `scripts/verify-ownership-boundaries.sh` MUST inspect:
+Before any Control Tower mutation, `deploy/scripts/verify-ownership-boundaries.sh` MUST inspect:
 
 1. `list-landing-zones` in `us-gov-west-1`.
 2. Existing Control Tower service roles in Management.
@@ -984,7 +1026,7 @@ Before any Control Tower mutation, `scripts/verify-ownership-boundaries.sh` MUST
 
 ### 11.2 Control Tower API prerequisite service roles
 
-`infra/control-tower/control-tower-service-roles.yaml` and `scripts/ensure-control-tower-service-roles.sh` MUST create or verify these roles in the management account before `CreateLandingZone`:
+`infra/control-tower/control-tower-service-roles.yaml` and `deploy/scripts/ensure-control-tower-service-roles.sh` MUST create or verify these roles in the management account before `CreateLandingZone`:
 
 ```text
 /service-role/AWSControlTowerAdmin
@@ -1029,7 +1071,7 @@ Official references:
 
 ### 11.3 Control Tower KMS key
 
-`infra/control-tower/control-tower-kms.yaml` and `scripts/ensure-control-tower-kms.sh` MUST:
+`infra/control-tower/control-tower-kms.yaml` and `deploy/scripts/ensure-control-tower-kms.sh` MUST:
 
 - **CTKMS-001:** Create/reuse a symmetric single-Region customer-managed key in Management and `us-gov-west-1`.
 - **CTKMS-002:** Create alias `alias/govcloud-control-tower`.
@@ -1045,7 +1087,7 @@ The alias MUST NOT begin with `alias/aws/`, because that namespace is reserved f
 
 ### 11.4 Render the landing-zone manifest
 
-`scripts/render-control-tower-manifest.sh` MUST:
+`deploy/scripts/render-control-tower-manifest.sh` MUST:
 
 - **CTMAN-001:** Read validated inputs and Phase 1/2 evidence.
 - **CTMAN-002:** Resolve exact Management, LogArchive, and Audit GovCloud IDs.
@@ -1151,7 +1193,7 @@ Official references:
 
 ### 13.1 Register `Infrastructure` with `AWSControlTowerBaseline`
 
-`scripts/ensure-control-tower-baselines.sh` MUST:
+`deploy/scripts/ensure-control-tower-baselines.sh` MUST:
 
 - **CTBASE-001:** Resolve the `Infrastructure` OU ARN as `arn:aws-us-gov:organizations::<MANAGEMENT_ID>:ou/<ORG_ID>/<OU_ID>`.
 - **CTBASE-002:** Resolve the `AWSControlTowerBaseline` ARN with `list-baselines` by exact name.
@@ -1165,7 +1207,7 @@ Official references:
 
 ### 13.2 Resolve GovCloud control support
 
-`scripts/ensure-control-tower-controls.sh` MUST first generate `build/control-tower/govcloud-control-support.json` by using Control Catalog `list-controls`/`get-control` and current Control Tower APIs.
+`deploy/scripts/ensure-control-tower-controls.sh` MUST first generate `build/control-tower/govcloud-control-support.json` by using Control Catalog `list-controls`/`get-control` and current Control Tower APIs.
 
 For each declared control, record:
 
@@ -1222,7 +1264,7 @@ Config integration/aggregator/recorders == expected
 no duplicate CT/LZA ownership exists
 ```
 
-The Phase 3 workflow MUST be `.github/workflows/06-phase3-deploy-control-tower.yml`.
+The Phase 3 workflow MUST be `.github/workflows/<workload-slug>_06-phase3-deploy-control-tower.yml`.
 
 ---
 
@@ -1232,7 +1274,7 @@ AWS's LZA prerequisites require the CodeBuild “Concurrently running builds for
 
 Official reference: <https://docs.aws.amazon.com/solutions/latest/landing-zone-accelerator-on-aws/prerequisites.html>
 
-`scripts/ensure-codebuild-quota.sh` MUST:
+`deploy/scripts/ensure-codebuild-quota.sh` MUST:
 
 - **QUO-001:** Call `service-quotas list-service-quotas --service-code codebuild --region us-gov-west-1`.
 - **QUO-002:** Select the quota by exact quota name, not a hard-coded quota code unless the code is also verified from the API.
@@ -1250,7 +1292,7 @@ Pinned LZA `v1.16.1` contains a Control Tower setup module that can create, upda
 
 ### 15.1 Render and compare the LZA Control Tower projection
 
-`scripts/render-lza-control-tower-projection.sh` and `scripts/verify-lza-control-tower-noop.sh` MUST:
+`deploy/scripts/render-lza-control-tower-projection.sh` and `deploy/scripts/verify-lza-control-tower-noop.sh` MUST:
 
 - **LZACT-001:** Parse the exact rendered `config/global-config.yaml` that will be packaged, not a separate hand-maintained manifest.
 - **LZACT-002:** Require `controlTower.enable: true`, landing-zone version `4.0`, `accountAutoEnrollment: true`, Identity Center access disabled, organization trail enabled, and retention/governed-Region values identical to Phase 3.
@@ -1261,7 +1303,7 @@ Pinned LZA `v1.16.1` contains a Control Tower setup module that can create, upda
 
 ### 15.2 Snapshot landing-zone operations
 
-`scripts/snapshot-control-tower-operations.sh` MUST call `list-landing-zone-operations` with pagination and save a canonical snapshot before any Phase 4 CloudFormation or CodePipeline mutation.
+`deploy/scripts/snapshot-control-tower-operations.sh` MUST call `list-landing-zone-operations` with pagination and save a canonical snapshot before any Phase 4 CloudFormation or CodePipeline mutation.
 
 ```bash
 aws controltower list-landing-zone-operations \
@@ -1338,7 +1380,7 @@ The workflow MUST therefore use this deterministic two-core-execution sequence:
 
 ### 16.3 Discover the LZA configuration S3 location
 
-`scripts/discover-config-s3.sh` MUST:
+`deploy/scripts/discover-config-s3.sh` MUST:
 
 - **S3C-020:** Call `aws codepipeline get-pipeline --name AWSAccelerator-Pipeline --region us-gov-west-1` after the installer pipeline has created the core pipeline.
 - **S3C-021:** Locate the source action whose action type category is `Source`, provider is `S3`, and purpose is the LZA configuration input. Prefer an action named `Configuration`; otherwise identify it by the `zipped/aws-accelerator-config.zip` object key. Do not confuse it with the separate S3 source-code action and do not assume an action array position.
@@ -1351,7 +1393,7 @@ The workflow MUST therefore use this deterministic two-core-execution sequence:
 
 ### 16.4 Package and publish the configuration archive
 
-`scripts/publish-config-s3.sh` MUST:
+`deploy/scripts/publish-config-s3.sh` MUST:
 
 - **S3C-030:** Rerun the exact pinned LZA configuration validator immediately before packaging.
 - **S3C-031:** Copy exactly the six mandatory YAML files into a clean staging directory; do not include a parent `config/` directory in the ZIP.
@@ -1401,7 +1443,7 @@ Official reference: <https://docs.aws.amazon.com/solutions/latest/landing-zone-a
 
 ### 17.2 Package exact source
 
-`scripts/package-lza-source.sh` MUST:
+`deploy/scripts/package-lza-source.sh` MUST:
 
 - **SRC-020:** Fetch `v1.16.1` into `vendor/lza`.
 - **SRC-021:** Verify the exact commit.
@@ -1423,7 +1465,7 @@ release/v1.16.1/8b43dc6e347b5fc1c477940c7f71ea595fbf19ab/<ZIP_SHA256>.zip
 
 ## 18. Phase 4 — Synthesize the LZA installer template
 
-`scripts/synth-installer.sh` MUST run from the locked source and use Node/Yarn versions from `lza.lock`.
+`deploy/scripts/synth-installer.sh` MUST run from the locked source and use Node/Yarn versions from `lza.lock`.
 
 Required command shape:
 
@@ -1458,7 +1500,7 @@ The locked installer source defines the `use-s3-source` context and the S3 bucke
 
 ## 19. Phase 4 — Deploy or update the LZA installer stack by CLI
 
-`scripts/deploy-installer.sh` MUST use `aws cloudformation deploy`, not a console stack launch.
+`deploy/scripts/deploy-installer.sh` MUST use `aws cloudformation deploy`, not a console stack launch.
 
 ### 19.1 Expected parameters
 
@@ -1524,7 +1566,7 @@ The script MUST build the actual parameter list dynamically after inspecting the
 
 ### 20.1 Correlate exact executions
 
-`scripts/wait-codepipeline.sh` MUST:
+`deploy/scripts/wait-codepipeline.sh` MUST:
 
 - **PIP-001:** Accept a pipeline name and an exact execution ID.
 - **PIP-002:** Poll `get-pipeline-execution`, not merely the first item returned by `list-pipeline-executions`.
@@ -1817,7 +1859,7 @@ The platform is **done** only when every applicable check below passes in `09-de
 }
 ```
 
-- **DONE-080:** Evidence validates against `schemas/deployment-evidence.schema.json`.
+- **DONE-080:** Evidence validates against `deployment/schemas/deployment-evidence.schema.json`.
 - **DONE-081:** Evidence contains no secrets, raw JWTs, temporary credentials, or customer workload data.
 - **DONE-082:** Evidence hashes and live AWS verification agree.
 
@@ -1843,7 +1885,7 @@ The platform is **done** only when every applicable check below passes in `09-de
 
 ## 24. Diagnostics that must be collected automatically
 
-On any failure, `scripts/collect-diagnostics.sh` MUST collect, redact, and upload:
+On any failure, `deploy/scripts/collect-diagnostics.sh` MUST collect, redact, and upload:
 
 1. GitHub SHA/run/workflow/job/event and desired-state digests.
 2. Locked LZA and Control Tower versions.
