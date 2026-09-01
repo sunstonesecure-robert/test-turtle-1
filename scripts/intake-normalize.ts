@@ -29,7 +29,7 @@ import { errorMessage } from '../dashboard/lib/github/errors';
  * Agent context selection (FR-053): an optional `### Context` section lists
  * one repo path per line the planning agent must read; every path must
  * normalize to inside a special context folder (`runbooks/`, `useful-context/`,
- * `inputs/` — no `../` escapes, absolute paths, or backslash tricks) and exist
+ * `inputs/`, `specs/` — no `../` escapes, absolute paths, or backslash tricks) and exist
  * in the repository checkout. Any violation is a refusal naming every bad
  * path. No section, or an empty one, is valid (index-files-only mode).
  */
@@ -41,7 +41,7 @@ export type IntakeResult =
 
 const SLUG_SECTION_RE = /###\s*Workload slug\s*\n+\s*([^\n]+)/;
 const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
-export const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs'];
+export const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs', 'specs'];
 
 // Per-file ceiling for designated context items (PB-004: a 6.5 MB PDF designated
 // as context hung a planning-agent run for ~6h — an oversized binary blob is a
@@ -178,7 +178,7 @@ export async function normalizeIntake(
   const badPaths = invalidContextPaths(body, rootDir);
   if (badPaths.length > 0) {
     return refuse(
-      `context path(s) invalid: ${badPaths.map((p) => `\`${p}\``).join(', ')} — every \`### Context\` line must be a repo-relative path inside \`runbooks/\`, \`useful-context/\`, or \`inputs/\` that exists in the repository (FR-053)`,
+      `context path(s) invalid: ${badPaths.map((p) => `\`${p}\``).join(', ')} — every \`### Context\` line must be a repo-relative path inside \`runbooks/\`, \`useful-context/\`, \`inputs/\`, or \`specs/\` that exists in the repository (FR-053)`,
     );
   }
 

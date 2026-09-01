@@ -22,10 +22,11 @@ body:
     id: context
     attributes:
       label: Context
-      description: Optional (FR-053). Repo paths the planning agent must read before planning — one path per line, each inside runbooks/, useful-context/, or inputs/ (a folder means everything under it). Paths outside those folders or that don't exist are refused at intake. Leave empty to let the agent consult only the folders' README indexes.
+      description: Optional (FR-053). Repo paths the planning agent must read before planning — one path per line, each inside runbooks/, useful-context/, inputs/, or specs/ (a folder means everything under it). Paths outside those folders or that don't exist are refused at intake. Leave empty to let the agent consult only the folders' README indexes.
       placeholder: |
         runbooks/domain-expert/billing.md
         useful-context/glossary.md
         inputs/demo2/
+        specs/lza-01/spec.md
     validations:
       required: false
