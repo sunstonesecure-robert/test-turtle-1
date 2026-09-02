@@ -3,13 +3,9 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { getAndon } from './andon';
 import { listOpenCorrections } from './corrections';
-import { errorStatus, Refusal } from './errors';
+import { Refusal } from './errors';
 import { parseAnswer, parseAnswerText, serializeAnswer, checkJudgmentItem } from './markers';
-import {
-  violatesSpecialFolderRules,
-  contextMaxFileBytes,
-  CONTEXT_FOLDERS,
-} from '../../../scripts/intake-normalize';
+import { contextPathProblems, megabytes, CONTEXT_FOLDERS } from './context-paths';
 
 /**
  * Answers module (T195 lib seam, FR-055/FR-056): the operator's channel for
@@ -60,6 +56,9 @@ export async function listAnswers(gh: Octokit, repo: RepoRef, andonIssue: number
  * size cap), with existence checked against the TARGET repo via the contents
  * API: the dashboard reviews a remote repo, so the local filesystem is not the
  * checkout the agent will read. Returns the problems; empty means valid.
+ *
+ * The rules live in `context-paths.ts`, shared with the Introduce form's
+ * `### Context` writer (GHI #182); only the wording is this surface's own.
  */
 export async function answerReferenceProblems(
   gh: Octokit,
@@ -67,35 +66,17 @@ export async function answerReferenceProblems(
   references: string[],
   opts: { maxFileBytes?: number } = {},
 ): Promise<string[]> {
-  const problems: string[] = [];
-  const maxBytes = contextMaxFileBytes(opts.maxFileBytes);
-  for (const ref of references) {
-    if (violatesSpecialFolderRules(ref)) {
-      problems.push(
-        `\`${ref}\` is not a repo-relative path inside \`${CONTEXT_FOLDERS.join('/`, `')}/\` (FR-053)`,
-      );
-      continue;
+  const problems = await contextPathProblems(gh, repo, references, opts);
+  return problems.map((problem) => {
+    switch (problem.kind) {
+      case 'shape':
+        return `\`${problem.path}\` is not a repo-relative path inside \`${CONTEXT_FOLDERS.join('/`, `')}/\` (FR-053)`;
+      case 'missing':
+        return `\`${problem.path}\` does not exist in the repository (FR-053)`;
+      case 'oversized':
+        return `\`${problem.path}\` is too large (${megabytes(problem.bytes)} MB > ${megabytes(problem.maxBytes, 0)} MB limit, FR-053)`;
     }
-    const path = posix.normalize(ref);
-    try {
-      const { data } = await gh.repos.getContent({ ...repo, path });
-      // A file reference is size-capped like intake context (PB-004 hang
-      // guard); a directory reference is existence-checked only — its files
-      // were size-checked when designated, and an API walk is not worth the
-      // rate budget here.
-      if (!Array.isArray(data) && data.type === 'file' && data.size > maxBytes) {
-        const limitMb = (maxBytes / (1024 * 1024)).toFixed(0);
-        problems.push(`\`${ref}\` is too large (${(data.size / (1024 * 1024)).toFixed(1)} MB > ${limitMb} MB limit, FR-053)`);
-      }
-    } catch (error: unknown) {
-      if (errorStatus(error) === 404) {
-        problems.push(`\`${ref}\` does not exist in the repository (FR-053)`);
-      } else {
-        throw error;
-      }
-    }
-  }
-  return problems;
+  });
 }
 
 /** Render the recorded answer text: operator's words plus the validated

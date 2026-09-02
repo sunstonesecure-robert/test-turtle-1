@@ -13,6 +13,7 @@ import { WORKLOAD_TRANSITIONS, workloadState, type WorkloadState } from './label
 import { reopenPlan, tagExists, type ReopenResult, maxPlanVersion, planBranch } from './plans';
 import { findOpenAndonByPlanRef } from './andon';
 import { instructionProblems, listOpenCorrections, sendCorrection } from './corrections';
+import { contextPathProblems, megabytes, CONTEXT_FOLDERS, type ContextPathProblem } from './context-paths';
 
 /**
  * Workload module (T136 tracer surface): intake, listing, state derivation,
@@ -106,23 +107,87 @@ export async function getWorkloadByIssue(gh: Octokit, repo: RepoRef, issueNumber
   return { issueNumber, slug: header.id, title: issue.title, state: workloadState(labels) };
 }
 
+export interface IntroduceInput {
+  slug: string;
+  title: string;
+  /** optional body prose — what the workload IS, in the operator's words (GHI #182);
+   *  prose only, a heading line is refused (see `descriptionHeadingLine`) */
+  description?: string;
+  /** optional designated context: repo paths, one per entry, each inside a special
+   *  context folder and present in the repository (FR-053) — written as `### Context` */
+  context?: string[];
+  actor: string;
+  at: string;
+}
+
+/**
+ * The issue body a dashboard-introduced workload is created with.
+ *
+ * Header, then the description as prose, then the `### Context` section — and
+ * nothing else. This is the shape every downstream reader already expects, and
+ * each part is placed where that reader looks for it:
+ *   - `parseWorkloadHeader` finds the identity marker on a line of its own —
+ *     exactly the line `rewriteWorkloadDescription` requires (HEADER_ONLY_LINE_RE);
+ *   - the description is the prose BETWEEN the header and the first heading,
+ *     which is what the description edit replaces and what it leaves alone;
+ *   - `### Context` is the section `intake-normalize.ts` parses and the planning
+ *     agent reads (plan-propose.md step 2), one path per line, so a workload
+ *     introduced here and one introduced through the issue form designate
+ *     context identically. Paths are written as the operator typed them (trimmed):
+ *     a trailing slash is the form's "everything under this folder" idiom, and
+ *     the planning agent is told to read it that way.
+ *
+ * Pure and exported so the composition can be asserted without a GitHub round trip.
+ */
+export function composeWorkloadBody(input: { slug: string; description?: string; context?: string[] }): string {
+  const parts = [serializeWorkloadHeader({ id: input.slug })];
+  const description = input.description?.trim();
+  if (description) parts.push('', description);
+  const context = (input.context ?? []).map((line) => line.trim()).filter((line) => line.length > 0);
+  if (context.length > 0) parts.push('', '### Context', '', ...context);
+  return parts.join('\n');
+}
+
 /**
  * Operator intake (dashboard only, after readiness passes — FR-029/FR-031).
- * Title-only is valid; the slug is the identity everything else keys on.
+ * Title-only is valid; the slug is the identity everything else keys on. A
+ * description and designated context are optional and land on the issue at
+ * creation (GHI #182): on introduce there is no plan, so no re-plan question
+ * arises — the FR-036 routing applies to LATER edits of these fields.
+ *
+ * Context is validated BEFORE anything is created, against the target repo
+ * (`contextPathProblems`): the same shape rules the intake normalizer applies
+ * to the issue form, plus existence and the per-file size cap. Any bad path is
+ * a refusal naming every bad path — nothing is written, so the operator fixes
+ * the form and resubmits instead of inheriting a workload whose context the
+ * agent cannot read.
  */
-export async function introduceWorkload(
-  gh: Octokit,
-  repo: RepoRef,
-  input: { slug: string; title: string; actor: string; at: string },
-): Promise<Workload> {
+export async function introduceWorkload(gh: Octokit, repo: RepoRef, input: IntroduceInput): Promise<Workload> {
   if (!SLUG_RE.test(input.slug)) throw new Refusal(`invalid workload slug: ${input.slug}`);
+
+  const description = input.description?.trim();
+  if (description) {
+    const heading = descriptionHeadingLine(description);
+    if (heading !== undefined) {
+      throw new Refusal(
+        `refusing this description: it contains a markdown heading line ("${heading}"). A workload body's headings are structured sections — \`### Context\` designates the agent's input material — so a heading inside the description could not be told apart from one of those on the next read. Enter the description as prose, and put context paths in the Context box.`,
+      );
+    }
+  }
+
+  const context = (input.context ?? []).map((line) => line.trim()).filter((line) => line.length > 0);
+  if (context.length > 0) {
+    const problems = await contextPathProblems(gh, repo, context);
+    if (problems.length > 0) throw new Refusal(contextRefusal(problems));
+  }
+
   const existing = await getWorkload(gh, repo, input.slug);
   if (existing) throw new Refusal(`workload slug already exists: ${input.slug} (issue #${existing.issueNumber})`);
 
   const { data: issue } = await gh.issues.create({
     ...repo,
     title: input.title,
-    body: serializeWorkloadHeader({ id: input.slug }),
+    body: composeWorkloadBody({ slug: input.slug, description, context }),
     labels: ['workload:proposed'],
   });
   await gh.issues.createComment({
@@ -131,6 +196,34 @@ export async function introduceWorkload(
     body: serializeWorkloadEvent({ action: 'introduced', by: input.actor, at: input.at }),
   });
   return { issueNumber: issue.number, slug: input.slug, title: input.title, state: 'proposed' };
+}
+
+/**
+ * The Introduce form's refusal for bad context paths — the intake normalizer's
+ * wording (every bad path named, the four folders spelled out, the size cap
+ * with its knob) in the dashboard's house voice: what is wrong and what to do,
+ * no requirement ids.
+ */
+function contextRefusal(problems: ContextPathProblem[]): string {
+  const folders = CONTEXT_FOLDERS.map((f) => `\`${f}/\``);
+  const folderList = `${folders.slice(0, -1).join(', ')}, or ${folders[folders.length - 1]}`;
+  const invalid = problems.filter((p) => p.kind === 'shape' || p.kind === 'missing');
+  const oversized = problems.filter((p): p is Extract<ContextPathProblem, { kind: 'oversized' }> => p.kind === 'oversized');
+  const reasons: string[] = [];
+  if (invalid.length > 0) {
+    reasons.push(
+      `context path(s) invalid: ${invalid.map((p) => `\`${p.path}\``).join(', ')} — every context line must be a repo-relative path inside ${folderList} that exists in the repository`,
+    );
+  }
+  if (oversized.length > 0) {
+    const limitMb = megabytes(oversized[0]!.maxBytes, 0);
+    reasons.push(
+      `context file(s) too large (limit ${limitMb} MB, set CONTEXT_MAX_FILE_MB to change): ${oversized
+        .map((p) => `\`${p.path}\` (${megabytes(p.bytes)} MB)`)
+        .join(', ')} — large sources must be pre-extracted to text before use as agent context`,
+    );
+  }
+  return `workload not introduced — ${reasons.join('; ')}. Nothing was created; fix the Context lines and introduce again.`;
 }
 
 /**
@@ -651,6 +744,20 @@ export async function applyWorkloadEdit(
 const HEADING_LINE_RE = /^[ \t]*#{1,6}\s/;
 
 /**
+ * The first markdown heading line in a would-be description, trimmed, or
+ * undefined when it is prose throughout. A heading inside the description could
+ * not be told apart from a structured section (`### Context`) on the next read,
+ * so BOTH description writers — introduce and the description edit — refuse on
+ * it, through this one check.
+ */
+function descriptionHeadingLine(description: string): string | undefined {
+  return description
+    .split('\n')
+    .find((line) => HEADING_LINE_RE.test(line))
+    ?.trim();
+}
+
+/**
  * The new issue body for a description edit, with two things preserved verbatim:
  *
  * 1. **The `workload:v1` header, byte for byte.** It is the identity
@@ -671,13 +778,46 @@ const HEADING_LINE_RE = /^[ \t]*#{1,6}\s/;
  *    change what the next agent reads — a scope effect smuggled through the
  *    metadata route.
  *
- * The description is therefore the prose BETWEEN the header and the first
- * section, which is exactly what it is at intake.
+ * WHERE the description lives depends on which writer introduced the workload,
+ * and the rewrite has to find it in both places:
+ *
+ *   - **Dashboard shape** (`composeWorkloadBody`): the prose BETWEEN the header
+ *     and the first section.
+ *   - **Issue-form shape** (`templates/ISSUE_TEMPLATE/workload.yml`, normalized by
+ *     `intake-normalize.ts`, which prepends the marker and leaves the form's
+ *     markdown as it was): GitHub renders every form field as a headed section,
+ *     so the description is the body of `### Description (optional)` — and there
+ *     is NO prose between the header and the first heading (`### Workload slug`).
+ *
+ * Before this distinction was drawn the rewrite knew only the first shape, so on
+ * a form-introduced workload it inserted the new prose above `### Workload slug`
+ * and left the old description standing in its section: the edit reported
+ * success and the issue then carried TWO descriptions, the stale one in the
+ * place the agent reads. Now, when the body carries a Description section, that
+ * section's content is what the edit replaces, and any loose prose between the
+ * header and the first heading — which on such a body can only be an earlier
+ * misplaced edit — is replaced with it, so the edit converges on one description
+ * wherever it started. A body with no Description section keeps the first rule.
  */
 /** A line that is EXACTLY the workload:v1 marker, modulo surrounding whitespace —
  *  the only shape rewriteWorkloadDescription can preserve byte-exact while replacing
  *  the prose around it. */
 const HEADER_ONLY_LINE_RE = /^<!--\s*workload:v1\s+id:[a-z0-9][a-z0-9-]*\s*-->$/;
+
+/** The issue form's description section heading — GitHub renders the field's
+ *  label (`Description (optional)`) as an ATX heading; matched on the word so a
+ *  retitled label still finds its section. */
+const DESCRIPTION_SECTION_RE = /^[ \t]*###\s*Description\b/;
+
+/** The headings that are CONTRACT sections of a workload body — the issue form's
+ *  three fields (`templates/ISSUE_TEMPLATE/workload.yml`), of which `### Context`
+ *  is also the one the dashboard writes. In the form shape these are the only
+ *  headings that bound the Description section: the form does not stop an
+ *  operator from typing a heading INTO the description textarea, and a
+ *  user-authored heading there is part of the description, not the start of the
+ *  next section — treating it as one left the heading and everything after it
+ *  standing as stale description after an "applied" edit (PR #183 review). */
+const CONTRACT_SECTION_RE = /^[ \t]*###\s*(Workload slug|Description\b|Context\b)/;
 
 async function rewriteWorkloadDescription(
   gh: Octokit,
@@ -685,10 +825,10 @@ async function rewriteWorkloadDescription(
   issueNumber: number,
   description: string,
 ): Promise<string> {
-  const heading = description.split('\n').find((line) => HEADING_LINE_RE.test(line));
+  const heading = descriptionHeadingLine(description);
   if (heading !== undefined) {
     throw new Refusal(
-      `refusing this description edit: it contains a markdown heading line ("${heading.trim()}"). A workload body's headings are structured contract sections — \`### Context\` designates the agent's input material (FR-053) — so a heading inside the description could not be told apart from one of those on the next read. Re-submit the description as prose.`,
+      `refusing this description edit: it contains a markdown heading line ("${heading}"). A workload body's headings are structured contract sections — \`### Context\` designates the agent's input material (FR-053) — so a heading inside the description could not be told apart from one of those on the next read. Re-submit the description as prose.`,
     );
   }
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
@@ -713,8 +853,25 @@ async function rewriteWorkloadDescription(
       `refusing to rewrite the body of issue #${issueNumber}: its workload:v1 header is not on a line of its own, so the rewrite could not preserve it byte-exact — and a body that loses the header orphans the workload from listWorkloads, the lifecycle gate and the portfolio. Put the header on its own line first.`,
     );
   }
-  const sectionIndex = lines.findIndex((line, i) => i > headerIndex && HEADING_LINE_RE.test(line));
   const head = lines.slice(0, headerIndex + 1); // header line and anything above it, verbatim
+  const sectionIndex = lines.findIndex((line, i) => i > headerIndex && HEADING_LINE_RE.test(line));
+  const descriptionIndex = lines.findIndex((line, i) => i > headerIndex && DESCRIPTION_SECTION_RE.test(line));
+
+  if (descriptionIndex !== -1) {
+    // Issue-form shape. Sections between the header and the Description heading
+    // (`### Workload slug`) are kept verbatim; loose prose before the first heading
+    // is not — it is the earlier misplaced edit described above, and keeping it
+    // would leave two descriptions standing. The Description section's own content
+    // is replaced up to the next CONTRACT heading (`### Context`, kept verbatim) or
+    // the end — a heading the operator typed into the form's textarea is old
+    // description text and goes with the rest of it.
+    const nextIndex = lines.findIndex((line, i) => i > descriptionIndex && CONTRACT_SECTION_RE.test(line));
+    const between = lines.slice(sectionIndex, descriptionIndex + 1); // first heading … Description heading
+    const tail = nextIndex === -1 ? [] : lines.slice(nextIndex);
+    return [...head, '', ...between, '', description, ...(tail.length > 0 ? ['', ...tail] : [])].join('\n');
+  }
+
+  // Dashboard shape: the prose between the header and the first section.
   const tail = sectionIndex === -1 ? [] : lines.slice(sectionIndex); // structured sections, verbatim
   return [...head, '', description, ...(tail.length > 0 ? ['', ...tail] : [])].join('\n');
 }

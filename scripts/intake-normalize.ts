@@ -9,6 +9,12 @@ import {
 } from '../dashboard/lib/github/markers';
 import { getWorkload, SLUG_RE } from '../dashboard/lib/github/workloads';
 import { errorMessage } from '../dashboard/lib/github/errors';
+import { CONTEXT_FOLDERS, contextMaxFileBytes, violatesSpecialFolderRules } from '../dashboard/lib/github/context-paths';
+
+// The FR-053 rules themselves live in `context-paths.ts` (dependency-free, so the
+// dashboard's Introduce writer can share them without a cycle through this
+// script); re-exported here so this module stays the intake-side entry point.
+export { CONTEXT_FOLDERS, contextMaxFileBytes, violatesSpecialFolderRules };
 
 /**
  * Intake normalizer — makes GitHub-UI intake (the "Workload intake" issue
@@ -41,21 +47,6 @@ export type IntakeResult =
 
 const SLUG_SECTION_RE = /###\s*Workload slug\s*\n+\s*([^\n]+)/;
 const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
-export const CONTEXT_FOLDERS = ['runbooks', 'useful-context', 'inputs', 'specs'];
-
-// Per-file ceiling for designated context items (PB-004: a 6.5 MB PDF designated
-// as context hung a planning-agent run for ~6h — an oversized binary blob is a
-// pathological token load). Configurable via CONTEXT_MAX_FILE_MB; a folder
-// designation is checked file-by-file. Pre-extraction/RAG for large sources is
-// the longer-term path (tracked separately) — this is the cheap intake guard.
-const DEFAULT_CONTEXT_MAX_FILE_MB = 5;
-
-/** Effective per-file context limit in bytes, from CONTEXT_MAX_FILE_MB (default 5), or the passed override. */
-export function contextMaxFileBytes(override?: number): number {
-  if (override !== undefined) return override;
-  const mb = Number(process.env.CONTEXT_MAX_FILE_MB);
-  return (Number.isFinite(mb) && mb > 0 ? mb : DEFAULT_CONTEXT_MAX_FILE_MB) * 1024 * 1024;
-}
 
 /** Context lines from the `### Context` section, trimmed, minus blanks and the issue-form placeholder. */
 function contextLines(body: string): string[] {
@@ -104,25 +95,6 @@ export function oversizedContextPaths(body: string, rootDir: string, maxBytes = 
   };
   for (const line of contextLines(body)) check(posix.normalize(line));
   return offenders;
-}
-
-/**
- * FR-053 shape rules, filesystem-free: does the path fail to normalize to
- * inside a special context folder? Shared by intake (fs existence) and the
- * answer composer (API existence, FR-056) so the two surfaces cannot drift.
- */
-export function violatesSpecialFolderRules(line: string): boolean {
-  // Repo paths are forward-slash canonical: backslash tricks and `..`
-  // traversal are rejected outright, even when they would re-enter a
-  // special folder after normalization.
-  if (line.includes('\\') || line.includes('\0')) return true;
-  if (line.split('/').includes('..')) return true;
-  // Normalize BEFORE the prefix check (collapses `./` and `//`); absolute
-  // paths, drive letters, and any first segment that isn't a special
-  // folder are invalid.
-  const normalized = posix.normalize(line);
-  if (posix.isAbsolute(normalized) || /^[a-zA-Z]:/.test(normalized)) return true;
-  return !CONTEXT_FOLDERS.includes(normalized.split('/')[0] ?? '');
 }
 
 /** FR-053: paths from the `### Context` section that don't normalize to inside a special folder or don't exist. */
