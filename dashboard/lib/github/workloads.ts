@@ -204,9 +204,11 @@ export async function introduceWorkload(gh: Octokit, repo: RepoRef, input: Intro
  * with its knob) in the dashboard's house voice: what is wrong and what to do,
  * no requirement ids.
  */
-function contextRefusal(problems: ContextPathProblem[]): string {
-  const folders = CONTEXT_FOLDERS.map((f) => `\`${f}/\``);
-  const folderList = `${folders.slice(0, -1).join(', ')}, or ${folders[folders.length - 1]}`;
+function contextRefusal(
+  problems: ContextPathProblem[],
+  framing: { lead: string; tail: string } = { lead: 'workload not introduced', tail: 'Nothing was created; fix the Context lines and introduce again.' },
+): string {
+  const folderList = contextFolderList();
   const invalid = problems.filter((p) => p.kind === 'shape' || p.kind === 'missing');
   const oversized = problems.filter((p): p is Extract<ContextPathProblem, { kind: 'oversized' }> => p.kind === 'oversized');
   const reasons: string[] = [];
@@ -223,7 +225,13 @@ function contextRefusal(problems: ContextPathProblem[]): string {
         .join(', ')} — large sources must be pre-extracted to text before use as agent context`,
     );
   }
-  return `workload not introduced — ${reasons.join('; ')}. Nothing was created; fix the Context lines and introduce again.`;
+  return `${framing.lead} — ${reasons.join('; ')}. ${framing.tail}`;
+}
+
+/** "`runbooks/`, `useful-context/`, `inputs/`, or `specs/`" — the four folders, as copy. */
+function contextFolderList(): string {
+  const folders = CONTEXT_FOLDERS.map((f) => `\`${f}/\``);
+  return `${folders.slice(0, -1).join(', ')}, or ${folders[folders.length - 1]}`;
 }
 
 /**
@@ -465,6 +473,12 @@ export interface WorkloadEditRequest {
   title?: string;
   /** new body prose — required for, and only used by, field `description` */
   description?: string;
+  /** the new designated context — the FULL list of repo paths, one per entry — required
+   *  for, and only used by, field `context`. Validated against the target repo and written
+   *  to the workload issue's `### Context` section (FR-053) while the edit itself routes to
+   *  re-plan: the issue is what the re-planning agent reads, so the designation has to be
+   *  there before that run, not only in the event. */
+  context?: string[];
   /** the operator's explicit FR-036 reclassification of an AMBIGUOUS edit as metadata-only */
   reclassifyAsMetadataOnly?: boolean;
   /** set when the request names a plan version directly — always refused (see below) */
@@ -485,7 +499,7 @@ export interface WorkloadEditResult {
   reclassified: boolean;
   /** what was actually written to the issue; empty when the field has no
    *  workload-issue writer (see `backlog_order` below) */
-  patched: { title?: string; description?: string };
+  patched: { title?: string; description?: string; context?: string[] };
   /** the new plan version opened for review, or null on the two no-op outcomes */
   reopened: ReopenResult | null;
   /** the break-level correction blocking approval until the scope request is addressed
@@ -583,7 +597,28 @@ export async function applyWorkloadEdit(
     );
   }
 
-  const patched: { title?: string; description?: string } = {};
+  // A context edit's value is validated BEFORE any write — the same rules as
+  // intake and Introduce (`contextPathProblems`: shape, existence in the target
+  // repo, per-file size cap, folders walked) — so a bad path refuses with nothing
+  // re-opened, nothing recorded, and every bad path named.
+  let context: string[] | undefined;
+  if (input.field === 'context') {
+    if (input.context === undefined) {
+      throw new Refusal(`refusing to edit workload "${input.slug}": field "context" needs the new list of context paths, one per line`);
+    }
+    context = input.context.map((line) => line.trim()).filter((line) => line.length > 0);
+    if (context.length === 0) {
+      throw new Refusal(
+        `refusing to edit workload "${input.slug}": the context list is empty — name at least one repo path inside ${contextFolderList()}, one per line. To designate nothing, remove the \`### Context\` section from the workload issue on GitHub.`,
+      );
+    }
+    const problems = await contextPathProblems(gh, repo, context);
+    if (problems.length > 0) {
+      throw new Refusal(contextRefusal(problems, { lead: 'context not changed', tail: 'Nothing was written or re-opened; fix the lines and submit again.' }));
+    }
+  }
+
+  const patched: { title?: string; description?: string; context?: string[] } = {};
   let reopened: ReopenResult | null = null;
   let replan: WorkloadEditResult['replan'] = null;
   /** The break-level correction that blocks approval of the re-opened plan (GHI #73 A1). */
@@ -667,13 +702,23 @@ export async function applyWorkloadEdit(
     // review left open beside the current one), and picking the first would attach
     // the request to a stale review that no longer gates anything — found by the
     // regression test for this very path (PR #71 review).
+    // A context edit's correction carries the designation itself, not only the
+    // operator's summary: the revision agent works from the review, and a
+    // correction that said "use the spec" without saying WHERE would leave it to
+    // guess. One line, no blank line and no list — the one-instruction shape
+    // `instructionProblems` enforces — and the same composed text is what the
+    // idempotent-retry comparison below has to match (PR #185 review).
+    const instruction =
+      context !== undefined
+        ? `${summary}\nThe workload issue's ### Context section now designates: ${context.join(', ')} — read every item before revising (FR-053).`
+        : summary;
     const newestVersion = await maxPlanVersion(gh, repo, input.slug);
     const target =
       reopened?.andonIssue ??
       (newestVersion > 0 ? ((await findOpenAndonByPlanRef(gh, repo, planBranch(input.slug, newestVersion))) ?? undefined) : undefined);
     if (target !== undefined) {
       try {
-        correctionIssue = await sendCorrection(gh, repo, { andonIssue: target, instruction: summary });
+        correctionIssue = await sendCorrection(gh, repo, { andonIssue: target, instruction });
       } catch (error: unknown) {
         const message = errorMessage(error);
         if (!message.includes('already has an open break-level correction')) throw error;
@@ -697,7 +742,7 @@ export async function applyWorkloadEdit(
         // existed, i.e. reopenPlan threw before writing anything, so nothing is
         // half-applied.
         const existing = (await listOpenCorrections(gh, repo, target)).find((c) => c.itemId === null);
-        if (existing?.instruction.trim() === summary) {
+        if (existing?.instruction.trim() === instruction) {
           correctionIssue = existing.issueNumber;
         } else {
           throw new Refusal(
@@ -710,11 +755,34 @@ export async function applyWorkloadEdit(
       }
     }
 
-    // The new value the operator typed is NOT applied on this route — it takes
+    // A context edit is the one scope field whose system of record is the WORKLOAD
+    // ISSUE rather than the plan: `### Context` is what the re-planning agent reads
+    // before it plans (FR-053), so the designation must be on the issue before that
+    // run, not only in the event. Written AFTER the re-open and the correction — a
+    // crash before this point leaves a blocking request the retry converges on,
+    // whereas a body written first with no record would be the silent edit SC-013
+    // forbids. The frozen plan is untouched either way: the new context reaches a
+    // plan only through the new version's approval.
+    if (context !== undefined) {
+      const body = await rewriteWorkloadContext(gh, repo, workload.issueNumber, context);
+      await gh.issues.update({ ...repo, issue_number: workload.issueNumber, body });
+      patched.context = context;
+    }
+
+    // Any OTHER value the operator typed is NOT applied on this route — it takes
     // effect through the new version's fresh approval — so it rides in the
     // record. Without that, the text would exist only in the browser tab that
     // submitted it, which is a lost request and therefore a silent edit (SC-013).
-    reason = scopeEditReason(input.field, summary, routing.classification, replan, reopened, input.description ?? input.title, correctionIssue);
+    reason = scopeEditReason(
+      input.field,
+      summary,
+      routing.classification,
+      replan,
+      reopened,
+      context !== undefined ? undefined : (input.description ?? input.title),
+      correctionIssue,
+      context,
+    );
   }
 
   const event: WorkloadEvent = { action: 'edited', by: input.actor, at: input.at, reason };
@@ -805,9 +873,10 @@ function descriptionHeadingLine(description: string): string | undefined {
 const HEADER_ONLY_LINE_RE = /^<!--\s*workload:v1\s+id:[a-z0-9][a-z0-9-]*\s*-->$/;
 
 /** The issue form's description section heading — GitHub renders the field's
- *  label (`Description (optional)`) as an ATX heading; matched on the word so a
- *  retitled label still finds its section. */
-const DESCRIPTION_SECTION_RE = /^[ \t]*###\s*Description\b/;
+ *  label (`Description (optional)`) as an ATX heading. Matched as the WHOLE line:
+ *  a `\b` match would also claim an operator's own `### Description of the API`,
+ *  and the form's textarea does not stop them writing one (PR #185 review). */
+const DESCRIPTION_SECTION_RE = /^[ \t]*###[ \t]+Description(?:[ \t]*\(optional\))?[ \t]*$/;
 
 /** The headings that are CONTRACT sections of a workload body — the issue form's
  *  three fields (`templates/ISSUE_TEMPLATE/workload.yml`), of which `### Context`
@@ -817,7 +886,7 @@ const DESCRIPTION_SECTION_RE = /^[ \t]*###\s*Description\b/;
  *  user-authored heading there is part of the description, not the start of the
  *  next section — treating it as one left the heading and everything after it
  *  standing as stale description after an "applied" edit (PR #183 review). */
-const CONTRACT_SECTION_RE = /^[ \t]*###\s*(Workload slug|Description\b|Context\b)/;
+const CONTRACT_SECTION_RE = /^[ \t]*###[ \t]+(?:Workload slug|Description(?:[ \t]*\(optional\))?|Context)[ \t]*$/;
 
 async function rewriteWorkloadDescription(
   gh: Octokit,
@@ -876,6 +945,43 @@ async function rewriteWorkloadDescription(
   return [...head, '', description, ...(tail.length > 0 ? ['', ...tail] : [])].join('\n');
 }
 
+/** The `### Context` section heading — the one contract section both writers emit.
+ *  The whole line, nothing after the word: `### Context and constraints` typed into
+ *  the form's description is the operator's heading, not this section, and
+ *  matching it would rewrite part of the description and leave the real section
+ *  standing as a duplicate (PR #185 review). */
+const CONTEXT_HEADING_RE = /^[ \t]*###[ \t]+Context[ \t]*$/;
+
+/**
+ * The new issue body for a context edit: the `### Context` section replaced with
+ * the new designation, everything else verbatim — the header line is never
+ * touched, the description prose and the issue form's other sections are kept.
+ * The section runs from its heading to the NEXT HEADING OF ANY KIND or the end of
+ * the body — the intake parser's boundary (`CONTEXT_SECTION_RE` in
+ * `intake-normalize.ts` stops at the next `###`). This is deliberately NOT the
+ * description rewrite's contract-only boundary: a description is free prose the
+ * operator may head as they like, whereas this section holds validated paths and
+ * nothing else, so any heading after it is a section of its own — an operator's
+ * `### Notes` appended after Context must survive a context edit (PR #185
+ * review). A body with no section yet gets one appended:
+ * both writers put `### Context` last and the issue form renders it as its last
+ * field, so the end of the body is its place.
+ */
+async function rewriteWorkloadContext(gh: Octokit, repo: RepoRef, issueNumber: number, paths: string[]): Promise<string> {
+  const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+  const lines = (issue.body ?? '').split('\n');
+  const section = ['### Context', '', ...paths];
+  const start = lines.findIndex((line) => CONTEXT_HEADING_RE.test(line));
+  if (start === -1) {
+    return `${lines.join('\n').replace(/\s+$/, '')}\n\n${section.join('\n')}`;
+  }
+  const end = lines.findIndex((line, i) => i > start && HEADING_LINE_RE.test(line));
+  const before = lines.slice(0, start);
+  while (before.length > 0 && before[before.length - 1]!.trim() === '') before.pop();
+  const after = end === -1 ? [] : lines.slice(end);
+  return [...before, '', ...section, ...(after.length > 0 ? ['', ...after] : [])].join('\n');
+}
+
 /** The `edited` event's reason for the metadata route. When the operator
  *  reclassified an ambiguous edit, the reason carries the OVERRIDE — who
  *  decided this needed no re-plan, and that a decision was made at all — since
@@ -900,15 +1006,19 @@ function scopeEditReason(
   proposed?: string,
   /** the break-level correction now blocking approval of the re-opened plan (GHI #73 A1) */
   correctionIssue?: number | null,
+  /** field `context` only: the designation now written to the issue's `### Context` (FR-053) */
+  appliedContext?: string[],
 ): string {
   const head =
     classification === 'ambiguous'
       ? `edit of "${field}" with an AMBIGUOUS classification, defaulted to the re-plan path (FR-036): ${summary}`
       : `scope- or intent-affecting edit of "${field}" (FR-036): ${summary}`;
   const proposedClause =
-    proposed !== undefined && proposed.trim().length > 0
-      ? `; the operator's proposed new value, for the revision to carry: ${proposed}`
-      : '';
+    appliedContext !== undefined
+      ? `; the workload issue's \`### Context\` section now designates ${appliedContext.map((p) => `\`${p}\``).join(', ')} — the material the re-planning agent reads before it plans (FR-053); it reaches a plan only through the new version's approval`
+      : proposed !== undefined && proposed.trim().length > 0
+        ? `; the operator's proposed new value, for the revision to carry: ${proposed}`
+        : '';
   const outcome =
     replan === 'reopened' && reopened
       ? `re-opened as ${reopened.planRef} for review at Andon #${reopened.andonIssue} (FR-008) — the previous version stays the official one until a fresh approval freezes this one`
