@@ -39,7 +39,7 @@ Treat every numbered statement in this document as an implementation requirement
 - **REQ-003:** The agent MUST NOT tell an operator to create, edit, approve, inspect, or delete an AWS resource in an AWS console unless the operation is explicitly identified in Section 4 as an unavoidable automation boundary.
 - **REQ-004:** The agent MUST make every AWS create/update operation idempotent by reading current state before issuing a mutation.
 - **REQ-005:** The agent MUST make every verification test executable by a non-interactive agent using CLI or API output and a nonzero exit code on failure.
-- **REQ-006:** The agent MUST pin LZA to tag `v1.16.1` and commit `8b43dc6e347b5fc1c477940c7f71ea595fbf19ab` and fail if the tag resolves elsewhere.
+- **REQ-006:** The agent MUST pin LZA to tag `v1.16.1` and commit `8b43dc6e347b5fc1c477940c7f71ea595fbf19ab` and fail if the tag resolves elsewhere. The pin is recorded exactly once, in `lza.lock` (Section 5.1); every script and workflow reads it from there. The literals in this document are the values the lock holds today, not a second place to maintain them.
 - **REQ-007:** The agent MUST pin AWS Control Tower landing-zone version `4.0`; it MUST NOT silently adopt a later version merely because one is available.
 - **REQ-008:** The agent MUST pin every third-party GitHub Action to a full 40-character commit SHA. Version tags alone are insufficient.
 - **REQ-009:** The agent MUST NOT create or store a GitHub personal access token in AWS Secrets Manager for LZA source retrieval.
@@ -111,8 +111,20 @@ touches one is refused at delivery, whatever the plan declared.
   needs a repository write scope is outside what an agent may deliver here and MUST be reported
   rather than attempted.
 - **REQ-047:** `config/`, `control-tower/`, `deployment/`, `deploy/`, `infra/`, `policies/`,
-  `tests/`, `build/`, `vendor/`, `lza.lock`, and `Makefile` are unreserved and unchanged by these
-  constraints.
+  `tests/`, `build/`, `vendor/`, and the root files `lza.lock`, `Makefile`, `README.md`,
+  `CODEOWNERS`, `.gitignore`, `.editorconfig`, and `.yamllint.yml` are unreserved and unchanged by
+  these constraints. *(Amended 2026-09-03: the root files the Section 5 layout delivers were missing
+  from this list.)* `CODEOWNERS` MUST live at the repository root — `.github/CODEOWNERS` is a
+  reserved path and would be refused.
+- **REQ-048:** *(Added 2026-09-03.)* Every plan step declares the path globs its deliverable may
+  touch, and the deliverable gate refuses any path outside them. A directory glob does not cover a
+  file at the repository root: `config/**` says nothing about `lza.lock`. A step that creates or
+  changes a root file MUST name it literally in its scope. The step that delivers the Section 5
+  repository content therefore declares at least: `lza.lock`, `Makefile`, `README.md`, `CODEOWNERS`,
+  `.gitignore`, `.editorconfig`, `.yamllint.yml`, `config/**`, `control-tower/**`, `deployment/**`,
+  `deploy/**`, `infra/**`, `policies/**`, `tests/**`, and its own workflow as
+  `.github/workflows/<workload-slug>_<NN-name>.yml`. Never `build/**` or `vendor/**`: both are
+  generated, ignored by Git, and not part of any deliverable.
 
 Two rules this oversight system already enforces coincide with rules stated above, and the agent
 satisfies both at once: every third-party action pinned to a full 40-character commit SHA
@@ -459,10 +471,51 @@ controlTowerLandingZoneVersion: "4.0"
 controlTowerOuBaselineVersion: "5.0"
 ```
 
-- **REP-010:** Workflows MUST read version values from `lza.lock`; they MUST NOT duplicate a different LZA or landing-zone version.
-- **REP-011:** The setup action MUST check out upstream into `vendor/lza`, resolve `v1.16.1^{commit}`, compare it to the locked commit, and fail before package scripts execute on mismatch.
-- **REP-012:** Use Node 22 and Yarn `1.22.22` with the upstream frozen lockfile.
+**What the lock is for.** `lza.lock` is the one hand-maintained record of which upstream Landing
+Zone Accelerator release this repository is built from and which toolchain builds it. It exists so
+that every job touching upstream code can prove, before running anything, that it holds the exact
+source a reviewer approved — and so that a version bump is one reviewed change to one file rather
+than a hunt through scripts and workflows for restated literals.
+
+**Who reads it.** Every consumer reads the lock at run time; none carries its own copy of a value:
+
+| Reader | Keys | Use |
+|---|---|---|
+| The checkout-and-verify step at the top of every workflow that vendors upstream (`01`, `06`–`09`) | `sourceRepository`, `version`, `commit` | Clone into `vendor/lza`, resolve `<version>^{commit}`, fail before any package script if it differs from `commit` |
+| `deploy/scripts/validate-config-offline.sh`, `deploy/scripts/validate-config-live.sh` | `nodeMajor`, `yarnVersion`, `partition`, `homeRegion` | Select the toolchain; pass partition and Region to the LZA validator |
+| `deploy/scripts/synth-installer.sh`, `deploy/scripts/package-lza-source.sh` | `version`, `commit`, `nodeMajor`, `yarnVersion` | Build from the locked source with the locked toolchain; name the content-addressed S3 key |
+| Manifest and baseline rendering | `controlTowerLandingZoneVersion`, `controlTowerOuBaselineVersion` | Render the landing-zone manifest and the OU baseline declaration |
+| Repository tests and the DONE checks | all | Assert the lock's content, and that upstream still resolves to the locked commit |
+| `CODEOWNERS` | the file itself | Any change requires owner review (REP-013) |
+
+**How to read it.** The lock is flat YAML with scalar values, so a script needs no YAML library.
+The shared helper in `deploy/scripts/common.sh` is the single reader; every other script sources it:
+
+```bash
+# deploy/scripts/common.sh
+lock_value() {  # lock_value <key>  — prints the scalar for <key> in lza.lock, unquoted
+  # Split at the FIRST colon only: sourceRepository's value is a URL and carries its own.
+  awk -v key="$1" 'index($0, key ":") == 1 { sub(/^[^:]*:[ \t]*/, ""); gsub(/^"|"$/, ""); print; exit }' "${ROOT_DIR}/lza.lock"
+}
+LZA_SOURCE_REPOSITORY="$(lock_value sourceRepository)"
+LZA_VERSION="$(lock_value version)"
+LZA_COMMIT="$(lock_value commit)"
+LZA_NODE_MAJOR="$(lock_value nodeMajor)"
+LZA_YARN_VERSION="$(lock_value yarnVersion)"
+LZA_PARTITION="$(lock_value partition)"
+LZA_HOME_REGION="$(lock_value homeRegion)"
+CT_LANDING_ZONE_VERSION="$(lock_value controlTowerLandingZoneVersion)"
+CT_OU_BASELINE_VERSION="$(lock_value controlTowerOuBaselineVersion)"
+```
+
+Workflows read the same way in a first step and export the values as job outputs; a workflow
+never writes a version literal into `with:` or `env:`.
+
+- **REP-010:** Workflows and scripts MUST read version values from `lza.lock` at run time; they MUST NOT restate an LZA, toolchain, or landing-zone version anywhere else. The literals that appear in this document's command samples are illustrations of the values the lock holds today and MUST be replaced by reads from the lock when implemented.
+- **REP-011:** The checkout-and-verify step MUST check out `sourceRepository` into `vendor/lza`, resolve `<version>^{commit}` for the `version` in the lock, compare it to the lock's `commit`, and fail before package scripts execute on mismatch. *(Amended 2026-09-03: previously written with the tag as a literal, which contradicted REP-010.)*
+- **REP-012:** Use the Node major and Yarn version recorded in `lza.lock` (today `22` and `1.22.22`) with the upstream frozen lockfile. *(Amended 2026-09-03, same reason.)*
 - **REP-013:** Changes to `lza.lock`, Control Tower version, controls, baselines, ownership matrix, or governed Regions MUST require CODEOWNERS review.
+- **REP-014:** *(Added 2026-09-03.)* A repository test MUST fail if any committed file other than `lza.lock` and `deployment/inputs.example.yaml` contains the LZA version string, the upstream commit, or the Yarn version as a literal. That is what makes REP-010 checkable rather than hoped for. The inputs file is the one permitted second copy — Section 3 requires its `lza.version` and `lza.commit` so the rendered inputs are self-describing — and the same test MUST assert that those two values equal the lock's, so the copy is checked rather than trusted. Generated paths (`build/`, `vendor/`, `cdk.out/`) are ignored by Git and outside the test's reach.
 
 ---
 
@@ -719,13 +772,14 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 export AWS_PAGER=''
 
-ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=deploy/scripts/common.sh
+. "${ROOT_DIR}/deploy/scripts/common.sh"   # reads lza.lock once: LZA_VERSION, LZA_COMMIT, LZA_YARN_VERSION, …
 LZA_DIR="${ROOT_DIR}/vendor/lza"
 CONFIG_DIR="${1:-${ROOT_DIR}/config}"
-EXPECTED_COMMIT='8b43dc6e347b5fc1c477940c7f71ea595fbf19ab'
 
-actual_commit="$(git -C "${LZA_DIR}" rev-parse 'v1.16.1^{commit}')"
-test "${actual_commit}" = "${EXPECTED_COMMIT}"
+actual_commit="$(git -C "${LZA_DIR}" rev-parse "${LZA_VERSION}^{commit}")"
+test "${actual_commit}" = "${LZA_COMMIT}"
 
 for file in accounts global iam network organization security; do
   test -s "${CONFIG_DIR}/${file}-config.yaml"
@@ -738,13 +792,17 @@ if grep -RInE 'REPLACE_ME|<[^>]+>@example\.com|\$\{[A-Z0-9_]+\}' "${CONFIG_DIR}"
 fi
 
 cd "${LZA_DIR}/source"
+test "$(node -p 'process.versions.node.split(".")[0]')" = "${LZA_NODE_MAJOR}"
 corepack enable
-corepack prepare yarn@1.22.22 --activate
+corepack prepare "yarn@${LZA_YARN_VERSION}" --activate
 HUSKY=0 yarn install --frozen-lockfile
 yarn build
 
-PARTITION=aws-us-gov AWS_REGION=us-gov-west-1 ACCOUNT_ID="${GOVCLOUD_MANAGEMENT_ACCOUNT_ID}" ACCELERATOR_ENABLE_SINGLE_ACCOUNT_MODE=false yarn validate-config "${CONFIG_DIR}"
+PARTITION="${LZA_PARTITION}" AWS_REGION="${LZA_HOME_REGION}" ACCOUNT_ID="${GOVCLOUD_MANAGEMENT_ACCOUNT_ID}" ACCELERATOR_ENABLE_SINGLE_ACCOUNT_MODE=false yarn validate-config "${CONFIG_DIR}"
 ```
+
+Every value above that names a version, a commit, a partition, or a Region comes from `lza.lock`
+through `common.sh`; the script carries no literal of its own (REP-010).
 
 - **VAL-001:** Live validation MUST execute with temporary OIDC credentials that can read Organizations and STS state but cannot mutate AWS resources.
 - **VAL-002:** The exact validator MUST return zero before Control Tower or LZA deployment can use a rendered LZA configuration.
@@ -1445,8 +1503,8 @@ Official reference: <https://docs.aws.amazon.com/solutions/latest/landing-zone-a
 
 `deploy/scripts/package-lza-source.sh` MUST:
 
-- **SRC-020:** Fetch `v1.16.1` into `vendor/lza`.
-- **SRC-021:** Verify the exact commit.
+- **SRC-020:** Fetch the tag named by `version` in `lza.lock` into `vendor/lza`.
+- **SRC-021:** Verify that it resolves to the lock's `commit`; fail otherwise.
 - **SRC-022:** Generate a manifest containing every archived path and its SHA-256 digest.
 - **SRC-023:** Create the ZIP from the contents inside the repository root, not from a parent directory that would add a top-level folder.
 - **SRC-024:** Exclude `.git`, local build output, credentials, and workflow evidence.
@@ -1455,7 +1513,8 @@ Official reference: <https://docs.aws.amazon.com/solutions/latest/landing-zone-a
 - **SRC-027:** Upload to an immutable content-addressed key, for example:
 
 ```text
-release/v1.16.1/8b43dc6e347b5fc1c477940c7f71ea595fbf19ab/<ZIP_SHA256>.zip
+release/<version>/<commit>/<ZIP_SHA256>.zip      # version and commit read from lza.lock
+# today: release/v1.16.1/8b43dc6e347b5fc1c477940c7f71ea595fbf19ab/<ZIP_SHA256>.zip
 ```
 
 - **SRC-028:** Capture the S3 object version ID and ETag.
@@ -1470,9 +1529,11 @@ release/v1.16.1/8b43dc6e347b5fc1c477940c7f71ea595fbf19ab/<ZIP_SHA256>.zip
 Required command shape:
 
 ```bash
+. deploy/scripts/common.sh                       # LZA_YARN_VERSION, LZA_NODE_MAJOR from lza.lock
 cd vendor/lza/source
+test "$(node -p 'process.versions.node.split(".")[0]')" = "${LZA_NODE_MAJOR}"
 corepack enable
-corepack prepare yarn@1.22.22 --activate
+corepack prepare "yarn@${LZA_YARN_VERSION}" --activate
 HUSKY=0 yarn install --frozen-lockfile
 yarn build
 
@@ -1722,8 +1783,8 @@ The platform is **done** only when every applicable check below passes in `09-de
 
 ### 22.1 Repository and provenance
 
-- **DONE-001:** `lza.lock` contains LZA `v1.16.1`, exact commit, Node/Yarn versions, and Control Tower version `4.0`.
-- **DONE-002:** The upstream LZA tag resolves to the locked commit.
+- **DONE-001:** `lza.lock` contains LZA `v1.16.1`, exact commit, Node/Yarn versions, and Control Tower version `4.0`, and no other file restates any of them (REP-014).
+- **DONE-002:** The upstream LZA tag named in `lza.lock` resolves to the locked commit.
 - **DONE-003:** All required files in Section 5 exist.
 - **DONE-004:** Exactly six LZA configuration files exist and no customization file exists.
 - **DONE-005:** Control Tower manifest, baseline/control files, ownership matrix, and evidence validate against repository schemas.
