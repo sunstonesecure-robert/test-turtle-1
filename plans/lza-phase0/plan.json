@@ -1,0 +1,201 @@
+{
+  "feature": "lza-phase0",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "33883688743",
+  "andon_issue": 69,
+  "steps": [
+    {
+      "id": "step-lock-and-reader",
+      "title": "Deliver the provenance lock and its single reader",
+      "intent": "Establish lza.lock at the repository root as the one hand-maintained record of the upstream LZA release and toolchain, plus deploy/scripts/common.sh as the single sourced reader that exposes each key as a shell variable, and CODEOWNERS requiring reviewer approval for the lock and desired-state files. Every downstream script and the workflow read versions only from the lock.",
+      "acceptance": "lza.lock contains exactly the ten flat keys with the Section 5.1 values; sourcing deploy/scripts/common.sh from the repo root exports LZA_VERSION=v1.16.1, LZA_COMMIT=8b43dc6e347b5fc1c477940c7f71ea595fbf19ab, CT_LANDING_ZONE_VERSION=4.0, CT_OU_BASELINE_VERSION=5.0; CODEOWNERS assigns a required reviewer to /lza.lock.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "CODEOWNERS reviewer @sunstonesecure-robert for /lza.lock, /config/**, /control-tower/**, /deployment/schemas/** — carried verbatim from the inputs/lza-phase0 prototype, pending q-codeowners.",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "lza.lock",
+        "deploy/scripts/common.sh",
+        "CODEOWNERS"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-desired-state",
+      "title": "Deliver the LZA and Control Tower desired-state files and schemas",
+      "intent": "Deliver the six mandatory LZA config files (config/**), the Control Tower declarations (control-tower/**: landing-zone-manifest.template.json, baselines.yaml, controls.yaml, control-exceptions.yaml, ownership-matrix.yaml), and the deployment materials (deployment/**: inputs.example.yaml, the example state files, and deployment/schemas/**). Every value is rendered to agree with lza.lock; the one permitted second copy of version/commit is the lza block of deployment/inputs.example.yaml.",
+      "acceptance": "config/ holds exactly the six mandatory files and no customizations-config.yaml; global-config.yaml Control Tower version is \"4.0\" and baselines.yaml version is \"5.0\"; the manifest template is valid JSON; deployment/inputs.example.yaml lza.version and lza.commit equal the lock's; all desired-state files validate against deployment/schemas/**.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "loggingRetentionDays=365 and accessLogRetentionDays=365 (and the mirrored manifest/global-config retentionDays) carried from spec Section 3 example, pending q-retention (IN-009 requires these be approved as cost/compliance decisions, not silently inherited).",
+      "high_stakes": true,
+      "authority": "legal",
+      "depends_on": [
+        "step-lock-and-reader"
+      ],
+      "scope": [
+        "config/**",
+        "control-tower/**",
+        "deployment/**"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-offline-gate",
+      "title": "Deliver the offline validation gate, tests, and workflow at repo-root paths",
+      "intent": "Deliver deploy/scripts/validate-config-offline.sh (the eight credential-free checks), the Bats suite under tests/*.bats (config, consistency, control-tower-manifest, controls, evidence, ownership, shell), the workflow .github/workflows/lza-phase0_validate-offline.yml with its prototype inputs/lza-phase0/ path prefixes rewritten to repo-root (vendor/lza, build/, root trigger paths), and the supporting root files Makefile, README.md, .gitignore, .editorconfig, .yamllint.yml. The workflow runs read-only with contents: read and clones the pinned upstream into the git-ignored vendor/lza.",
+      "acceptance": "The workflow file exists with contents: read permissions and no inputs/lza-phase0/ path prefix; deploy/scripts/validate-config-offline.sh is executable and sources common.sh referencing vendor/lza; the no-literal-leak test finds the LZA version, commit, and Yarn literals in no delivered Phase-0 file other than lza.lock and deployment/inputs.example.yaml; the validate job runs all eight offline checks green in CI on the merged commit.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [
+        "step-lock-and-reader",
+        "step-desired-state"
+      ],
+      "scope": [
+        "deploy/scripts/validate-config-offline.sh",
+        "tests/**",
+        ".github/workflows/lza-phase0_*.yml",
+        "Makefile",
+        "README.md",
+        ".gitignore",
+        ".editorconfig",
+        ".yamllint.yml"
+      ],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-lock-shape",
+      "kind": "exact-copy",
+      "check": "lza.lock contains exactly ten flat keys and the pinned literals: version v1.16.1, commit 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab, controlTowerLandingZoneVersion \"4.0\", controlTowerOuBaselineVersion \"5.0\".",
+      "run": "test \"$(grep -cE '^[A-Za-z][A-Za-z0-9]*:' lza.lock)\" -eq 10 && grep -qxF 'version: v1.16.1' lza.lock && grep -qxF 'commit: 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab' lza.lock && grep -qF 'controlTowerLandingZoneVersion: \"4.0\"' lza.lock && grep -qF 'controlTowerOuBaselineVersion: \"5.0\"' lza.lock",
+      "maps_to": [
+        "step-lock-and-reader"
+      ]
+    },
+    {
+      "id": "vt-reader-exports",
+      "kind": "expected-output",
+      "check": "Sourcing deploy/scripts/common.sh from the repo root exports LZA_VERSION, LZA_COMMIT, CT_LANDING_ZONE_VERSION, and CT_OU_BASELINE_VERSION with the lock's values.",
+      "run": ". deploy/scripts/common.sh && test \"$LZA_VERSION\" = v1.16.1 && test \"$LZA_COMMIT\" = 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab && test \"$CT_LANDING_ZONE_VERSION\" = 4.0 && test \"$CT_OU_BASELINE_VERSION\" = 5.0",
+      "maps_to": [
+        "step-lock-and-reader"
+      ]
+    },
+    {
+      "id": "vt-codeowners-lock",
+      "kind": "exact-copy",
+      "check": "CODEOWNERS assigns at least one required reviewer to /lza.lock.",
+      "run": "grep -qE '^/lza\\.lock[[:space:]]+@' CODEOWNERS",
+      "maps_to": [
+        "step-lock-and-reader"
+      ]
+    },
+    {
+      "id": "vt-config-six-files",
+      "kind": "expected-output",
+      "check": "config/ contains exactly the six mandatory non-empty LZA files and no customizations-config.yaml.",
+      "run": "for f in accounts global iam network organization security; do test -s config/$f-config.yaml; done && test ! -e config/customizations-config.yaml",
+      "maps_to": [
+        "step-desired-state"
+      ]
+    },
+    {
+      "id": "vt-ct-version-consistency",
+      "kind": "expected-output",
+      "check": "config/global-config.yaml declares Control Tower landing-zone version \"4.0\" and control-tower/baselines.yaml declares baseline version \"5.0\", matching the lock.",
+      "run": "grep -qE 'version:[[:space:]]*\"4\\.0\"' config/global-config.yaml && grep -qE 'version:[[:space:]]*\"5\\.0\"' control-tower/baselines.yaml",
+      "maps_to": [
+        "step-desired-state"
+      ]
+    },
+    {
+      "id": "vt-manifest-json-valid",
+      "kind": "expected-output",
+      "check": "control-tower/landing-zone-manifest.template.json parses as valid JSON.",
+      "run": "python3 -c \"import json; json.load(open('control-tower/landing-zone-manifest.template.json'))\"",
+      "maps_to": [
+        "step-desired-state"
+      ]
+    },
+    {
+      "id": "vt-inputs-lock-match",
+      "kind": "exact-copy",
+      "check": "deployment/inputs.example.yaml lza.version and lza.commit equal the lock's v1.16.1 and 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab.",
+      "run": "grep -qE 'version:[[:space:]]*v1\\.16\\.1' deployment/inputs.example.yaml && grep -qF '8b43dc6e347b5fc1c477940c7f71ea595fbf19ab' deployment/inputs.example.yaml",
+      "maps_to": [
+        "step-desired-state"
+      ]
+    },
+    {
+      "id": "vt-workflow-permissions",
+      "kind": "exact-copy",
+      "check": "The delivered workflow .github/workflows/lza-phase0_validate-offline.yml exists and declares contents: read permissions.",
+      "run": "test -f .github/workflows/lza-phase0_validate-offline.yml && grep -qE 'contents:[[:space:]]*read' .github/workflows/lza-phase0_validate-offline.yml",
+      "maps_to": [
+        "step-offline-gate"
+      ]
+    },
+    {
+      "id": "vt-workflow-root-paths",
+      "kind": "boundary-behavior",
+      "check": "The delivered workflow references repo-root paths and carries no inputs/lza-phase0/ prototype path prefix.",
+      "run": "! grep -q 'inputs/lza-phase0' .github/workflows/lza-phase0_validate-offline.yml",
+      "maps_to": [
+        "step-offline-gate"
+      ]
+    },
+    {
+      "id": "vt-validate-script",
+      "kind": "expected-output",
+      "check": "deploy/scripts/validate-config-offline.sh is executable, sources common.sh, and references the vendor/lza checkout.",
+      "run": "test -x deploy/scripts/validate-config-offline.sh && grep -q 'common.sh' deploy/scripts/validate-config-offline.sh && grep -q 'vendor/lza' deploy/scripts/validate-config-offline.sh",
+      "maps_to": [
+        "step-offline-gate"
+      ]
+    },
+    {
+      "id": "vt-no-literal-leak",
+      "kind": "boundary-behavior",
+      "check": "No delivered Phase-0 file other than lza.lock and deployment/inputs.example.yaml contains the LZA version, upstream commit, or Yarn version as a literal (REP-014).",
+      "run": "test -z \"$(git grep -I -l -e v1.16.1 -e 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab -e 1.22.22 -- config control-tower deploy tests deployment .github/workflows/lza-phase0_validate-offline.yml ':!lza.lock' ':!deployment/inputs.example.yaml')\"",
+      "maps_to": [
+        "step-offline-gate"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-source-pin-mismatch",
+      "description": "If the cloned upstream resolves v1.16.1^{commit} to any commit other than the lock's, the workflow's checkout-and-verify step (and check 1) fails before any package script runs.",
+      "step_id": "step-offline-gate"
+    },
+    {
+      "id": "bc-literal-leak",
+      "description": "If any delivered Phase-0 file other than lza.lock and deployment/inputs.example.yaml contains the LZA version, commit, or Yarn literal, the consistency test fails the gate (REP-014).",
+      "step_id": "step-offline-gate"
+    },
+    {
+      "id": "bc-placeholder-allowlist",
+      "description": "Only the exact declared placeholders are permitted (REPLACE_ME twice in inputs.example.yaml and the three ${...} tokens in the manifest template with their declared counts); any other placeholder token fails check 5.",
+      "step_id": "step-desired-state"
+    },
+    {
+      "id": "bc-manifest-no-org-structure",
+      "description": "The version-4.0 landing-zone manifest template carries no organizationStructure block, since landing-zone version 4.0 removed it (CTCFG-007).",
+      "step_id": "step-desired-state"
+    },
+    {
+      "id": "bc-tests-coexist",
+      "description": "The delivered tests/*.bats files are added alongside the pre-existing oversight vitest suite under tests/ (fixtures/, integration/, mocks/, unit/) without overwriting it; the offline gate and `make test-phase0` run only tests/*.bats.",
+      "step_id": "step-offline-gate"
+    }
+  ]
+}
