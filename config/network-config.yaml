@@ -1,0 +1,15 @@
+defaultVpc:
+  delete: false
+  excludeAccounts: []
+transitGateways: []
+transitGatewayPeering: []
+transitGatewayConnects: []
+directConnectGateways: []
+customerGateways: []
+endpointPolicies: []
+vpcs: []
+vpcTemplates: []
+vpcPeering: []
+prefixLists: []
+dhcpOptions: []
+certificates: []

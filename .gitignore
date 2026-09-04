@@ -222,3 +222,20 @@ node_modules/
 .next/
 *.tsbuildinfo
 dashboard/.env.local
+
+# AWS and Phase 0 generated content
+.aws/
+credentials
+*.credentials
+*.pem
+*.key
+cdk.out/
+vendor/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+rendered-manifest*.json
+deployment-evidence.json
+*.token
+token.json

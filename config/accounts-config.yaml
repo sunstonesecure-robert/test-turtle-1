@@ -1,0 +1,14 @@
+mandatoryAccounts:
+  - name: Management
+    description: GovCloud organization management account
+    email: management+govcloud@example.com
+    organizationalUnit: Root
+  - name: LogArchive
+    description: Control Tower centralized log archive account
+    email: logarchive+govcloud@example.com
+    organizationalUnit: Security
+  - name: Audit
+    description: Control Tower security audit account
+    email: audit+govcloud@example.com
+    organizationalUnit: Security
+workloadAccounts: []
