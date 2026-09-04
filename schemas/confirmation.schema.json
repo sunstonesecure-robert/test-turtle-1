@@ -21,7 +21,7 @@
           "description": "The workload slug this ledger belongs to; must equal the <workload> directory in the path. Step ids are unique only WITHIN a plan, so without this two workloads that both declare step-billing-cycle would share one record and one authority's answer would unblock the other's build (GHI #95)."
         },
         "authority": {
-          "enum": ["customer", "clinical", "legal"],
+          "enum": ["customer", "clinical", "legal", "security-regulatory"],
           "description": "Must equal the step's authority (FR-023 names the route, FR-024 makes it binding). Extensible in future schema versions. A re-route is a different question, not the same one, so it is compared before the digest — see confirmationVerdict."
         },
         "decisions": {
@@ -80,7 +80,7 @@
         "step_id": { "type": "string", "pattern": "^step-[a-z0-9-]+$" },
         "workload": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
         "step_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-        "authority": { "enum": ["customer", "clinical", "legal"] },
+        "authority": { "enum": ["customer", "clinical", "legal", "security-regulatory"] },
         "confirmer": { "$ref": "#/$defs/Attribution" },
         "confirmed_at": { "type": "string", "format": "date-time" },
         "scope": { "type": "string", "minLength": 1, "pattern": "\\S" }

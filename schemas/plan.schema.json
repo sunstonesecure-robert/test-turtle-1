@@ -48,8 +48,8 @@
         },
         "high_stakes": { "type": "boolean" },
         "authority": {
-          "enum": ["customer", "clinical", "legal", null],
-          "description": "Required when high_stakes=true (FR-023). Extensible in future schema versions."
+          "enum": ["customer", "clinical", "legal", "security-regulatory", null],
+          "description": "Required when high_stakes=true (FR-023). Extensible in future schema versions; security-regulatory added 2026-09-04 (operator ask) for information-security and regulatory-compliance sign-off."
         },
         "depends_on": {
           "type": "array",
@@ -74,7 +74,7 @@
         },
         {
           "if": { "properties": { "high_stakes": { "const": true } } },
-          "then": { "properties": { "authority": { "enum": ["customer", "clinical", "legal"] } }, "required": ["authority"] }
+          "then": { "properties": { "authority": { "enum": ["customer", "clinical", "legal", "security-regulatory"] } }, "required": ["authority"] }
         }
       ]
     },

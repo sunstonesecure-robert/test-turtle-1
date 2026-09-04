@@ -32,8 +32,22 @@ export const WORKLOAD_LABELS = [
   'workload:canceled',
   'workload:archived',
 ] as const;
-export const HIGH_STAKES_LABELS = ['high-stakes:customer', 'high-stakes:clinical', 'high-stakes:legal'] as const;
-export const CONFIRMED_LABELS = ['confirmed:customer', 'confirmed:clinical', 'confirmed:legal'] as const;
+// One label per authority in the V1 enum (schemas/plan.ts, schemas/confirmation.ts,
+// high-stakes.tsx AUTHORITY). `security-regulatory` joined 2026-09-04 (operator ask): an
+// information-security or regulatory-compliance officer's sign-off, wired exactly like the
+// other three — flag → label → refusal at build until confirm-record lights `confirmed:*`.
+export const HIGH_STAKES_LABELS = [
+  'high-stakes:customer',
+  'high-stakes:clinical',
+  'high-stakes:legal',
+  'high-stakes:security-regulatory',
+] as const;
+export const CONFIRMED_LABELS = [
+  'confirmed:customer',
+  'confirmed:clinical',
+  'confirmed:legal',
+  'confirmed:security-regulatory',
+] as const;
 // The cross-workload conflict flag (FR-047). Named on its own — not just spelled inside
 // the taxonomy array — because xlinks.ts PROPAGATES it and portfolio.ts READS IT BACK to
 // tell the operator a conflict is unresolved. Those two must never disagree with the

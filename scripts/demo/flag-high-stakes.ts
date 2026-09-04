@@ -37,7 +37,7 @@ import { proposeDemoPlan } from './propose-plan';
  * workflow that act 2's commit triggers — the demo never applies it itself.
  */
 
-const AUTHORITIES = ['customer', 'clinical', 'legal'] as const;
+const AUTHORITIES = ['customer', 'clinical', 'legal', 'security-regulatory'] as const;
 export type Authority = (typeof AUTHORITIES)[number];
 
 export interface HighStakesOptions {
@@ -336,7 +336,7 @@ if (isMain) {
     (contact !== undefined && contact.trim().length === 0);
   if (invalid) {
     console.error(
-      'usage: flag-high-stakes [--slug <kebab-case-slug>] [--step <step-id>] [--authority customer|clinical|legal]\n' +
+      'usage: flag-high-stakes [--slug <kebab-case-slug>] [--step <step-id>] [--authority customer|clinical|legal|security-regulatory]\n' +
         '                        [--confirmer "<name, role, org>"] [--contact <email-or-url>]\n' +
         '  defaults: --slug demo --step step-hello --authority customer',
     );

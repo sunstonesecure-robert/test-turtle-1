@@ -30,7 +30,7 @@ import { z } from 'zod';
  *  - step_id reuses plan.schema.json's step id pattern — the record is looked up BY the
  *    step id (confirmations/<workload>/<step-id>.json), so two patterns drifting apart would let a
  *    plan accept a step id that can carry no confirmation
- *  - authority is the V1 enum (customer|clinical|legal), extensible in a future schema
+ *  - authority is the V1 enum (customer|clinical|legal|security-regulatory), extensible in a future schema
  *    version (data-model.md); until it is, an unlisted authority names nobody qualified
  *  - `by` requires BOTH halves: a name nobody can reach cannot be corroborated
  *    after the build, a contact with no name attributes the decision to no one
@@ -111,7 +111,7 @@ export const Ledger = z
   .object({
     step_id: stepId,
     workload: workloadSlug,
-    authority: z.enum(['customer', 'clinical', 'legal']),
+    authority: z.enum(['customer', 'clinical', 'legal', 'security-regulatory']),
     decisions: z.array(Decision).min(1),
   })
   .strict()
@@ -168,7 +168,7 @@ export const Legacy = z
     step_id: stepId,
     workload: workloadSlug,
     step_digest: stepDigest,
-    authority: z.enum(['customer', 'clinical', 'legal']),
+    authority: z.enum(['customer', 'clinical', 'legal', 'security-regulatory']),
     confirmer: z
       .object({ name: attributed('confirmer.name'), contact: attributed('confirmer.contact') })
       .strict(),
@@ -205,7 +205,7 @@ export type Attribution = z.infer<typeof Attribution>;
 export type ConfirmationLedger = {
   step_id: string;
   workload: string;
-  authority: 'customer' | 'clinical' | 'legal';
+  authority: 'customer' | 'clinical' | 'legal' | 'security-regulatory';
   decisions: Decision[];
 };
 export type ConfirmationRecord = ConfirmationLedger;

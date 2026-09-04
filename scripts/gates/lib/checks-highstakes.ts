@@ -2,7 +2,7 @@ import type { GateResult } from './runner';
 
 /**
  * High-stakes gate G6 (T107, FR-023): every step flagged `high_stakes` NAMES the
- * authority that will confirm it — customer, clinical or legal. Without a named
+ * authority that will confirm it — customer, clinical, legal or security-regulatory. Without a named
  * route there is nobody to send the item to, so the confirmation B5 waits for can
  * never arrive.
  *
@@ -17,7 +17,7 @@ import type { GateResult } from './runner';
  * the operator to fear the flag, which is the one behaviour FR-023 cannot afford.
  */
 
-const AUTHORITIES = new Set(['customer', 'clinical', 'legal']);
+const AUTHORITIES = new Set(['customer', 'clinical', 'legal', 'security-regulatory']);
 
 interface RawStepish {
   id?: unknown;
@@ -46,6 +46,6 @@ export function checkG6HighStakesAuthority(rawPlan: unknown): GateResult {
     id: 'G6',
     status: 'fail',
     requirement: 'FR-023',
-    detail: `high-stakes step(s) with no confirming authority named: ${unrouted.join(', ')} (expected one of customer, clinical, legal)`,
+    detail: `high-stakes step(s) with no confirming authority named: ${unrouted.join(', ')} (expected one of ${[...AUTHORITIES].join(', ')})`,
   };
 }

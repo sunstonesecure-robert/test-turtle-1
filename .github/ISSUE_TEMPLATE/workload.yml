@@ -1,5 +1,5 @@
 name: Workload intake
-description: Introduce a new workload (a title alone is valid — FR-031). Prefer the dashboard's Introduce action, which validates readiness and slug uniqueness first.
+description: Introduce a new workload (a title alone is valid). Prefer the dashboard's Introduce action, which validates readiness and slug uniqueness first.
 title: "[workload] "
 labels: ["workload:proposed"]
 body:
@@ -15,14 +15,15 @@ body:
     id: description
     attributes:
       label: Description (optional)
-      description: One-line titles are fine while the workload is proposed; elaborate just-in-time (FR-016).
+      description: What you want done and why, in a few sentences — the outcome, who it is for, and anything that must stay as it is. The planning agent reads this before proposing a plan, so be concrete about the result and leave the how to the plan. A title alone is fine while the workload is proposed; you can fill this in later. Prose only, no headings.
+      placeholder: Send each customer their monthly invoice as a PDF attached to the email, instead of a link to the portal. Existing invoice numbering must not change.
     validations:
       required: false
   - type: textarea
     id: context
     attributes:
       label: Context
-      description: Optional (FR-053). Repo paths the planning agent must read before planning — one path per line, each inside runbooks/, useful-context/, inputs/, or specs/ (a folder means everything under it). Paths outside those folders or that don't exist are refused at intake. Leave empty to let the agent consult only the folders' README indexes.
+      description: Optional. Files or folders in this repository the planning agent must read before planning — one path per line, each inside runbooks/, useful-context/, inputs/, or specs/ (a folder means everything under it). Paths outside those folders or that don't exist are refused at intake. Leave empty to let the agent consult only the folders' README indexes.
       placeholder: |
         runbooks/domain-expert/billing.md
         useful-context/glossary.md

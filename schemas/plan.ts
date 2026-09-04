@@ -4,7 +4,7 @@ import { z } from 'zod';
  * Zod mirror of schemas/plan.schema.json (the contract copy is the source of truth).
  * Conditional rules mirrored here:
  *  - stand_in is required (non-empty) when evidence_tag === "assumption"
- *  - authority is required (customer|clinical|legal) when high_stakes === true
+ *  - authority is required (customer|clinical|legal|security-regulatory) when high_stakes === true
  */
 
 const stepId = z.string().regex(/^step-[a-z0-9-]+$/);
@@ -19,7 +19,7 @@ export const PlanStep = z
     evidence_tag: z.enum(['verified', 'assumption']),
     stand_in: z.string().nullable().optional(),
     high_stakes: z.boolean(),
-    authority: z.enum(['customer', 'clinical', 'legal']).nullable().optional(),
+    authority: z.enum(['customer', 'clinical', 'legal', 'security-regulatory']).nullable().optional(),
     depends_on: z.array(stepId),
     /**
      * The path globs this step's deliverable may touch (T223, FR-061 / FR-068).
