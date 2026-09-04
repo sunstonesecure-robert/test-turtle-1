@@ -131,14 +131,50 @@ satisfies both at once: every third-party action pinned to a full 40-character c
 (**REQ-008**), and every verification test executable with a nonzero exit status on failure
 (**REQ-005**).
 
+### 1.2 Phase 0 — the credential-free tracer
+
+*(Added 2026-09-02.)* The offline repository validation gate of Section 7.1 is the one deliverable
+in this document that the specification itself defines as runnable with no AWS credential. It is
+therefore delivered **first, as its own phase — Phase 0 — and its own oversight workload**, before
+any phase that touches an account. Phase 0 exercises the governed pipeline end to end (plan, review,
+build, delivery, verification, completion, dispatch) with nothing to provision and nothing that can
+mutate an account. Section 2.1 places it in the operating model; Section 26 states its gate.
+*(Numbered REQ-049…REQ-051: REQ-048 was taken on `main` on 2026-09-03 by the scope-declaration rule in
+Section 1.1 while this amendment was in review, and committed identifiers are never renumbered.)*
+
+- **REQ-049:** Phase 0 MUST be deliverable and runnable with no AWS credential, no OIDC role, no
+  GitHub Environment and no deployment approval. Its workflow MUST request `contents: read` only,
+  MUST NOT request `id-token: write`, and MUST NOT name the `subject-deploy` environment.
+- **REQ-050:** Phase 0 delivers the offline gate as its own workflow,
+  **`<workload-slug>_validate-offline.yml`** — for the tracer workload `lza-phase0`, the file is
+  `.github/workflows/lza-phase0_validate-offline.yml`. It runs on `pull_request` and on `push` to
+  `main` (with a `paths:` filter over the content it validates) and by `workflow_dispatch` with the
+  inputs `plan_ref` and `commit`; it checks out the exact event SHA, checks out and verifies the
+  pinned LZA source into `vendor/lza`, runs `deploy/scripts/validate-config-offline.sh`, and uploads
+  the validation evidence and digests. Every check it runs is one of the eight in Section 7.1, each
+  expressed as a command with a nonzero exit on failure (REQ-005) so that it can stand as a
+  verification target.
+- **REQ-051:** Phase 0 MUST NOT create, read or mutate any AWS resource; MUST NOT deliver the
+  Phase 1–4 workflows, `infra/`, or `policies/` content; and MUST NOT run or report the exact live
+  LZA validator (Section 7.1's last paragraph). The live-validation step of `01-pr-validate.yml`
+  (Section 21.2, step 5) is NOT part of Phase 0: `01-pr-validate.yml` is delivered with Phase 1 and
+  MUST invoke the same `deploy/scripts/validate-config-offline.sh` rather than duplicate its checks.
+  Anything that needs a credential belongs to a later phase and a later workload.
+
 ---
 
 ## 2. Target architecture and four-phase operating model
 
 ### 2.1 Four phases
 
-The deployment MUST be implemented as these four ordered phases:
+The deployment MUST be implemented as a credential-free Phase 0 followed by these four ordered
+AWS phases:
 
+0. **Phase 0 — Offline repository validation.** Deliver the repository content that every later
+   phase validates — `lza.lock`, the six mandatory LZA files, the Control Tower declarations, the
+   repository schemas, `deploy/scripts/validate-config-offline.sh` with its Bats tests — and the
+   workflow `<workload-slug>_validate-offline.yml` that runs the Section 7.1 gate with no AWS
+   credential present (Section 1.2, REQ-049…REQ-051). Nothing in this phase touches an account.
 1. **Phase 1 — Commercial bootstrap and GovCloud account-pair vending.** Establish the commercial Organization and commercial GitHub OIDC role, complete the sole first-pair signup boundary when required, discover the paired GovCloud management account, and create the `LogArchive` and `Audit` commercial/GovCloud account pairs by API.
 2. **Phase 2 — GovCloud Organization and bootstrap access.** Establish GovCloud GitHub OIDC roles, create the GovCloud Organization, create `Security` and `Infrastructure` OUs, invite and accept the two standalone GovCloud member accounts, and place both shared accounts in `Security`.
 3. **Phase 3 — AWS Control Tower governance.** Create/verify the four Control Tower API prerequisite service roles, create the Control Tower KMS key, render and deploy landing-zone version `4.0` through APIs, enable centralized logging/Config/security roles, enable auto-enrollment, register `Infrastructure` with `AWSControlTowerBaseline` version `5.0`, enable repository-declared supported controls, and verify drift and backing artifacts.
@@ -339,6 +375,7 @@ The completed repository MUST contain at least this structure:
 .
 ├── .github/
 │   └── workflows/                       [only the <workload-slug>_ namespace; REQ-042, REQ-043]
+│       ├── <workload-slug>_validate-offline.yml   [Phase 0; REQ-050]
 │       ├── <workload-slug>_00-discover-oidc-sub.yml
 │       ├── <workload-slug>_01-pr-validate.yml
 │       ├── <workload-slug>_02-test-commercial-oidc.yml
@@ -765,6 +802,8 @@ Pinned reference semantics are demonstrated in the AWS LZA Universal Configurati
 8. Deterministic SHA-256 calculation for repository desired-state inputs.
 
 The offline gate MUST NOT falsely claim that the exact LZA validator succeeded, because an Organizations-enabled LZA validation loads account IDs through AWS Organizations.
+
+The offline gate is Phase 0's deliverable and runs from `<workload-slug>_validate-offline.yml` (Section 1.2, REQ-050; workflow specification in Section 21.9). The same script is invoked, unchanged, by `01-pr-validate.yml` step 3 and as the first step of every phase workflow — one implementation of the eight checks, never a second copy.
 
 ### 7.2 Live LZA validation
 
@@ -1697,6 +1736,8 @@ After the final desired-configuration core execution succeeds:
 
 ### 21.2 `01-pr-validate.yml`
 
+Delivered with Phase 1. Step 3 invokes the Phase 0 script (Section 21.9); step 5 is the only step that needs a credential, and it is what separates this workflow from Phase 0's.
+
 Job order:
 
 1. Check out the exact event SHA.
@@ -1708,7 +1749,7 @@ Job order:
 
 ### 21.3 `04-phase1-vend-govcloud-accounts.yml`
 
-1. Run offline validation.
+1. Run offline repository validation (`deploy/scripts/validate-config-offline.sh`, Section 7.1) — first, before any credential.
 2. Assume commercial account-vending OIDC role.
 3. Verify commercial identity/Organization.
 4. Verify active management GovCloud pair.
@@ -1718,17 +1759,18 @@ Job order:
 
 ### 21.4 `05-phase2-provision-govcloud-organization.yml`
 
-1. Validate Phase 1 evidence against live commercial mapping.
-2. Assume GovCloud foundation role.
-3. Create/verify GovCloud Organization.
-4. Create/verify Security and Infrastructure OUs.
-5. Invite/accept/place LogArchive and Audit.
-6. Verify pre-Control-Tower resource cleanliness and ownership.
-7. Produce Phase 2 evidence.
+1. Run offline repository validation (`deploy/scripts/validate-config-offline.sh`, Section 7.1) — first, before any credential. *(Added 2026-09-04; the step was missing here.)*
+2. Validate Phase 1 evidence against live commercial mapping.
+3. Assume GovCloud foundation role.
+4. Create/verify GovCloud Organization.
+5. Create/verify Security and Infrastructure OUs.
+6. Invite/accept/place LogArchive and Audit.
+7. Verify pre-Control-Tower resource cleanliness and ownership.
+8. Produce Phase 2 evidence.
 
 ### 21.5 `06-phase3-deploy-control-tower.yml`
 
-1. Validate repository and Phase 1/2 evidence.
+1. Run offline repository validation (`deploy/scripts/validate-config-offline.sh`, Section 7.1) — first, before any credential — then validate Phase 1/2 evidence.
 2. Assume GovCloud foundation role.
 3. Run Control Tower/CloudTrail/Config/Organizations preflight.
 4. Deploy/verify the four Control Tower API prerequisite service roles.
@@ -1743,8 +1785,8 @@ Job order:
 
 ### 21.6 `07-phase4-deploy-lza.yml`
 
-1. Validate Phase 3 evidence against live Control Tower state.
-2. Run offline and live LZA validation.
+1. Run offline repository validation (`deploy/scripts/validate-config-offline.sh`, Section 7.1) — first, before any credential.
+2. Validate Phase 3 evidence against live Control Tower state, then run live LZA validation (Section 7.2).
 3. Render the LZA Control Tower projection and require exact equality with live Phase 3 state.
 4. Snapshot and hash all landing-zone operations; require no operation in progress.
 5. Verify/request CodeBuild quota; stop until applied quota is at least three.
@@ -1765,7 +1807,7 @@ Job order:
 ### 21.7 `08-verify-platform.yml`
 
 - Default mode is read-only.
-- Verify all four phase gates, Control Tower drift, baselines/controls, ownership, S3 artifacts, stack health, and exact last approved pipeline executions.
+- Verify Gate 0 and all four phase gates: re-run the Section 22.8 offline checks (DONE-083…DONE-090) on the checked-out commit and assert DONE-091 against the Phase 0 workflow file (permissions `contents: read` only, no environment, no `id-token: write`), then Control Tower drift, baselines/controls, ownership, S3 artifacts, stack health, and exact last approved pipeline executions. A regression of the Phase 0 workflow or its permissions is a verification failure, not a note.
 - Scheduled failure MUST create/update a GitHub issue through GitHub API.
 - Repair operations require explicit `repair=true` and still may not delete/decommission resources.
 
@@ -1774,10 +1816,42 @@ Job order:
 This is the normal operator entry point after OIDC bootstrap.
 
 - Trigger by `workflow_dispatch` and optionally protected default-branch changes.
-- Invoke Phase 1, Phase 2, Phase 3, Phase 4, then verification in order.
+- Invoke Phase 0 (the offline gate, Section 21.9), then Phase 1, Phase 2, Phase 3, Phase 4, then verification, in order. Phase 0 failing stops the run before any credential is minted.
 - Pass phase evidence as artifacts/outputs and independently revalidate live AWS state at each boundary.
 - Do not start a later phase if an earlier gate is incomplete.
 - A config-only change may skip account/Organization mutations but MUST rerun Phase 3 read-only checks before Phase 4.
+
+### 21.9 `validate-offline.yml` — Phase 0
+
+*(Added 2026-09-02; listed last to keep the numbering above stable. Delivered first.)* The Phase 0
+workflow, `<workload-slug>_validate-offline.yml` (REQ-050).
+
+- Triggers: `push` and `pull_request`, **each** with `branches: [main]` and the **same** non-empty
+  `paths:` filter — the workflow content guard refuses either trigger without both (Guard 2,
+  CONFIGURATION_GUIDE.md), so an unfiltered `pull_request` never passes the deliverable gate. The
+  filter names every input and every supporting file the gate reads: `lza.lock`, `config/**`,
+  `control-tower/**`, `deployment/**`, `deploy/**`, `tests/**`, `.yamllint.yml`, `Makefile`, and
+  the workflow file itself (`.github/workflows/<workload-slug>_validate-offline.yml`). A change to
+  the lint configuration or the Makefile can change whether the gate passes, so it must start the
+  gate. `pull_request` types are `opened`, `synchronize`, `reopened` only. Plus `workflow_dispatch`
+  with inputs `plan_ref` and `commit` and no other required input without a default.
+- Permissions: `contents: read` and nothing else (REQ-049). No `id-token: write`, no environment,
+  no secret beyond `GITHUB_TOKEN`.
+- Job order: check out **the commit under judgment** — on `workflow_dispatch` that is
+  `inputs.commit`, because the completion hook dispatches from the default branch and passes the
+  verified merged SHA separately (`lifecycle-apply.ts` → `dispatchSubjectWorkflows`), so if `main`
+  has advanced the event SHA is a newer tip than the tree the workload delivered; on `push` and
+  `pull_request` it is the event SHA; a manual dispatch with `inputs.commit` empty falls back to the
+  event SHA and records that it did. Then check out upstream LZA into `vendor/lza` and verify that
+  the lock's `version` resolves to the lock's `commit` (REP-011, reading both from `lza.lock`); run
+  `deploy/scripts/validate-config-offline.sh`; compute the Section 7.5 offline digests **twice** as
+  DONE-090 requires; upload the validation evidence and the digests (input-set, baselines, controls,
+  ownership matrix, each LZA file and the aggregate LZA configuration), with the SHA actually checked
+  out recorded in the evidence.
+- Concurrency: a literal group beginning with the file's own name, never `cancel-in-progress`
+  (WF-003 names the production group; Phase 0 mutates nothing and uses its own).
+- It MUST exit nonzero if any of the eight Section 7.1 checks fails, and MUST NOT claim the exact
+  live LZA validator ran (REQ-051).
 
 ---
 
@@ -1930,6 +2004,37 @@ The platform is **done** only when every applicable check below passes in `09-de
 
 ---
 
+### 22.8 Phase 0 offline checks
+
+*(Added 2026-09-02.)* These are the checks Gate 0 (Section 26) is judged on. Each is one command
+with a nonzero exit on failure, run in `<workload-slug>_validate-offline.yml` on a runner holding no
+AWS credential.
+
+- **DONE-083:** The upstream LZA tag `v1.16.1` resolves to the commit in `lza.lock`, and `lza.lock`
+  matches Section 5.1 exactly (DONE-001, DONE-002 evaluated offline).
+- **DONE-084:** The Node major and Yarn version in `lza.lock` match the pinned upstream lockfile.
+- **DONE-085:** Every JSON and YAML file under `config/`, `control-tower/` and `deployment/` parses.
+- **DONE-086:** `deployment/inputs.example.yaml`, the Control Tower manifest template, baselines,
+  controls, ownership matrix and evidence examples validate against `deployment/schemas/`.
+- **DONE-087:** No unresolved placeholder token exists outside the manifest template's declared
+  placeholder set.
+- **DONE-088:** `actionlint`, `shellcheck`, `yamllint`, `cfn-lint` and every Bats test under
+  `tests/` exit zero.
+- **DONE-089:** The ownership tests reject duplicate CloudTrail, Config and control ownership
+  (`tests/ownership.bats` exits zero against `control-tower/ownership-matrix.yaml`).
+- **DONE-090:** The SHA-256 digests of the desired-state inputs are recorded in the uploaded
+  evidence and are **reproducible within the run**: the digest step executes twice, independently
+  (a second invocation of the digest script against a fresh copy of the checked-out tree in a
+  separate working directory, with a different `umask` and locale), and the two digest sets are
+  byte-identical; the evidence records both and the comparison result. *(Reworded 2026-09-04: the
+  original criterion — "identical across two runs on the same commit" — could not be met on the
+  first run, because the automated merge path produces no push-triggered run and the completion hook
+  dispatches this workflow exactly once, so nothing existed to compare against.)* Where an earlier
+  run's evidence artifact for the same commit is available, the workflow additionally compares
+  against it and reports the result, but that comparison is informative, never the gate.
+- **DONE-091:** The workflow run's permissions are `contents: read` only, it names no environment,
+  and no step assumed an AWS role (REQ-049).
+
 ## 23. Idempotency and error-handling requirements
 
 - **IDEM-001:** Every ensure script MUST implement read/compare/create-or-update/verify behavior.
@@ -2004,11 +2109,17 @@ On any failure, `deploy/scripts/collect-diagnostics.sh` MUST collect, redact, an
 
 ---
 
-## 26. Four implementation phases and completion gates
+## 26. Phase 0 and the four implementation phases, with completion gates
+
+### Phase 0 — Offline repository validation (credential-free tracer)
+
+Deliver `lza.lock` exactly as Section 5.1; the six mandatory LZA files under `config/` and nothing else there (REP-001); the Control Tower declarations under `control-tower/` with placeholders only; `deployment/inputs.example.yaml` and the repository schemas under `deployment/schemas/`; `deploy/scripts/validate-config-offline.sh` and the Bats tests under `tests/` it runs; the supporting files the gate needs (`.yamllint.yml`, `.editorconfig`, `.gitignore`, `Makefile`); `CODEOWNERS` at the repository root, requiring review for `lza.lock`, `control-tower/**`, `config/**` and `deployment/schemas/**` — it MUST land in the same delivery as those files, so their very first change already receives the review REP-013 mandates (REQ-047 places it at the root; `.github/CODEOWNERS` is reserved); and the workflow `<workload-slug>_validate-offline.yml` (Section 21.9). No AWS resource, no OIDC, no Phase 1–4 workflow, no `infra/` or `policies/` content (REQ-051).
+
+**Gate 0:** `<workload-slug>_validate-offline.yml` exits zero in GitHub Actions on the merged commit with no AWS credential present, every check in Section 22.8 passes, and the recorded digests validate. Phase 0 is the first workload of this program and is complete on Gate 0 alone.
 
 ### Phase 1 — Commercial bootstrap and account-pair vending
 
-Deliver repository scaffold/offline validation, commercial Organization/OIDC, first-pair discovery/signup boundary, and `LogArchive`/`Audit` pair creation.
+Building on the Phase 0 scaffold, deliver `01-pr-validate.yml` and the OIDC bootstrap content, the commercial Organization/OIDC, first-pair discovery/signup boundary, and `LogArchive`/`Audit` pair creation.
 
 **Gate 1:** Every Phase 1 check in Section 22.2 passes and Phase 1 evidence validates.
 
