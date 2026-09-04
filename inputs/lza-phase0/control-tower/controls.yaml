@@ -1,0 +1,11 @@
+schemaVersion: 1
+controls:
+  - alias: CT.MULTISERVICE.PV.1
+    enabled: true
+    required: true
+    targetOu: Infrastructure
+    parameters:
+      AllowedRegions:
+        - us-gov-west-1
+      ExemptedPrincipalArns: []
+      ExemptedActions: []

@@ -1,0 +1,10 @@
+schemaVersion: 2
+sourceRepository: https://github.com/awslabs/landing-zone-accelerator-on-aws.git
+version: v1.16.1
+commit: 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab
+nodeMajor: 22
+yarnVersion: 1.22.22
+partition: aws-us-gov
+homeRegion: us-gov-west-1
+controlTowerLandingZoneVersion: "4.0"
+controlTowerOuBaselineVersion: "5.0"

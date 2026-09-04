@@ -1,0 +1,7 @@
+schemaVersion: 1
+baselines:
+  - name: AWSControlTowerBaseline
+    version: "5.0"
+    targetOu: Infrastructure
+    required: true
+    includeChildrenVerification: true

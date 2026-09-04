@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 2,
+  "values": {
+    "LOG_ARCHIVE_ACCOUNT_ID": "111111111111",
+    "AUDIT_ACCOUNT_ID": "222222222222",
+    "CONTROL_TOWER_KMS_KEY_ARN": "arn:aws-us-gov:kms:us-gov-west-1:000000000000:key/00000000-0000-0000-0000-000000000000"
+  }
+}

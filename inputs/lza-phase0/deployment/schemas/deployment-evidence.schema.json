@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "gate", "generatedAt", "repositoryValidationOnly", "liveValidatorRan", "checks", "digests"],
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "gate": {"const": "phase0-offline"},
+    "generatedAt": {"type": "string", "format": "date-time"},
+    "repositoryValidationOnly": {"const": true},
+    "liveValidatorRan": {"const": false},
+    "checks": {
+      "type": "array", "minItems": 8, "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["number", "name", "status"],
+        "properties": {"number": {"type": "integer", "minimum": 1, "maximum": 8}, "name": {"type": "string", "minLength": 1}, "status": {"const": "passed"}}
+      }
+    },
+    "digests": {
+      "type": "object", "minProperties": 11, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    }
+  }
+}

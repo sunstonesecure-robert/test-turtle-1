@@ -1,0 +1,120 @@
+name: LZA Phase 0 - Validate offline
+
+on:
+  pull_request:
+    paths:
+      - inputs/lza-phase0/lza.lock
+      - inputs/lza-phase0/config/**
+      - inputs/lza-phase0/control-tower/**
+      - inputs/lza-phase0/deployment/**
+      - inputs/lza-phase0/deploy/**
+      - inputs/lza-phase0/tests/**
+      - inputs/lza-phase0/Makefile
+      - inputs/lza-phase0/README.md
+      - inputs/lza-phase0/CODEOWNERS
+      - inputs/lza-phase0/.gitignore
+      - inputs/lza-phase0/.editorconfig
+      - inputs/lza-phase0/.yamllint.yml
+      - inputs/lza-phase0/.github/workflows/lza-phase0_validate-offline.yml
+  push:
+    branches:
+      - main
+    paths:
+      - inputs/lza-phase0/lza.lock
+      - inputs/lza-phase0/config/**
+      - inputs/lza-phase0/control-tower/**
+      - inputs/lza-phase0/deployment/**
+      - inputs/lza-phase0/deploy/**
+      - inputs/lza-phase0/tests/**
+      - inputs/lza-phase0/Makefile
+      - inputs/lza-phase0/README.md
+      - inputs/lza-phase0/CODEOWNERS
+      - inputs/lza-phase0/.gitignore
+      - inputs/lza-phase0/.editorconfig
+      - inputs/lza-phase0/.yamllint.yml
+      - inputs/lza-phase0/.github/workflows/lza-phase0_validate-offline.yml
+  workflow_dispatch:
+    inputs:
+      plan_ref:
+        description: Optional reviewed plan reference for traceability
+        required: false
+        default: ''
+        type: string
+      commit:
+        description: Optional exact repository commit to validate
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lza-phase0_validate-offline-${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact event revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.commit || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact repository revision
+        shell: bash
+        env:
+          EXPECTED_REVISION: ${{ inputs.commit || github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          test "${#EXPECTED_REVISION}" -eq 40
+          test "$(git rev-parse HEAD)" = "${EXPECTED_REVISION}"
+
+      - name: Install credential-free validation tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes bats shellcheck
+          python3 -m venv "${RUNNER_TEMP}/lza-phase0-tools"
+          "${RUNNER_TEMP}/lza-phase0-tools/bin/pip" install \
+            cfn-lint==1.39.1 \
+            jsonschema==4.25.1 \
+            PyYAML==6.0.3 \
+            yamllint==1.37.1
+          printf '%s\n' "${RUNNER_TEMP}/lza-phase0-tools/bin" >> "${GITHUB_PATH}"
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          printf '%s\n' "$(go env GOPATH)/bin" >> "${GITHUB_PATH}"
+
+      - name: Check out and verify locked LZA source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          IFS=$'\n\t'
+          export AWS_PAGER=''
+          source inputs/lza-phase0/deploy/scripts/common.sh
+          git clone --filter=blob:none --no-checkout "${LZA_SOURCE_REPOSITORY}" inputs/lza-phase0/vendor/lza
+          git -C inputs/lza-phase0/vendor/lza fetch --depth=1 origin "refs/tags/${LZA_VERSION}:refs/tags/${LZA_VERSION}"
+          test "$(git -C inputs/lza-phase0/vendor/lza rev-parse "${LZA_VERSION}^{commit}")" = "${LZA_COMMIT}"
+          git -C inputs/lza-phase0/vendor/lza checkout --detach "${LZA_COMMIT}"
+          test "$(git -C inputs/lza-phase0/vendor/lza rev-parse HEAD)" = "${LZA_COMMIT}"
+
+      - name: Run the eight offline checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p inputs/lza-phase0/build
+          inputs/lza-phase0/deploy/scripts/validate-config-offline.sh 2>&1 | tee inputs/lza-phase0/build/offline-validation.log
+
+      - name: Upload evidence and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lza-phase0-offline-${{ github.run_id }}
+          path: |
+            inputs/lza-phase0/build/deployment-evidence.json
+            inputs/lza-phase0/build/offline-validation.log
+          if-no-files-found: warn
+          retention-days: 30

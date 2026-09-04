@@ -1,0 +1,52 @@
+schemaVersion: 2
+github:
+  owner: REPLACE_ME
+  repository: REPLACE_ME
+  defaultBranch: main
+  validationEnvironment: govcloud-validation
+  deploymentEnvironment: govcloud-prod
+aws:
+  commercialManagementAccountId: "000000000000"
+  commercialRegion: us-east-1
+  govCloudManagementAccountId: ""
+  govCloudHomeRegion: us-gov-west-1
+  organizationAccessRoleName: OrganizationAccountAccessRole
+accounts:
+  management:
+    name: Management
+    email: management+govcloud@example.com
+  logArchive:
+    name: LogArchive
+    email: logarchive+govcloud@example.com
+  audit:
+    name: Audit
+    email: audit+govcloud@example.com
+organization:
+  securityOuName: Security
+  infrastructureOuName: Infrastructure
+controlTower:
+  landingZoneVersion: "4.0"
+  governedRegions:
+    - us-gov-west-1
+  remediationTypes:
+    - INHERITANCE_DRIFT
+  accountAutoEnrollment: true
+  accessManagementEnabled: false
+  backupEnabled: false
+  centralizedLoggingEnabled: true
+  configEnabled: true
+  securityRolesEnabled: true
+  accessLogRetentionDays: 365
+  loggingRetentionDays: 365
+  kmsAlias: alias/govcloud-control-tower
+  infrastructureBaselineVersion: "5.0"
+  manageLandingZoneRegionDeny: false
+lza:
+  version: v1.16.1
+  commit: 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab
+  acceleratorPrefix: AWSAccelerator
+  controlTowerEnabled: true
+  configurationLocation: s3
+  configurationObjectKey: zipped/aws-accelerator-config.zip
+  sourceBucketPrefix: organization-lza-source
+  sourceObjectPrefix: release
