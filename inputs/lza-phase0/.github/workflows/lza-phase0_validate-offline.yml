@@ -3,36 +3,36 @@ name: LZA Phase 0 - Validate offline
 on:
   pull_request:
     paths:
-      - lza.lock
-      - config/**
-      - control-tower/**
-      - deployment/**
-      - deploy/**
-      - tests/**
-      - Makefile
-      - README.md
-      - CODEOWNERS
-      - .gitignore
-      - .editorconfig
-      - .yamllint.yml
-      - .github/workflows/lza-phase0_validate-offline.yml
+      - inputs/lza-phase0/lza.lock
+      - inputs/lza-phase0/config/**
+      - inputs/lza-phase0/control-tower/**
+      - inputs/lza-phase0/deployment/**
+      - inputs/lza-phase0/deploy/**
+      - inputs/lza-phase0/tests/**
+      - inputs/lza-phase0/Makefile
+      - inputs/lza-phase0/README.md
+      - inputs/lza-phase0/CODEOWNERS
+      - inputs/lza-phase0/.gitignore
+      - inputs/lza-phase0/.editorconfig
+      - inputs/lza-phase0/.yamllint.yml
+      - inputs/lza-phase0/.github/workflows/lza-phase0_validate-offline.yml
   push:
     branches:
       - main
     paths:
-      - lza.lock
-      - config/**
-      - control-tower/**
-      - deployment/**
-      - deploy/**
-      - tests/**
-      - Makefile
-      - README.md
-      - CODEOWNERS
-      - .gitignore
-      - .editorconfig
-      - .yamllint.yml
-      - .github/workflows/lza-phase0_validate-offline.yml
+      - inputs/lza-phase0/lza.lock
+      - inputs/lza-phase0/config/**
+      - inputs/lza-phase0/control-tower/**
+      - inputs/lza-phase0/deployment/**
+      - inputs/lza-phase0/deploy/**
+      - inputs/lza-phase0/tests/**
+      - inputs/lza-phase0/Makefile
+      - inputs/lza-phase0/README.md
+      - inputs/lza-phase0/CODEOWNERS
+      - inputs/lza-phase0/.gitignore
+      - inputs/lza-phase0/.editorconfig
+      - inputs/lza-phase0/.yamllint.yml
+      - inputs/lza-phase0/.github/workflows/lza-phase0_validate-offline.yml
   workflow_dispatch:
     inputs:
       plan_ref:
@@ -94,19 +94,19 @@ jobs:
           set -Eeuo pipefail
           IFS=$'\n\t'
           export AWS_PAGER=''
-          source deploy/scripts/common.sh
-          git clone --filter=blob:none --no-checkout "${LZA_SOURCE_REPOSITORY}" vendor/lza
-          git -C vendor/lza fetch --depth=1 origin "refs/tags/${LZA_VERSION}:refs/tags/${LZA_VERSION}"
-          test "$(git -C vendor/lza rev-parse "${LZA_VERSION}^{commit}")" = "${LZA_COMMIT}"
-          git -C vendor/lza checkout --detach "${LZA_COMMIT}"
-          test "$(git -C vendor/lza rev-parse HEAD)" = "${LZA_COMMIT}"
+          source inputs/lza-phase0/deploy/scripts/common.sh
+          git clone --filter=blob:none --no-checkout "${LZA_SOURCE_REPOSITORY}" inputs/lza-phase0/vendor/lza
+          git -C inputs/lza-phase0/vendor/lza fetch --depth=1 origin "refs/tags/${LZA_VERSION}:refs/tags/${LZA_VERSION}"
+          test "$(git -C inputs/lza-phase0/vendor/lza rev-parse "${LZA_VERSION}^{commit}")" = "${LZA_COMMIT}"
+          git -C inputs/lza-phase0/vendor/lza checkout --detach "${LZA_COMMIT}"
+          test "$(git -C inputs/lza-phase0/vendor/lza rev-parse HEAD)" = "${LZA_COMMIT}"
 
       - name: Run the eight offline checks
         shell: bash
         run: |
           set -Eeuo pipefail
-          mkdir -p build
-          deploy/scripts/validate-config-offline.sh 2>&1 | tee build/offline-validation.log
+          mkdir -p inputs/lza-phase0/build
+          inputs/lza-phase0/deploy/scripts/validate-config-offline.sh 2>&1 | tee inputs/lza-phase0/build/offline-validation.log
 
       - name: Upload evidence and diagnostics
         if: always()
@@ -114,7 +114,7 @@ jobs:
         with:
           name: lza-phase0-offline-${{ github.run_id }}
           path: |
-            build/deployment-evidence.json
-            build/offline-validation.log
+            inputs/lza-phase0/build/deployment-evidence.json
+            inputs/lza-phase0/build/offline-validation.log
           if-no-files-found: warn
           retention-days: 30
