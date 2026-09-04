@@ -31,8 +31,8 @@
       "priority": "MUST",
       "evidence_tag": "assumption",
       "stand_in": "loggingRetentionDays=365 and accessLogRetentionDays=365 (and the mirrored manifest/global-config retentionDays) carried from spec Section 3 example, pending q-retention (IN-009 requires these be approved as cost/compliance decisions, not silently inherited).",
-      "high_stakes": false,
-      "authority": null,
+      "high_stakes": true,
+      "authority": "legal",
       "depends_on": [
         "step-lock-and-reader"
       ],
