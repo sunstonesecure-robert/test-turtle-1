@@ -1,0 +1,17 @@
+{
+  "step_id": "step-desired-state",
+  "workload": "lza-phase0",
+  "authority": "legal",
+  "decisions": [
+    {
+      "decision": "approved",
+      "step_digest": "sha256:b4d34333ce74ecc1273bd23f8d739f7bfcc8b20934e637bbc14a1ae7e78e5c60",
+      "by": {
+        "name": "Ima Badliar",
+        "contact": "ima.badliar@ianal.biz"
+      },
+      "at": "2026-09-04T20:40:47Z",
+      "rationale": "Delivery of LZA/Control Tower desired-state config, specifically the audit/access log retention settings. config/global-config.yaml 'loggingRetentionDays' and the mirrored 'accessLogRetentionDays' are currently set to 365 (one year), carried from a spec example rather than an independent decision. Reference: plan.json step-desired-state, flagged IN-009 as a cost/compliance decision requiring approval, not silent inheritance. Refer to FedRAMP/NIST 800-53 AU-11 audit-record-retention requirement, customer/contractual data-retention clauses, and agency-specific ATO continuous-monitoring requirement. Risk: Under-retention (regulatory or contractual non-compliance) or over-retention (data-minimization/liability exposure) if 365 days does not match the governing requirement."
+    }
+  ]
+}
