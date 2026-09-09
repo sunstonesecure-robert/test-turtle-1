@@ -1,0 +1,345 @@
+{
+  "feature": "lza-phase0-0",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "34307255293",
+  "andon_issue": 79,
+  "steps": [
+    {
+      "id": "step-lock",
+      "title": "Deliver lza.lock at the repository root",
+      "intent": "Create the single hand-maintained provenance lock lza.lock at the repository root, exactly as spec Section 5.1: the ten flat scalar keys (schemaVersion, sourceRepository, version, commit, nodeMajor, yarnVersion, partition, homeRegion, controlTowerLandingZoneVersion, controlTowerOuBaselineVersion) with their pinned values. It is the one place a version/commit/partition/Region literal may live; every script, workflow and test reads it through deploy/scripts/common.sh rather than restating a literal (REP-010/REP-014).",
+      "acceptance": "lza.lock exists at the repository root and contains exactly the ten Section 5.1 keys with their locked scalar values (version v1.16.1, commit 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab, nodeMajor 22, yarnVersion 1.22.22, partition aws-us-gov, homeRegion us-gov-west-1, controlTowerLandingZoneVersion \"4.0\", controlTowerOuBaselineVersion \"5.0\").",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [],
+      "scope": [
+        "lza.lock"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-deploy-scripts",
+      "title": "Deliver deploy/scripts/ (common.sh reader + offline validation script)",
+      "intent": "Deliver deploy/scripts/common.sh as the single lza.lock reader that validates the ten-key invariant and exports the nine lock-derived shell variables, and deploy/scripts/validate-config-offline.sh implementing the eight Section 7.1 offline checks. Adjust every path taken from the example bundle to work at the repository root: REPOSITORY_ROOT resolves to the repo root, vendor/lza and build/ are repo-root relative, and the workflow referenced by check 6 is the delivered .github/workflows/lza-phase0-0_validate-offline.yml (never the example inputs/lza-phase0/... path or an un-prefixed filename). No script restates a version/commit/partition/Region literal.",
+      "acceptance": "Sourcing deploy/scripts/common.sh from the repository root enforces the ten-key lock invariant and exports LZA_VERSION/LZA_COMMIT/LZA_PARTITION/LZA_HOME_REGION/CT_LANDING_ZONE_VERSION/CT_OU_BASELINE_VERSION equal to the lock; validate-config-offline.sh sources common.sh, references .github/workflows/lza-phase0-0_validate-offline.yml, and contains no inputs/lza-phase0/ path; every deploy/scripts/*.sh carries the strict-mode header and each non-common script sources common.sh.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-lock"
+      ],
+      "scope": [
+        "deploy/**"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-config",
+      "title": "Deliver the six mandatory LZA config files under config/",
+      "intent": "Deliver exactly the six mandatory LZA desired-state files under config/ (accounts, global, iam, network, organization, security) and nothing else there (REP-001; no customizations-config.yaml). global-config.yaml pins homeRegion, enabledRegions and the landing-zone version consistent with lza.lock; the iam/network extension collections are empty and the central security services (macie, guardduty, securityHub, detective, auditManager) and AWS Config recorder/delivery/aggregation are disabled, matching the credential-free Phase 0 posture.",
+      "acceptance": "config/ contains exactly the six mandatory files and no customizations-config.yaml; iam/network extension collections are empty and the central security services and AWS Config recorder/delivery/aggregation are disabled; all six parse as YAML.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-lock"
+      ],
+      "scope": [
+        "config/**"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-control-tower",
+      "title": "Deliver Control Tower desired-state declarations under control-tower/",
+      "intent": "Deliver control-tower/landing-zone-manifest.template.json (placeholders only for API-discovered account/key IDs), baselines.yaml, controls.yaml, control-exceptions.yaml (empty exceptions) and ownership-matrix.yaml. The landing-zone version and OU baseline version derive from lza.lock; governed Regions equal homeRegion; every ownership domain has exactly one authoritative owner and the protected domains belong to control-tower (REP-004/REP-005).",
+      "acceptance": "The Control Tower declarations validate against their schemas and agree with lza.lock: manifest/baselines/controls versions and governed Region match the lock and config; the manifest template carries only the three declared placeholder tokens with explicit enabled flags; every ownership domain has exactly one owner and all protected domains are owned by control-tower.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-lock"
+      ],
+      "scope": [
+        "control-tower/**"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-deployment",
+      "title": "Deliver deployment/ example inputs, example state, and repository JSON Schemas",
+      "intent": "Deliver deployment/inputs.example.yaml (the one permitted second copy of lza.version/lza.commit, which the consistency test checks against the lock), the example render-map/phase-state/state JSON documents, and the six repository JSON Schemas under deployment/schemas/ (REQ-041: deployment/schemas, never the reserved schemas/). The evidence schema forbids a live-validator claim so the offline gate cannot misreport that the exact LZA validator ran.",
+      "acceptance": "Every JSON document under deployment/ parses; inputs.example.yaml's lza.version and lza.commit equal the lock's values; and the six schema files exist under deployment/schemas/.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-lock"
+      ],
+      "scope": [
+        "deployment/**"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-tests",
+      "title": "Deliver the Bats test suites under tests/",
+      "intent": "Deliver the offline Bats suites the gate runs (consistency, shell, ownership, controls, control-tower-manifest, config, evidence) directly under the existing repository tests/ directory, alongside the oversight test subdirectories without collision. Each resolves REPOSITORY_ROOT to the repository root and sources deploy/scripts/common.sh; consistency.bats references the delivered workflow filename lza-phase0-0_validate-offline.yml (not the example inputs/lza-phase0/... path).",
+      "acceptance": "The seven LZA Bats suites are present under tests/, each sources deploy/scripts/common.sh and anchors REPOSITORY_ROOT at the repo root, consistency.bats references lza-phase0-0_validate-offline.yml, and no delivered test contains an inputs/lza-phase0/ path.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-lock",
+        "step-deploy-scripts",
+        "step-config",
+        "step-control-tower",
+        "step-deployment"
+      ],
+      "scope": [
+        "tests/**"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-meta",
+      "title": "Deliver root supporting files (Makefile, README.md, CODEOWNERS, .gitignore, .editorconfig, .yamllint.yml)",
+      "intent": "Deliver the root supporting files the gate and reviewers need: Makefile (validate-offline/test targets), README.md, CODEOWNERS at the repository root requiring review for lza.lock, config/**, control-tower/** and deployment/schemas/** (REP-013; .github/CODEOWNERS is reserved), .editorconfig, .yamllint.yml, and the .gitignore coverage REP-008 requires. The existing repository root .gitignore is extended with the LZA generated paths rather than replaced, so no current oversight ignore entry is lost.",
+      "acceptance": "CODEOWNERS at the root requires review for lza.lock, config/**, control-tower/** and deployment/schemas/**; the root .gitignore covers the REP-008 LZA generated paths (vendor/, cdk.out/, .aws/, generated evidence, env/token files) while preserving existing entries; Makefile exposes a validate-offline target invoking deploy/scripts/validate-config-offline.sh.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-lock",
+        "step-deploy-scripts"
+      ],
+      "scope": [
+        "Makefile",
+        "README.md",
+        "CODEOWNERS",
+        ".gitignore",
+        ".editorconfig",
+        ".yamllint.yml"
+      ],
+      "tracking_issue": null
+    },
+    {
+      "id": "step-workflow",
+      "title": "Deliver the Phase 0 offline validation workflow (credential-free)",
+      "intent": "Deliver .github/workflows/lza-phase0-0_validate-offline.yml (REQ-043/REQ-050: <workload-slug>_validate-offline.yml, slug lza-phase0-0). It requests contents: read only — no id-token: write, no environment, no subject-deploy (REQ-049); triggers on push and pull_request each with branches:[main] and the same non-empty root-relative paths filter plus workflow_dispatch (plan_ref, commit); checks out the commit under judgment, checks out and verifies the locked LZA source into vendor/lza, runs deploy/scripts/validate-config-offline.sh, and uploads evidence/digests. Every third-party action is pinned to a 40-character commit SHA (REQ-008).",
+      "acceptance": "The workflow requests contents: read only with no id-token/environment/subject-deploy; declares push and pull_request each with branches:[main] and a non-empty paths filter plus workflow_dispatch(plan_ref, commit); runs deploy/scripts/validate-config-offline.sh; references only root-relative paths and the delivered filename; and pins every third-party action to a 40-character commit SHA.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-deploy-scripts"
+      ],
+      "scope": [
+        ".github/workflows/lza-phase0-0_*.yml"
+      ],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-lock-exact",
+      "kind": "exact-copy",
+      "check": "lza.lock exists at the repository root and contains exactly the ten Section 5.1 keys with their locked scalar values.",
+      "run": "sh -c 'test -f lza.lock && grep -qx \"schemaVersion: 2\" lza.lock && grep -qx \"sourceRepository: https://github.com/awslabs/landing-zone-accelerator-on-aws.git\" lza.lock && grep -qx \"version: v1.16.1\" lza.lock && grep -qx \"commit: 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab\" lza.lock && grep -qx \"nodeMajor: 22\" lza.lock && grep -qx \"yarnVersion: 1.22.22\" lza.lock && grep -qx \"partition: aws-us-gov\" lza.lock && grep -qx \"homeRegion: us-gov-west-1\" lza.lock && grep -qx '\"'\"'controlTowerLandingZoneVersion: \"4.0\"'\"'\"' lza.lock && grep -qx '\"'\"'controlTowerOuBaselineVersion: \"5.0\"'\"'\"' lza.lock'",
+      "maps_to": [
+        "step-lock"
+      ]
+    },
+    {
+      "id": "vt-common-reads-lock",
+      "kind": "expected-output",
+      "check": "Sourcing deploy/scripts/common.sh from the repo root passes the ten-key lock invariant and exports the lock-derived variables with the locked values.",
+      "run": "bash -c 'set -e; source deploy/scripts/common.sh; test \"$LZA_VERSION\" = v1.16.1; test \"$LZA_COMMIT\" = 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab; test \"$LZA_PARTITION\" = aws-us-gov; test \"$LZA_HOME_REGION\" = us-gov-west-1; test \"$CT_LANDING_ZONE_VERSION\" = 4.0; test \"$CT_OU_BASELINE_VERSION\" = 5.0'",
+      "maps_to": [
+        "step-deploy-scripts"
+      ]
+    },
+    {
+      "id": "vt-offline-script-rooted",
+      "kind": "exact-copy",
+      "check": "validate-config-offline.sh references the delivered workflow .github/workflows/lza-phase0-0_validate-offline.yml and carries no inputs/lza-phase0/ example path.",
+      "run": "bash -c 'grep -qF \".github/workflows/lza-phase0-0_validate-offline.yml\" deploy/scripts/validate-config-offline.sh && ! grep -qF \"inputs/lza-phase0\" deploy/scripts/validate-config-offline.sh'",
+      "maps_to": [
+        "step-deploy-scripts"
+      ]
+    },
+    {
+      "id": "vt-scripts-strict",
+      "kind": "expected-output",
+      "check": "Every deploy/scripts/*.sh begins with the strict-mode header and each non-common script sources common.sh.",
+      "run": "bash -c 'set -e; for f in deploy/scripts/*.sh; do test \"$(sed -n 1p \"$f\")\" = \"#!/usr/bin/env bash\"; test \"$(sed -n 2p \"$f\")\" = \"set -Eeuo pipefail\"; case \"$f\" in */common.sh) ;; *) grep -qF '\"'\"'source \"${SCRIPT_DIR}/common.sh\"'\"'\"' \"$f\";; esac; done'",
+      "maps_to": [
+        "step-deploy-scripts"
+      ]
+    },
+    {
+      "id": "vt-config-six",
+      "kind": "expected-output",
+      "check": "config/ holds exactly the six mandatory LZA files and no customizations-config.yaml.",
+      "run": "bash -c 'test \"$(find config -maxdepth 1 -type f | wc -l)\" -eq 6; for n in accounts global iam network organization security; do test -f \"config/$n-config.yaml\"; done; test ! -e config/customizations-config.yaml'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-disabled",
+      "kind": "boundary-behavior",
+      "check": "IAM/network extension collections are empty and the central security services and AWS Config recorder/delivery/aggregation are disabled in the Phase 0 config.",
+      "run": "python3 -c 'import yaml; L=lambda n: yaml.safe_load(open(f\"config/{n}-config.yaml\")); iam=L(\"iam\"); net=L(\"network\"); sec=L(\"security\"); assert all(iam[k]==[] for k in (\"providers\",\"policySets\",\"roleSets\",\"groupSets\",\"userSets\")); assert all(net[k]==[] for k in (\"transitGateways\",\"vpcs\",\"vpcTemplates\",\"vpcPeering\")); assert sec[\"awsConfig\"][\"enableConfigurationRecorder\"] is False; assert all(sec[\"centralSecurityServices\"][s][\"enable\"] is False for s in (\"macie\",\"guardduty\",\"securityHub\",\"detective\",\"auditManager\"))'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-ct-consistency",
+      "kind": "boundary-behavior",
+      "check": "Control Tower landing-zone version, OU baseline version and governed Region agree across the lock, global-config.yaml, inputs.example.yaml, the manifest template and baselines.yaml.",
+      "run": "python3 -c 'import json,yaml; g=yaml.safe_load(open(\"config/global-config.yaml\")); inp=yaml.safe_load(open(\"deployment/inputs.example.yaml\")); b=yaml.safe_load(open(\"control-tower/baselines.yaml\"))[\"baselines\"][0]; m=json.load(open(\"control-tower/landing-zone-manifest.template.json\")); assert g[\"controlTower\"][\"landingZone\"][\"version\"]==inp[\"controlTower\"][\"landingZoneVersion\"]==\"4.0\"; assert b[\"version\"]==inp[\"controlTower\"][\"infrastructureBaselineVersion\"]==\"5.0\"; assert g[\"homeRegion\"]==inp[\"aws\"][\"govCloudHomeRegion\"]==\"us-gov-west-1\"; assert g[\"enabledRegions\"]==m[\"governedRegions\"]==inp[\"controlTower\"][\"governedRegions\"]==[\"us-gov-west-1\"]'",
+      "maps_to": [
+        "step-control-tower",
+        "step-config",
+        "step-deployment"
+      ]
+    },
+    {
+      "id": "vt-ownership",
+      "kind": "boundary-behavior",
+      "check": "Every ownership domain has exactly one authoritative owner and all protected domains belong to control-tower.",
+      "run": "python3 -c 'import collections,yaml; m=yaml.safe_load(open(\"control-tower/ownership-matrix.yaml\")); o=collections.defaultdict(list); [o[i[\"domain\"]].append(i[\"authoritativeOwner\"]) for i in m[\"domains\"]]; assert all(len(v)==1 for v in o.values()); prot={\"organization-cloudtrail\",\"config-recorders\",\"config-delivery-channels\",\"config-aggregator\",\"managed-service-control-policies\",\"controls\",\"control-tower-service-roles\",\"baseline-resources\",\"control-tower-stacksets\"}; assert prot<=set(o); assert all(o[n]==[\"control-tower\"] for n in prot)'",
+      "maps_to": [
+        "step-control-tower"
+      ]
+    },
+    {
+      "id": "vt-ct-manifest",
+      "kind": "boundary-behavior",
+      "check": "The landing-zone manifest template contains only the three declared placeholder tokens and explicit enabled flags.",
+      "run": "python3 -c 'import json,re; m=json.load(open(\"control-tower/landing-zone-manifest.template.json\")); t=re.findall(r\"\\$\\{[^}]+\\}\",json.dumps(m)); assert sorted(set(t))==sorted((\"${LOG_ARCHIVE_ACCOUNT_ID}\",\"${AUDIT_ACCOUNT_ID}\",\"${CONTROL_TOWER_KMS_KEY_ARN}\")); assert m[\"accessManagement\"][\"enabled\"] is False and m[\"backup\"][\"enabled\"] is False; assert all(m[k][\"enabled\"] is True for k in (\"centralizedLogging\",\"config\",\"securityRoles\"))'",
+      "maps_to": [
+        "step-control-tower"
+      ]
+    },
+    {
+      "id": "vt-deployment-json",
+      "kind": "expected-output",
+      "check": "Every JSON document under deployment/ parses and inputs.example.yaml's lza.version/lza.commit equal the lock (the one permitted second copy).",
+      "run": "python3 -c 'import json,glob,yaml; [json.load(open(p)) for p in glob.glob(\"deployment/**/*.json\",recursive=True)]; inp=yaml.safe_load(open(\"deployment/inputs.example.yaml\")); assert inp[\"lza\"][\"version\"]==\"v1.16.1\"; assert inp[\"lza\"][\"commit\"]==\"8b43dc6e347b5fc1c477940c7f71ea595fbf19ab\"'",
+      "maps_to": [
+        "step-deployment"
+      ]
+    },
+    {
+      "id": "vt-deployment-schemas",
+      "kind": "expected-output",
+      "check": "The six repository JSON Schemas are delivered under deployment/schemas/ (never the reserved schemas/).",
+      "run": "bash -c 'for s in deployment-evidence deployment-state landing-zone-manifest baselines controls ownership-matrix; do test -f \"deployment/schemas/$s.schema.json\"; done'",
+      "maps_to": [
+        "step-deployment"
+      ]
+    },
+    {
+      "id": "vt-tests-present",
+      "kind": "expected-output",
+      "check": "The seven LZA Bats suites are delivered under tests/, consistency.bats references the delivered workflow filename, and no delivered test carries an inputs/lza-phase0/ path.",
+      "run": "bash -c 'for f in consistency shell ownership controls control-tower-manifest config evidence; do test -f \"tests/$f.bats\"; done; grep -qF \"lza-phase0-0_validate-offline.yml\" tests/consistency.bats && ! grep -RqF \"inputs/lza-phase0\" tests'",
+      "maps_to": [
+        "step-tests"
+      ]
+    },
+    {
+      "id": "vt-tests-root-anchored",
+      "kind": "expected-output",
+      "check": "Each delivered Bats suite sources deploy/scripts/common.sh so it anchors on the repository root.",
+      "run": "bash -c 'set -e; for f in tests/consistency.bats tests/shell.bats tests/ownership.bats tests/controls.bats tests/control-tower-manifest.bats tests/config.bats tests/evidence.bats; do grep -qF \"deploy/scripts/common.sh\" \"$f\"; done'",
+      "maps_to": [
+        "step-tests"
+      ]
+    },
+    {
+      "id": "vt-codeowners",
+      "kind": "exact-copy",
+      "check": "Root CODEOWNERS requires review for lza.lock, config/**, control-tower/** and deployment/schemas/**.",
+      "run": "bash -c 'test -f CODEOWNERS && grep -qE \"^/lza.lock[[:space:]]\" CODEOWNERS && grep -qE \"^/config/\\*\\*[[:space:]]\" CODEOWNERS && grep -qE \"^/control-tower/\\*\\*[[:space:]]\" CODEOWNERS && grep -qE \"^/deployment/schemas/\\*\\*[[:space:]]\" CODEOWNERS'",
+      "maps_to": [
+        "step-meta"
+      ]
+    },
+    {
+      "id": "vt-gitignore-covers",
+      "kind": "expected-output",
+      "check": "The root .gitignore covers the REP-008 LZA generated paths while preserving existing entries.",
+      "run": "bash -c 'for p in \"vendor/\" \"cdk.out/\" \".aws/\" \"deployment-evidence.json\" \".env\" \"build/\"; do grep -qF \"$p\" .gitignore; done'",
+      "maps_to": [
+        "step-meta"
+      ]
+    },
+    {
+      "id": "vt-makefile",
+      "kind": "expected-output",
+      "check": "Makefile exposes a validate-offline target invoking deploy/scripts/validate-config-offline.sh.",
+      "run": "bash -c 'grep -qE \"^validate-offline:\" Makefile && grep -qF \"deploy/scripts/validate-config-offline.sh\" Makefile'",
+      "maps_to": [
+        "step-meta"
+      ]
+    },
+    {
+      "id": "vt-workflow-perms",
+      "kind": "boundary-behavior",
+      "check": "The Phase 0 workflow requests contents: read only, names no environment, and requests no id-token/subject-deploy (REQ-049).",
+      "run": "python3 -c 'import re; t=open(\".github/workflows/lza-phase0-0_validate-offline.yml\").read(); assert \"id-token\" not in t; assert \"subject-deploy\" not in t; assert \"environment:\" not in t; assert re.search(r\"permissions:\\s*\\n\\s*contents:\\s*read\",t)'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    },
+    {
+      "id": "vt-workflow-triggers",
+      "kind": "expected-output",
+      "check": "The workflow declares push and pull_request plus workflow_dispatch(plan_ref, commit), references only root-relative paths and the delivered filename, and runs the offline validation script.",
+      "run": "bash -c 'f=.github/workflows/lza-phase0-0_validate-offline.yml; grep -qF \"lza-phase0-0_validate-offline.yml\" \"$f\" && ! grep -qF \"inputs/lza-phase0\" \"$f\" && grep -q \"workflow_dispatch\" \"$f\" && grep -q \"plan_ref\" \"$f\" && grep -q \"commit\" \"$f\" && grep -q \"pull_request\" \"$f\" && grep -q \"push\" \"$f\" && grep -qF \"deploy/scripts/validate-config-offline.sh\" \"$f\"'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    },
+    {
+      "id": "vt-workflow-pinned",
+      "kind": "expected-output",
+      "check": "Every third-party action in the workflow is pinned to a 40-character commit SHA (no @vN/@main/@master tags).",
+      "run": "bash -c '! grep -nE \"uses:[^@]*@(v[0-9]|main|master|latest)([^0-9a-f]|$)\" .github/workflows/lza-phase0-0_validate-offline.yml'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-gitignore-merge",
+      "description": "A root .gitignore already exists in this repository (the oversight machinery's). The delivered .gitignore must EXTEND it with the REP-008 LZA generated paths, never overwrite it — no existing ignore entry may be dropped.",
+      "step_id": "step-meta"
+    },
+    {
+      "id": "bc-workflow-pr-branches",
+      "description": "The example workflow's pull_request trigger has a paths filter but no branches:[main]. Section 21.9 Guard 2 refuses a pull_request without both branches:[main] and a non-empty paths filter, so the delivered workflow must add branches:[main] and types:[opened,synchronize,reopened] to pull_request.",
+      "step_id": "step-workflow"
+    },
+    {
+      "id": "bc-workflow-name-refs",
+      "description": "Renaming the workflow to the slug-prefixed lza-phase0-0_validate-offline.yml must be propagated to every internal reference: check 6 of validate-config-offline.sh (actionlint + yamllint targets), the consistency.bats path list, the workflow's own paths self-reference, and the concurrency group prefix."
+    },
+    {
+      "id": "bc-tests-shared-dir",
+      "description": "tests/ already exists with the oversight subdirectories (fixtures, integration, mocks, unit). The LZA Bats suites land as new files directly under tests/ without collision, and each resolves REPOSITORY_ROOT to the repository root via BATS_TEST_DIRNAME/..",
+      "step_id": "step-tests"
+    },
+    {
+      "id": "bc-declared-placeholders",
+      "description": "deployment/inputs.example.yaml keeps github.owner/github.repository as REPLACE_ME and govCloudManagementAccountId empty, and the manifest template keeps the three ${...} account/KMS tokens. These stay as the declared placeholder set in Phase 0 (resolved only in later credentialed phases); the placeholder allowlist check counts them exactly."
+    }
+  ]
+}
