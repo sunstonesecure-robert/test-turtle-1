@@ -13,7 +13,15 @@ export const ANDON_LABELS = ['andon:open', 'andon:under-review', 'andon:resolved
 export const LIVE_ANDON_LABELS = ['andon:open', 'andon:under-review'] as const;
 export const TERMINAL_ANDON_LABELS = ['andon:resolved', 'andon:superseded'] as const;
 export const CORRECTION_LABELS = ['correction:open', 'correction:addressed', 'correction:withdrawn'] as const;
-export const CHUNK_LABELS = ['chunk:title-only', 'chunk:ready'] as const;
+// A work item (chunk) always carries its full requirement, so it has ONE live state.
+// `chunk:title-only` was RETIRED on 2026-09-07 (operator decision: a title-only chunk was
+// an artefact of iterative development — a title-only idea is a WORKLOAD, FR-031). The
+// retired label is still READ so a governed repo that carries one from before the rule
+// shows it as unfinished rather than losing it; it is never written and `init` no longer
+// creates it. Kept out of ALL_LABELS for that reason, and in the exclusivity family so an
+// issue carrying both labels is still a violation.
+export const CHUNK_LABELS = ['chunk:ready'] as const;
+export const RETIRED_CHUNK_LABEL = 'chunk:title-only';
 /**
  * The deliverable pull request's lifecycle state (US18, FR-064). Exactly one at a
  * time, and TWO deterministic writers by trigger: `build-publish` sets the initial
@@ -109,7 +117,7 @@ export type WorkloadState = 'proposed' | 'active' | 'deferred' | 'completed' | '
 const EXCLUSIVE_FAMILIES: readonly (readonly string[])[] = [
   ANDON_LABELS,
   CORRECTION_LABELS,
-  CHUNK_LABELS,
+  [...CHUNK_LABELS, RETIRED_CHUNK_LABEL],
   WORKLOAD_LABELS,
   BUILD_LABELS,
 ];

@@ -256,13 +256,33 @@ export async function listRuns(
     ...(opts.event !== undefined ? { event: opts.event } : {}),
     ...(opts.status !== undefined ? { status: opts.status } : {}),
   });
-  return data.map((run) => ({
-    id: run.id,
-    name: run.name ?? null,
-    headBranch: run.head_branch ?? null,
-    status: run.status ?? 'queued',
-    conclusion: run.conclusion,
-  }));
+  // Only entries that ARE runs. A list entry with no numeric id is not a workflow run —
+  // a partially-populated object the API or the paginator handed back — and the
+  // fallbacks below would dress it as a real one: "queued", "(unnamed run)", "(no
+  // session key)", with a Cancel button that can act on nothing (live finding,
+  // 2026-09-04, Runs page). Drop it and say so, rather than render a run that does
+  // not exist; the derivation stays total over the rows that remain.
+  return data.flatMap((run) => {
+    // A run id is a positive integer — 0, a negative or a fraction cannot name a GitHub run,
+    // and the card's Cancel action and the artifact listing already refuse them downstream;
+    // refusing here keeps every retained row actionable.
+    if (!Number.isInteger(run?.id) || run.id <= 0) {
+      const keys = Object.keys(run ?? {});
+      console.warn(
+        `run monitor: dropping a workflow-runs list entry with no positive-integer id (id: ${String(run?.id)}; keys: ${keys.join(', ') || 'none'}) — not a run, so it must not render as one`,
+      );
+      return [];
+    }
+    return [
+      {
+        id: run.id,
+        name: run.name ?? null,
+        headBranch: run.head_branch ?? null,
+        status: run.status ?? 'queued',
+        conclusion: run.conclusion ?? null,
+      },
+    ];
+  });
 }
 
 /**

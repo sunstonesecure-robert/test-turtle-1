@@ -1,5 +1,5 @@
-name: Chunk promotion
-description: Promote a title-only backlog chunk to a full, testable requirement (FR-017). Title-only chunks stay valid without this (FR-016) — prefer the dashboard's Backlog page, which validates completeness and flips the label atomically.
+name: Work item
+description: Record a work item by hand — a piece of work with its full requirement (intent, an empirically testable outcome metric, acceptance). A work item is created complete; an idea that is only a title is a workload, not a work item. Prefer introducing a workload — a plan's steps create their own work items at Commit for approval. An item created here was not created from a plan step, so no plan review offers it as a choice and no build can name it; it is listed under Unbound work items on the Workloads page as a record, and the planning agent never binds it.
 title: "[chunk] "
 labels: ["chunk:ready"]
 body:
@@ -7,20 +7,23 @@ body:
     id: intent
     attributes:
       label: Intent
-      description: What outcome this chunk exists to produce, in business terms.
+      description: What outcome this work exists to produce, in business terms — the result, not the implementation.
+      placeholder: Every export of customer records is encrypted with the customer-managed key and never leaves the home Region.
     validations:
       required: true
   - type: textarea
     id: outcome-metric
     attributes:
       label: Empirically testable outcome metric
-      description: The measurable signal that will show the intent was achieved (FR-017 — a requirement without this is not ready for an agent).
+      description: One measurable pass/fail statement that shows the intent was achieved. If you cannot say pass or fail from it, it is not a metric yet.
+      placeholder: 0 export objects unencrypted or outside the home Region across the export regression set.
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
       label: Acceptance
-      description: The pass/fail conditions the delivered work must meet.
+      description: The pass/fail conditions the delivered work must meet — what a reviewer checks before calling it done.
+      placeholder: Every export object is encrypted with the customer-managed KMS key and lands in a bucket in the home Region; a plaintext or cross-Region copy is refused.
     validations:
       required: true

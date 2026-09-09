@@ -329,9 +329,10 @@ export type WorkloadEditClass = 'metadata' | 'scope' | 'ambiguous';
  * **metadata** — applies immediately, recorded (FR-037):
  *   - `title` — FR-037 names "title clarification" verbatim. The title NAMES the work; the
  *     frozen plan specifies it (data-model "Workload": the title "may be the only content
- *     at intake", so it cannot be what an approval was given against).
- *   - `backlog_order` — FR-037 names "backlog ordering" verbatim. Ordering is portfolio
- *     presentation: it changes nothing inside any plan, so it can invalidate no approval.
+ *     at intake", so it cannot be what an approval was given against). It is the only
+ *     metadata row: FR-037's other example, a portfolio ordering, went with the page that
+ *     would have shown it (decision D1, 2026-09-08) — a field with no writer and no reader
+ *     is a value box that goes nowhere.
  *
  * **ambiguous** — re-plan by default, metadata-only on the operator's recorded override:
  *   - `description` — the archetypal case, named as such by FR-036 and US11 scenario 4
@@ -356,14 +357,15 @@ export type WorkloadEditClass = 'metadata' | 'scope' | 'ambiguous';
  *
  * FR-057 (mid-review intent changes) is the review-time counterpart for
  * `description`, and its acknowledgment gate G12 is deferred (GHI #28). This
- * router applies the FR-036 rule only: a description change lands on the issue
- * ONLY on the metadata route, i.e. with the operator's recorded
- * reclassification. On every other outcome the request is recorded verbatim in
- * the history instead, so nothing is lost while it goes through re-plan.
+ * router applies the FR-036 rule only: while a plan is FROZEN, a description
+ * change lands on the issue ONLY on the metadata route, i.e. with the
+ * operator's recorded reclassification, and on the re-plan route the request is
+ * recorded verbatim in the history and carried by the new version. When nothing
+ * is frozen there is no approval for the route to protect, and the re-plan route
+ * writes the body too (GHI #187) — see `applyWorkloadEdit`.
  */
 export const WORKLOAD_EDIT_TAXONOMY: Readonly<Record<string, WorkloadEditClass>> = {
   title: 'metadata',
-  backlog_order: 'metadata',
   description: 'ambiguous',
   scope: 'scope',
   intent: 'scope',
@@ -433,7 +435,8 @@ export function routeWorkloadEdit(input: { field: string; reclassifyAsMetadataOn
  * that is `proposed` or `active`:
  *   - `proposed`: elaboration is expected before activation (FR-016/FR-031) —
  *     nothing is frozen yet, so a scope edit's re-plan route reports "nothing to
- *     re-open" and the request is still recorded (see `applyWorkloadEdit`).
+ *     re-open" and the request is still recorded, and a description edit writes
+ *     the body the agent will plan from (see `applyWorkloadEdit`).
  *   - `active`: the in-progress case US11 is written about.
  * Everything else is refused BY NAME below.
  */
@@ -497,8 +500,8 @@ export interface WorkloadEditResult {
   classification: WorkloadEditClass;
   route: 'metadata' | 're-plan';
   reclassified: boolean;
-  /** what was actually written to the issue; empty when the field has no
-   *  workload-issue writer (see `backlog_order` below) */
+  /** what was actually written to the issue; empty when the route applied nothing
+   *  (a re-plan of a frozen plan carries the request in the record, not the body) */
   patched: { title?: string; description?: string; context?: string[] };
   /** the new plan version opened for review, or null on the two no-op outcomes */
   reopened: ReopenResult | null;
@@ -531,6 +534,16 @@ export interface WorkloadEditResult {
  *     "already re-opened" and records, whereas recording first would leave a
  *     permanent event claiming a route that failed (events are append-only —
  *     FR-042 — so a wrong one can never be taken back).
+ *   - **description, re-plan route, nothing frozen** → the body IS written
+ *     (GHI #187). FR-036 sends the description to re-plan so a change cannot be
+ *     applied behind an approval; with no frozen plan there is no approval to
+ *     protect, and the planning agent reads the workload BODY (plan-propose.md
+ *     step 1), never the event comments — so a description that lived only in
+ *     the record was a description the agent never saw (13,000 characters of the
+ *     north-star workload, lost that way on 2026-09-02). The routing record still
+ *     says re-plan, honestly: nothing was frozen and nothing re-opened. Same
+ *     ordering as the `context` writer — after the re-open attempt and the
+ *     correction, before the event.
  *
  * A direct write to the frozen plan is impossible here structurally, not merely
  * untested: this function's only writers are `issues.update` and
@@ -569,6 +582,20 @@ export async function applyWorkloadEdit(
           `on the re-opened plan, so it must be exactly one actionable instruction (FR-004) — ${problems.join('; ')}`,
       );
     }
+  }
+
+  // A description edit's value is checked BEFORE any read or write, on BOTH
+  // routes: the metadata route writes it at once, and the re-plan route writes it
+  // whenever nothing is frozen (GHI #187) — which is only known after the re-open
+  // attempt and the correction. A heading refused only inside the body rewrite
+  // would then leave a blocking correction on a live review with no event behind
+  // it. Pure, so nothing is touched when it refuses.
+  if (input.field === 'description') {
+    if (input.description === undefined) {
+      throw new Refusal(`refusing to edit workload "${input.slug}": field "description" needs the new description text`);
+    }
+    const heading = descriptionHeadingLine(input.description);
+    if (heading !== undefined) throw new Refusal(descriptionHeadingRefusal(heading));
   }
 
   const workload =
@@ -634,20 +661,15 @@ export async function applyWorkloadEdit(
       // cannot be disturbed by this path.
       await gh.issues.update({ ...repo, issue_number: workload.issueNumber, title: input.title });
       patched.title = input.title;
-    } else if (input.field === 'description') {
-      if (input.description === undefined) {
-        throw new Refusal(`refusing to edit workload "${input.slug}": field "description" needs the new description text`);
-      }
+    } else if (input.field === 'description' && input.description !== undefined) {
       const body = await rewriteWorkloadDescription(gh, repo, workload.issueNumber, input.description);
       await gh.issues.update({ ...repo, issue_number: workload.issueNumber, body });
       patched.description = input.description;
     }
-    // else: a metadata field with no workload-issue writer. `backlog_order` is
-    // the one such row — FR-037 permits the edit, and ordering lives on the
-    // chunk issues (US4's backlog writer, not yet built), so what this seam owes
-    // it is the RECORD (FR-037: "MUST be recorded in the workload's history").
-    // Inventing storage for it here would put a second, undeclared source of
-    // truth in front of the writer that will own it.
+    // No `else`: every metadata row has a writer above. A row added to the
+    // register without one would reach here and record an edit that changed
+    // nothing — the edit panel derives its "no value box" notice from the same
+    // fact so the operator is told, not surprised.
     reason = metadataEditReason(input.field, summary, routing.reclassified, input.actor);
   } else {
     try {
@@ -769,6 +791,24 @@ export async function applyWorkloadEdit(
       patched.context = context;
     }
 
+    // A description edit while NOTHING IS FROZEN writes the body too (GHI #187).
+    // The re-plan default exists so a change of intent cannot be applied behind an
+    // approval — and with no frozen plan there is no approval to protect, only a
+    // planning agent that reads the workload body (plan-propose.md step 1) and
+    // never the event comments. Recording the text and leaving the body alone
+    // therefore lost the description in the one place it mattered, while telling
+    // the operator it was "recorded". Keyed on the re-open OUTCOME, not on the
+    // `proposed` state: an active workload whose first version is still under
+    // review has nothing frozen either, and its revision agent reads the same
+    // body. Same ordering as the context write above, for the same reason. With a
+    // frozen plan the text stays in the record and reaches the issue only through
+    // the new version's approval — the FR-036 rule, unchanged.
+    if (input.field === 'description' && replan === 'nothing-to-reopen' && input.description !== undefined) {
+      const body = await rewriteWorkloadDescription(gh, repo, workload.issueNumber, input.description);
+      await gh.issues.update({ ...repo, issue_number: workload.issueNumber, body });
+      patched.description = input.description;
+    }
+
     // Any OTHER value the operator typed is NOT applied on this route — it takes
     // effect through the new version's fresh approval — so it rides in the
     // record. Without that, the text would exist only in the browser tab that
@@ -779,9 +819,10 @@ export async function applyWorkloadEdit(
       routing.classification,
       replan,
       reopened,
-      context !== undefined ? undefined : (input.description ?? input.title),
+      context !== undefined || patched.description !== undefined ? undefined : (input.description ?? input.title),
       correctionIssue,
       context,
+      patched.description,
     );
   }
 
@@ -823,6 +864,13 @@ function descriptionHeadingLine(description: string): string | undefined {
     .split('\n')
     .find((line) => HEADING_LINE_RE.test(line))
     ?.trim();
+}
+
+/** The one refusal for a heading inside an edited description — raised up front
+ *  by `applyWorkloadEdit` (before any write, on either route) and again by the
+ *  body rewrite itself, so a caller of the rewrite alone gets the same answer. */
+function descriptionHeadingRefusal(heading: string): string {
+  return `refusing this description edit: it contains a markdown heading line ("${heading}"). A workload body's headings are structured contract sections — \`### Context\` designates the agent's input material (FR-053) — so a heading inside the description could not be told apart from one of those on the next read. Re-submit the description as prose.`;
 }
 
 /**
@@ -895,11 +943,7 @@ async function rewriteWorkloadDescription(
   description: string,
 ): Promise<string> {
   const heading = descriptionHeadingLine(description);
-  if (heading !== undefined) {
-    throw new Refusal(
-      `refusing this description edit: it contains a markdown heading line ("${heading}"). A workload body's headings are structured contract sections — \`### Context\` designates the agent's input material (FR-053) — so a heading inside the description could not be told apart from one of those on the next read. Re-submit the description as prose.`,
-    );
-  }
+  if (heading !== undefined) throw new Refusal(descriptionHeadingRefusal(heading));
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const lines = (issue.body ?? '').split('\n');
   // The line must be the header and NOTHING ELSE. parseWorkloadHeader matches the
@@ -1008,6 +1052,8 @@ function scopeEditReason(
   correctionIssue?: number | null,
   /** field `context` only: the designation now written to the issue's `### Context` (FR-053) */
   appliedContext?: string[],
+  /** field `description` with nothing frozen: the prose now written to the issue body (GHI #187) */
+  appliedDescription?: string,
 ): string {
   const head =
     classification === 'ambiguous'
@@ -1016,9 +1062,11 @@ function scopeEditReason(
   const proposedClause =
     appliedContext !== undefined
       ? `; the workload issue's \`### Context\` section now designates ${appliedContext.map((p) => `\`${p}\``).join(', ')} — the material the re-planning agent reads before it plans (FR-053); it reaches a plan only through the new version's approval`
-      : proposed !== undefined && proposed.trim().length > 0
-        ? `; the operator's proposed new value, for the revision to carry: ${proposed}`
-        : '';
+      : appliedDescription !== undefined
+        ? `; no plan is frozen, so there is no approval for the re-plan default to protect and the workload issue's description was WRITTEN — the body is what the planning agent reads before it proposes (GHI #187); the new text: ${appliedDescription}`
+        : proposed !== undefined && proposed.trim().length > 0
+          ? `; the operator's proposed new value, for the revision to carry: ${proposed}`
+          : '';
   const outcome =
     replan === 'reopened' && reopened
       ? `re-opened as ${reopened.planRef} for review at Andon #${reopened.andonIssue} (FR-008) — the previous version stays the official one until a fresh approval freezes this one`
@@ -1026,14 +1074,18 @@ function scopeEditReason(
         ? 'a plan version is ALREADY under review for this workload, and one review runs at a time — this change went into that open review as a correction on its Andon break rather than forking a second version (FR-004/FR-008)'
         : correctionIssue !== undefined && correctionIssue !== null
           ? 'no frozen plan exists for this workload yet, so there was nothing to re-open — but its FIRST version is under review, and the request went onto that review rather than waiting for a version that is already in flight (FR-008)'
-          : 'no frozen plan exists for this workload yet and no review is running, so there is nothing to re-open and nothing to block — the request is recorded here and belongs in the plan the agent has yet to propose';
+          : appliedDescription !== undefined
+            ? 'no frozen plan exists for this workload yet and no review is running, so there is nothing to re-open and nothing to block — the description is on the workload issue, where the agent will read it when it proposes the plan'
+            : 'no frozen plan exists for this workload yet and no review is running, so there is nothing to re-open and nothing to block — the request is recorded here and belongs in the plan the agent has yet to propose';
   // The blocking half, named in the record: without it the history would say an
   // edit was "routed" while nothing stopped the unchanged clone being approved.
   const blocking =
     correctionIssue !== undefined && correctionIssue !== null
       ? `; correction #${correctionIssue} is open on that review and BLOCKS its approval until the request is addressed or withdrawn (G7/SC-013)`
       : replan === 'nothing-to-reopen'
-        ? '; no review exists yet to block, so this record is the whole obligation'
+        ? appliedDescription !== undefined
+          ? '; no review exists yet to block, so the body write and this record are the whole obligation'
+          : '; no review exists yet to block, so this record is the whole obligation'
         : '';
   return `${head}${proposedClause}; routed to the open re-plan path, never applied to the frozen plan (FR-007): ${outcome}${blocking}`;
 }

@@ -399,8 +399,8 @@ export async function resolveCurrent(gh: Octokit, repo: RepoRef, slug: string): 
  * Exists because more than one page needs the same three-step derivation
  * (resolveCurrent → read the document → its steps) in order to print something
  * the operator can act on: the evidence page lists the step ids evidence may be
- * recorded against, the backlog page resolves the frozen tag and workload slug a
- * build must be dispatched with. Written twice, the two would eventually
+ * recorded against, the workload card resolves the frozen tag a build must be
+ * dispatched on. Written twice, the two would eventually
  * disagree about which version is official — and both are telling the operator
  * what to type into a gate that will check it.
  *

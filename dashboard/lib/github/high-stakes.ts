@@ -10,7 +10,7 @@ import type { PlanDoc } from '../../../schemas/plan';
  * It used to live inside the review page's high-stakes panel, where a single
  * caller justified keeping the write beside the UI that made it (the per-surface
  * split runs/actions.tsx already makes). A second caller ended that: re-linking a
- * step to a different backlog item moves the label as surely as flagging the step
+ * step to a different work item moves the label as surely as flagging the step
  * does, and two writers of one label family is how a board comes to disagree with
  * itself. So the rule moved here, to the layer that owns every other GitHub write.
  */
@@ -33,7 +33,7 @@ async function removeLabelIfPresent(gh: Octokit, repo: RepoRef, issueNumber: num
  * belongs on the tracking issue of the step that is flagged, so the truth is
  * always "which step names this issue, and is it flagged?". That one rule is
  * correct for both writers — flagging a step (the issue is fixed, the authority
- * moves) and re-linking a step to a different backlog item (the authority is
+ * moves) and re-linking a step to a different work item (the authority is
  * fixed, the issue moves) — and for a swap, where each issue's correct label is
  * the OTHER step's authority and a per-issue fix would get one of them wrong.
  *

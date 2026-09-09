@@ -6,18 +6,33 @@
 # could produce anything else — so `vt-*` check runs described a commit that never
 # contained the work, and a completion could be earned on a lie (GHI #141).
 #
-# TWO TRIGGERS, and the second is the one the default path needs (found live,
-# 2026-08-25):
-#   push          a HUMAN merged the deliverable — the operator-checkpoint path. The
-#                 pushed commit is the subject.
-#   workflow_run  `build-merge` merged it. That merge is performed with GITHUB_TOKEN,
-#                 and GitHub emits no `push` event for actions taken with that token,
-#                 so on the DEFAULT pre-authorized path no push ever arrives. Without
-#                 this trigger a merged deliverable sat verified by nothing, silently
-#                 — the same hole GHI #141 was about, one step further along.
-# The subject resolver handles both: a pushed sha, or a sweep for the newest merged
-# deliverable whose merge commit carries no `vt-*` check run yet. A question asked of
-# repository state cannot miss an event.
+# WHO STARTS THIS RUN, AND WHY (GHI #160, decision D5 of 2026-09-08):
+#   workflow_dispatch  from `build-merge`, with `commit` = the merge commit it just made.
+#                      This is the default pre-authorized path. It used to be a
+#                      `workflow_run` on build-merge's completion, and THAT NEVER FIRED:
+#                      build-template → build-publish → deliverable-gate → build-merge
+#                      is already four `workflow_run` levels, GitHub stops the chain at
+#                      three, and the bot's merge (made with GITHUB_TOKEN) emits no
+#                      `push` either. Every "automated" verify in the PB-013 log was a
+#                      hand dispatch. `workflow_dispatch` is exempt from both rules —
+#                      the chain-depth limit and the GITHUB_TOKEN anti-recursion rule
+#                      — which is why build-merge can start this run and nothing else
+#                      could. That exemption is documented by GitHub and observed here
+#                      for the first time by experiment E1 (docs/shared-understanding/
+#                      EXPERIMENTS.md); if a merge ever lands with no run behind it,
+#                      the fallback below is the recovery and E1 is where to write down
+#                      what was seen.
+#   push               a HUMAN merged the deliverable — the operator-checkpoint path.
+#                      The pushed commit is the subject.
+#   workflow_dispatch  by a person, with no inputs: THE FALLBACK. The subject resolver
+#                      sweeps for the newest merged deliverable whose merge commit is
+#                      not yet verified — a question asked of repository state, so it
+#                      recovers a lost run without the operator naming a commit. A
+#                      person may also name `commit` (and `plan_ref`) to re-verify one
+#                      merge; B9 refuses a commit the approved plan never led to.
+# There is deliberately NO scheduled sweep (option 1 on GHI #160 was offered and
+# declined): a merge is verified within seconds or the operator sees a gap on the
+# card, not a result that arrives on a timer.
 #
 # HOW A TARGET IS EXECUTED. `VerificationTarget.run` (the executable form the operator
 # approved alongside the prose `check`) is one shell command whose exit status is the
@@ -26,6 +41,12 @@
 # stays refused until the plan is re-opened to add one or a conformant executor
 # interprets the prose in verify mode. What this must never do is report a result for a
 # target it did not check.
+#
+# A TARGET THAT CHANGES THE CHECKOUT IS NOT A RESULT (GHI #162). The runner snapshots
+# the tree before and after every target; a target that wrote, deleted or committed
+# anything is recorded `action_required` naming what it touched, and the checkout is
+# reset before the next target runs — so no target can make a later one pass against
+# a tree the merge commit does not contain.
 #
 # THE COMMANDS RUN WITHOUT CREDENTIALS: GITHUB_TOKEN and the agent keys are stripped
 # from the child environment before any target executes. Operator-approved is not the
@@ -37,28 +58,28 @@
 # treating both as nothing to do.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: build-verify
-# `workflow_run` is flagged by zizmor as a dangerous trigger. Accepted: this job reads
-# the frozen plan and executes the verification commands the OPERATOR approved, in a
-# job with no write scope at all. It writes nothing to the repository; `vt-report`
-# holds the `checks: write` that records the verdict.
-on: # zizmor: ignore[dangerous-triggers]
+on:
   push:
     branches: [main]
-  workflow_run:
-    workflows: ["build-merge"]
-    types: [completed]
-  # RE-VERIFY ON DEMAND. Third entry point, and a real operator need rather than a
-  # test hook: verification is the one step whose result can go stale for reasons
-  # outside the deliverable (a flaky target, a runner outage, a target fixed by a plan
-  # re-open). It also covers the gap `workflow_run` cannot: GitHub emits no new
-  # workflow_run event when a workflow is RE-RUN, so a lost verify run could otherwise
-  # only be recovered by pushing something (found live, 2026-08-25).
+  # THE ENTRY POINT build-merge uses, and the manual fallback — one trigger, two callers.
   #
-  # It takes no inputs on purpose. The subject is whatever the sweep finds — the
-  # newest merged deliverable with no `vt-*` check run — so an operator cannot
-  # accidentally point verification at a commit the approved plan never led to. B9
-  # would refuse that anyway; not offering the option is better than refusing it.
+  # Both inputs are optional strings, the same convention the completion → dispatch
+  # hook asks of a subject workflow (CONFIGURATION_GUIDE.md §7), so a person pressing
+  # "Run workflow" with the form empty gets the sweep. `commit` names the merge commit
+  # to verify; the frozen plan it delivers is READ FROM THE DELIVERABLE PULL REQUEST'S
+  # MARKER, written by build-publish — never taken from a caller. `plan_ref`, when
+  # given, is checked against that answer and a disagreement stops the run: an input
+  # is a claim, the marker is the record.
   workflow_dispatch:
+    inputs:
+      commit:
+        description: "Merge commit to verify (40-hex sha). Empty = sweep for the newest unverified merged deliverable."
+        type: string
+        required: false
+      plan_ref:
+        description: "Frozen plan ref the commit is expected to deliver (plan/<slug>/v<N>). Optional cross-check only."
+        type: string
+        required: false
 permissions:
   contents: read # read the frozen plan; the merged tree comes from the checkout
   pull-requests: read # find the deliverable pull request behind the commit
@@ -68,10 +89,13 @@ permissions:
   #   (found live, 2026-08-25). A missing read scope reads exactly like a missing
   #   workload, which is why the gate's own message could not point at the cause.
 concurrency:
-  group: build-verify-${{ github.event_name }}-${{ github.sha }}
+  # Keyed on the COMMIT UNDER VERIFICATION, not the run's own sha: two merges in one
+  # build-merge sweep dispatch two runs seconds apart, both with `github.sha` at the
+  # same default-branch head, and one concurrency group for both would cancel the
+  # pending one — a merge silently left unverified.
+  group: build-verify-${{ github.event_name }}-${{ inputs.commit || github.sha }}
 jobs:
   verify:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -88,15 +112,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BV_SHA: ${{ github.sha }}
           BV_EVENT: ${{ github.event_name }}
+          BV_INPUT_COMMIT: ${{ inputs.commit }}
+          BV_INPUT_PLAN_REF: ${{ inputs.plan_ref }}
         run: |
           set -euo pipefail
           if [ "$BV_EVENT" = "push" ]; then
             out="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --commit "$BV_SHA")"
+          elif [ -n "$BV_INPUT_COMMIT" ]; then
+            if ! printf '%s' "$BV_INPUT_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "refusing: commit input '$BV_INPUT_COMMIT' is not a 40-hex sha — pass the merge commit's full sha, or leave it empty to sweep" >&2
+              exit 1
+            fi
+            out="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --commit "$BV_INPUT_COMMIT")"
           else
             out="$(npx tsx scripts/build-verify-subject.ts --repo "$GITHUB_REPOSITORY" --sweep)"
           fi
-          echo "sha=$(printf '%s' "$out" | sed -n 1p)" >> "$GITHUB_OUTPUT"
-          echo "plan_ref=$(printf '%s' "$out" | sed -n 2p)" >> "$GITHUB_OUTPUT"
+          sha="$(printf '%s' "$out" | sed -n 1p)"
+          plan_ref="$(printf '%s' "$out" | sed -n 2p)"
+          if [ -n "$BV_INPUT_PLAN_REF" ] && [ -n "$plan_ref" ] && [ "$BV_INPUT_PLAN_REF" != "$plan_ref" ]; then
+            echo "refusing: plan_ref input '$BV_INPUT_PLAN_REF' disagrees with the deliverable pull request's marker ('$plan_ref') for $sha — the marker is the record; re-run without plan_ref, or with the marker's value" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "plan_ref=$plan_ref" >> "$GITHUB_OUTPUT"
       - name: prepare the results directory (always, so vt-report can tell absent from empty)
         env:
           BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}

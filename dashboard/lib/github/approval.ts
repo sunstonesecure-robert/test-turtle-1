@@ -22,6 +22,41 @@ export async function findOpenApprovalPr(
 }
 
 /**
+ * Whether the approval pull request for this version has MERGED — the go-ahead
+ * happened, whatever the labels and the tag say at this instant (the same read
+ * `commitPlanUpdate` makes before writing onto the branch). A withdrawal after this
+ * point would close items the freeze is about to track, so the caller refuses.
+ */
+export async function approvalPrMerged(gh: Octokit, repo: RepoRef, input: { slug: string; version: number }): Promise<boolean> {
+  const head = `plan/${input.slug}/v${input.version}`;
+  const { data } = await gh.pulls.list({ ...repo, state: 'closed', head: `${repo.owner}:${head}`, base: 'main' });
+  return data.some((pr) => pr.merged_at !== null);
+}
+
+/**
+ * Close the open approval pull request for a version that is being WITHDRAWN, with a
+ * comment saying so. Nothing else closes it: the freeze is the merge, and a withdrawn
+ * proposal's pull request left open stays green on every required check — G7 passes
+ * because the cascade just withdrew every correction — so anyone with merge rights
+ * could still freeze a plan whose work items the withdrawal has closed. Returns the
+ * number closed, or null when none was open (a proposal withdrawn before Commit).
+ * Not a merge, so no ruleset bypass is involved; the dashboard credential closes what
+ * it opened.
+ */
+export async function closeOpenApprovalPr(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { slug: string; version: number; comment: string },
+): Promise<number | null> {
+  const open = await findOpenApprovalPr(gh, repo, { slug: input.slug, version: input.version });
+  if (!open) return null;
+  // Record first (FR-042), then the state change — the same order every closure here follows.
+  await gh.issues.createComment({ ...repo, issue_number: open.number, body: input.comment });
+  await gh.pulls.update({ ...repo, pull_number: open.number, state: 'closed' });
+  return open.number;
+}
+
+/**
  * Tag the pull request as an approval, so a governed repo's pull request list says
  * what KIND each row is (operator finding, 2026-08-28).
  *

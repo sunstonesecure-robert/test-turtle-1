@@ -103,13 +103,20 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    every id stable unless a correction requires changing what an id describes. Change NOTHING
    a correction (or recorded answer) does not call for: the operator re-judges only the flagged
    items, so an unasked-for change would ship unreviewed.
-   **`tracking_issue` is the operator's field, not yours.** It links a step to the backlog item
-   that step delivers, and the operator sets it by hand under **Work items** on the review page.
-   CARRY EVERY EXISTING VALUE THROUGH UNCHANGED — silently dropping one un-links work the
-   operator linked and refuses the next build aimed at it. Set one only where a correction
-   explicitly tells you to, or on a step you are ADDING that plainly delivers an open
-   `chunk:title-only` / `chunk:ready` issue you actually read; at most one step per issue, and
-   `null` whenever you are unsure. A wrong link points a build at work nobody asked for.
+   **`tracking_issue` is inherited, never created.** It names the work item (a `chunk:*`
+   issue) a step delivers, and the operator is the only writer of it: they bind every step on
+   the review page, under **Work items**, at **Commit for approval** — so do not "help" by
+   binding ahead of them. The document you read in step 1 is the prior version you inherit
+   from:
+   - **Preserve every binding it carries, unchanged.** Silently dropping one un-links work the
+     operator bound and refuses the next build aimed at it. A correction that explicitly names
+     a `tracking_issue` change is the one exception — carry it out exactly as written.
+   - **Set `null` on every step you add, and on every step you re-scope** so that it no longer
+     delivers what its inherited number tracked. `null` is visibly unbound; a stale or wrong
+     number points a build at work nobody asked for.
+   - **Never read the repository's `chunk:*` issues to bind one** — not the `chunk:ready` list,
+     not a legacy issue, not another workload's item.
+   - **Never bind a number you did not inherit** (or were not handed by a correction).
 4. Upload two artifacts (`upload-artifact` safe output):
    - `plan.json` — the full revised document (must validate against `schemas/plan.schema.json`);
    - `addresses.json` — a JSON array of the correction ISSUE NUMBERS your revision carries out,

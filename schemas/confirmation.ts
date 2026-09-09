@@ -85,6 +85,12 @@ export const Attribution = z
   .object({
     name: attributed('by.name'),
     contact: attributed('by.contact'),
+    // CAPTURED, NOT GATED ON (2026-09-08, GHI #194 rider for #193). The capacity in
+    // which the person answered. Optional because the gate reads one decision and no
+    // step yet names the roles it needs; when one does (GHI #193), the ledger already
+    // carries what `confirmationVerdict` will count, so nobody is re-asked. Blank when
+    // present is refused like the other two: an empty role says less than no role.
+    role: attributed('by.role').optional(),
   })
   .strict();
 
@@ -170,7 +176,13 @@ export const Legacy = z
     step_digest: stepDigest,
     authority: z.enum(['customer', 'clinical', 'legal', 'security-regulatory']),
     confirmer: z
-      .object({ name: attributed('confirmer.name'), contact: attributed('confirmer.contact') })
+      .object({
+        name: attributed('confirmer.name'),
+        contact: attributed('confirmer.contact'),
+        // The JSON Schema's Legacy branch shares the Attribution $def, so the mirror
+        // admits the same optional key here — no legacy writer ever set it.
+        role: attributed('confirmer.role').optional(),
+      })
       .strict(),
     confirmed_at: z.string().datetime({ offset: true }),
     scope: attributed('scope'),

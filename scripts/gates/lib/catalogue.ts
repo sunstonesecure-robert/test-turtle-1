@@ -83,6 +83,16 @@ export const PLAN_CATALOGUE: readonly DeclaredGate[] = [
   // operator is never asked to approve the system rewriting its own controls, and
   // so no build spends money reaching D5.
   { id: 'G16', requirement: 'FR-068' },
+  // G17/G18 — APPROVAL READINESS (decision D6, 2026-09-08; GHI #197 and #146). Every
+  // gate above asks whether the plan is well-formed, fully judged, or about the right
+  // subject. These ask whether what it promises can be BUILT and VERIFIED once frozen:
+  // G17 every MUST step tracks a work item (a build is dispatched per work item, D4),
+  // G18 every MUST-mapped verification target carries an executable `run` (a prose
+  // target is never executed and L3 then fails closed). New ids rather than a wider
+  // G3/G4 because an id names one remedy. Not re-judged on tags frozen before they
+  // existed — that exemption is the gate-set stamp's business (GHI #151).
+  { id: 'G17', requirement: 'FR-017' },
+  { id: 'G18', requirement: 'FR-063' },
 ];
 
 /**

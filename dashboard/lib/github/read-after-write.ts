@@ -8,7 +8,7 @@
  * changed can still carry the pre-write labels. Either way the operator sees the
  * page they had BEFORE their click and concludes the button did nothing — a
  * failure indistinguishable from a broken button, and one this repo has now met
- * live three times (a ✗ with no correction, 2026-08-16; a backlog chunk that
+ * live three times (a ✗ with no correction, 2026-08-16; a work item that
  * needed a browser refresh, PB-015; and the conditional-GET variant the client's
  * cache-busting handles).
  *

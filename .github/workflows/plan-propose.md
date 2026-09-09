@@ -126,7 +126,7 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    (D2 reports not-applicable and says so). Keep it as narrow as the step's `acceptance` actually
    requires: a wide scope is a wide authorization, and the operator is approving it.
 
-   **Every MUST-mapped verification target SHOULD declare `run`** — the executable form of its
+   **Every MUST-mapped verification target MUST declare `run`** (the approval gate G18 refuses a plan whose MUST-mapped target has none; the operator can add one on the review, but you should not make them) — the executable form of its
    prose `check`: ONE shell command, run from the repo root of the merged deliverable, whose exit
    status is the verdict (0 = pass). Prefer it strongly, because a target with `run` is verified
    deterministically, for free, and reproducibly, whereas a target with only prose needs an agent
@@ -141,29 +141,33 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
      "maps_to": ["step-greeting"] }
    ```
 
-   A MUST target with no `run` leaves the workload uncompletable until someone adds one, so if you
+   A MUST target with no `run` is refused at approval and would leave the workload uncompletable, so if you
    genuinely cannot express a check as a command, say so as a `q-` question rather than leaving it
    silently unverifiable. The plan's `feature` field MUST be exactly `${{ inputs.workload }}` —
    never invent a feature name (no spec-kit-style `NNN-` prefixes): the publisher refuses any
    plan whose `feature` does not name an existing workload (PB-004 finding D), and every
    `plan/<slug>/v<N>` reference in your Andon body MUST use that same slug.
-5. Link each step to the backlog item it delivers, where one exists. Read the OPEN issues
-   labeled `chunk:title-only` or `chunk:ready` — those are the backlog. When a step plainly
-   delivers one of them, set that step's `tracking_issue` to that issue's number; otherwise
-   leave it `null`. This is what tells a build dispatched against a backlog item WHICH step it
-   is doing, and it is how that item's own gates (fully written up, intent confirmed, not
-   contradicted) come to gate the right piece of work — a build naming an item no step tracks
-   is refused before any work happens. Rules, all enforceable and all checked by a human on the
-   review page:
-   - **At most one step per item.** Two steps naming the same issue makes "which step is this
-     build for?" unanswerable.
-   - **Only when it is obvious.** A guess is worse than `null`: an unlinked step is visibly
-     unlinked and the operator links it in one click, whereas a WRONG link points a build at
-     work nobody asked for and reads as deliberate. Prefer `null` whenever you are unsure.
-   - **Never invent a number.** Only issues you actually read and that carry a `chunk:*` label.
-   The operator sees every link you propose, under **Work items** on the review page, and
-   corrects it there — so state the correspondence you relied on in the Andon body when it is
-   not self-evident from the titles.
+5. **`tracking_issue` is inherited, never created.** Each step's `tracking_issue` names the
+   work item (a `chunk:*` issue) that step delivers; it is what tells a build dispatched for
+   that item WHICH step it is doing, and it is how the item's own gates come to gate the right
+   piece of work. You do not decide it. The operator is the only writer of this field: they
+   bind every step to its work item on the review page, under **Work items**, at **Commit for
+   approval** — creating the items from your steps where none exist yet — so do not "help" by
+   binding ahead of them. Your whole job here is to carry forward what already exists:
+   - **Preserve every binding inherited from the prior version.** When a frozen
+     `plan/${{ inputs.workload }}/v<N-1>` exists, read its document and copy each step's
+     `tracking_issue` onto the step with the same id, unchanged. Silently dropping one un-links
+     work the operator bound and refuses the next build aimed at it.
+   - **Set `null` on every new step, and on every step you re-scoped** so that it no longer
+     delivers what the inherited number tracked. `null` is visibly unbound; the operator binds it
+     in one click. A stale or wrong number points a build at work nobody asked for and reads as
+     deliberate.
+   - **Never read the repository's `chunk:*` issues to bind one.** Not the `chunk:ready` list,
+     not a legacy issue, not another workload's item — matching a step to an existing issue is
+     the operator's judgment, not yours.
+   - **Never bind a number you did not inherit.** The only `tracking_issue` values that may
+     appear in your document are ones the prior version carried; when there is no prior version,
+     every step is `null`.
 6. Compute `<N>` = one more than the highest version among BOTH the frozen
    `plan/${{ inputs.workload }}/v*` tags AND the existing `plan/${{ inputs.workload }}/v*`
    branches. Branches count because an abandoned proposal (published, then withdrawn without

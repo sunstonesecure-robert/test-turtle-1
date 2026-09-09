@@ -20,6 +20,22 @@
 #   transition on the pull_request close event — flips build:awaiting-merge to
 #              build:merged (or build:refused when closed unmerged), whoever merged it.
 #
+# THE MERGE JOB ALSO STARTS `build-verify` (GHI #160, decision D5 of 2026-09-08). A merge
+# made with GITHUB_TOKEN emits no `push`, and this workflow already sits at the fourth
+# `workflow_run` level — GitHub stops the chain at three — so nothing downstream of the
+# bot's merge ever started on its own; every "automated" verify in the PB-013 log was a
+# hand dispatch. `workflow_dispatch` is exempt from both rules, so after each merge this
+# job dispatches `build-verify` with the merge commit, and verification is on the card
+# within seconds. That exemption is documented by GitHub and observed here for the first
+# time by experiment E1 (docs/shared-understanding/EXPERIMENTS.md): a merge with no
+# `build-verify` run behind it — on a GREEN build-merge run — is E1 failing, and
+# `gh workflow run build-verify.yml` by hand is the recovery. The dispatch step runs
+# even when the sweep step FAILED part-way (`if: !cancelled()` below): a merge the
+# sweep made before a rate limit or a 5xx stopped it is recorded in merge-results.jsonl
+# and still gets its verification, and the red run says what the sweep could not
+# finish. A red build-merge with verify runs behind its merges is therefore an ordinary
+# API failure, not E1. There is deliberately no scheduled sweep.
+#
 # IT RE-RUNS THE GATE RATHER THAN READING ITS CHECK RUN. A check run is a record of
 # what the gate said at some past moment about some past commit; merging on it means
 # merging on a claim. `build-merge.ts` re-runs deliverable-gate in-process, so this
@@ -76,6 +92,10 @@ jobs:
       contents: write # pulls.merge writes the merge commit onto the base branch
       pull-requests: write # pulls.list finds the candidates, pulls.merge performs the merge
       issues: write # setBuildLabel moves build:* to merged once the merge lands
+      actions: write # starts build-verify by workflow_dispatch for each merge this sweep made
+      #   (GHI #160, D5) — the only way a run starts downstream of a GITHUB_TOKEN merge at
+      #   this chain depth. Held by THIS job alone: `transition` below merges nothing and
+      #   therefore has nothing to verify.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -87,6 +107,7 @@ jobs:
           node-version: 24
       - run: npm ci
       - name: merge every deliverable the approved plan pre-authorized
+        id: sweep
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BUILD_REQUIRES_OPERATOR_MERGE: ${{ vars.BUILD_REQUIRES_OPERATOR_MERGE }}
@@ -94,7 +115,47 @@ jobs:
           # like the line above: a touched path inside one of these globs is never merged
           # here. A subject workflow is never merged here regardless of this value.
           CHECKPOINT_PATHS: ${{ vars.CHECKPOINT_PATHS }}
-        run: npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --sweep
+        # The sweep prints one JSON line per deliverable it judged; kept in a file so the
+        # next step can read which ones MERGED without re-asking GitHub what just happened.
+        run: |
+          set -euo pipefail
+          npx tsx scripts/build-merge.ts --repo "$GITHUB_REPOSITORY" --sweep | tee "$RUNNER_TEMP/merge-results.jsonl"
+      - name: start build-verify for every merge this sweep made
+        # Runs whether the sweep step succeeded or FAILED — never when it was skipped
+        # (checkout or npm ci failed, so no merge was made). A sweep that throws on a
+        # broken API mid-loop has already merged and recorded some deliverables; a
+        # GITHUB_TOKEN merge emits no `push`, so nothing else would ever verify them.
+        # The job still goes red on the sweep's failure; the merges do not go unverified.
+        if: ${{ !cancelled() && steps.sweep.outcome != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The workflow FILE on the default branch, where the installed oversight
+          # machinery lives. Only `commit` is passed: the frozen plan ref is read by
+          # build-verify from the deliverable pull request's marker — the writer's record,
+          # not this job's claim.
+          BM_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # A failed sweep leaves the file partial or empty; an absent file means it never
+          # started. Both read as "nothing merged" here — the sweep step is what went red.
+          [ -f "$RUNNER_TEMP/merge-results.jsonl" ] || : > "$RUNNER_TEMP/merge-results.jsonl"
+          merged="$(grep '^{' "$RUNNER_TEMP/merge-results.jsonl" | jq -r 'select(.outcome == "merged") | .sha' || true)"
+          if [ -z "$merged" ]; then
+            echo "nothing merged in this sweep — no verification to start"
+            exit 0
+          fi
+          while IFS= read -r sha; do
+            [ -n "$sha" ] || continue
+            # A dispatch that fails must fail THIS run: the merge stands, and a red
+            # build-merge is how the missing verification gets seen. The remedy is the
+            # same command by hand.
+            if gh workflow run build-verify.yml --repo "$GITHUB_REPOSITORY" --ref "$BM_DEFAULT_BRANCH" -f "commit=$sha"; then
+              echo "started build-verify for merge commit $sha (E1: expect a run with event=workflow_dispatch within a minute)"
+            else
+              echo "could not start build-verify for merge commit $sha — the merge stands and is UNVERIFIED; run: gh workflow run build-verify.yml -f commit=$sha" >&2
+              exit 1
+            fi
+          done <<< "$merged"
   transition:
     # The close event. Who merged it is not this job's business — only that it happened.
     if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')

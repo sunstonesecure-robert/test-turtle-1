@@ -8,7 +8,7 @@ import type { GateResult } from './runner';
 /**
  * Plan↔work-item binding checks (GHI #102).
  *
- * `plan.steps[].tracking_issue` names the backlog chunk a step delivers, and the
+ * `plan.steps[].tracking_issue` names the work item a step delivers, and the
  * binding is one-to-one. Nothing enforced that until now, for the plain reason
  * that nothing WROTE the field either (GHI #101) — a constraint on a field no
  * writer sets constrains nothing. Both landed together deliberately: a repo that
@@ -101,7 +101,7 @@ export async function checkG14WorkItemUnclaimedElsewhere(
   const claimed = plan.steps
     .filter((s): s is typeof s & { tracking_issue: number } => typeof s.tracking_issue === 'number')
     .map((s) => ({ stepId: s.id, issue: s.tracking_issue }));
-  // Nothing claimed is the ordinary state of a plan whose steps no backlog item
+  // Nothing claimed is the ordinary state of a plan whose steps no work item
   // covers, and it costs no API call to say so.
   if (claimed.length === 0) return { id: 'G14', status: 'pass', requirement: 'FR-046' };
 

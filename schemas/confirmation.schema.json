@@ -65,10 +65,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "contact"],
-      "description": "Named person/org + contact context — both halves are what make an entry attributable. A name nobody can reach cannot be corroborated afterwards; a contact with no name attributes the decision to no one.",
+      "description": "Named person/org + contact context — both halves are what make an entry attributable. A name nobody can reach cannot be corroborated afterwards; a contact with no name attributes the decision to no one. `role` (added 2026-09-08, GHI #194) is CAPTURED, never gated on: the capacity in which the person answered — 'VP Billing', 'attending physician', 'compliance officer'. Today the gate reads one decision and the confirmation skills hold the quorum by procedure; when a step can name required roles (GHI #193), the verdict will count what is already here rather than re-asking every authority.",
       "properties": {
         "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
-        "contact": { "type": "string", "minLength": 1, "pattern": "\\S" }
+        "contact": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "role": { "type": "string", "minLength": 1, "pattern": "\\S" }
       }
     },
     "Legacy": {

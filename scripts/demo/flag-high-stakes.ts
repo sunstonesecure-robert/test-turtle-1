@@ -137,8 +137,19 @@ async function flagStep(
   // routing. Checked and bound BEFORE the plan write so a mistyped step id cannot
   // leave an orphan chunk behind.
   const chunkCreated = target.tracking_issue == null;
+  // A work item is created COMPLETE (FR-016 as amended 2026-09-07): the demo derives
+  // the requirement from the step it tracks — intent and acceptance verbatim, and the
+  // acceptance doubles as the outcome metric, which is honest for a demo and wrong for
+  // real work (a real metric is a single measurable pass/fail statement).
   const trackingIssue = chunkCreated
-    ? (await createChunk(gh, repo, { title: target.title })).issueNumber
+    ? (
+        await createChunk(gh, repo, {
+          title: target.title,
+          intent: target.intent,
+          outcomeMetric: target.acceptance,
+          acceptance: target.acceptance,
+        })
+      ).issueNumber
     : target.tracking_issue!;
 
   // commitPlanUpdate is the review page's write seam: it refuses a frozen ref and

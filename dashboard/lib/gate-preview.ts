@@ -4,6 +4,7 @@ import type { PlanDoc } from '../../schemas/plan';
 import { buildPreflight } from '../../scripts/gates/build-preflight';
 import { blockingGates, phraseGate, type GateReport, type GateResult } from '../../scripts/gates/lib/runner';
 import { checkG2ExactlyOnePriority, checkG3MustCoverage, checkG4SinglePassFail } from '../../scripts/gates/lib/checks-scope';
+import { checkG17MustStepsTracked, checkG18MustTargetsExecutable } from '../../scripts/gates/lib/checks-approval';
 
 /**
  * Scope-gate preview (T060, US2): G2/G3/G4 for the dashboard, REUSING the
@@ -15,21 +16,52 @@ import { checkG2ExactlyOnePriority, checkG3MustCoverage, checkG4SinglePassFail }
  * parsed doc as its raw plan: a PlanDoc that survived G1's schema always
  * satisfies the raw-shape rules, the same defense-in-depth pass it is in the
  * wired gate.
+ *
+ * G17 AND G18 JOINED 2026-09-08 (decision D6, GHI #197 / #146) on the same
+ * terms: the very functions `plan-gate` runs, imported, never restated. They
+ * ask whether the plan can be built and verified once frozen — a MUST step
+ * with no work item cannot be dispatched (D4), a MUST target with no `run` is
+ * never verified — and both were met live as dead ends AFTER approval. The
+ * name `scopeGatePreview` stays: it is what the review page imports, and the
+ * set it previews has always been "the pure plan-gate checks", which now has
+ * five members.
+ *
+ * `workItemsPendingFor` is the one place the preview and the gate read
+ * different inputs, on purpose. Under D2 the Commit-for-approval click is what
+ * CREATES the work items for untracked MUST steps and writes the links, so
+ * before that click every new plan's MUST steps are `null` by design — a
+ * preview judging the document as it stands would be red on every new plan and
+ * would disable the button that fixes it. The review page names the steps the
+ * commit is about to create items for; G17 counts them as tracked. Omitted, the
+ * preview reads exactly what the gate will read.
  */
 
 export interface ScopeGatePreview {
   pass: boolean;
-  /** stable order G2, G3, G4 — the same relative order plan-gate reports */
+  /** stable order G2, G3, G4, G17, G18 — the same relative order plan-gate reports */
   gates: GateResult[];
   /** failing gates phrased for the disabled-button title: "G3: <detail> (FR-012)" */
   failures: string[];
 }
 
-export function scopeGatePreview(plan: PlanDoc): ScopeGatePreview {
-  const gates = [checkG2ExactlyOnePriority(plan), checkG3MustCoverage(plan), checkG4SinglePassFail(plan)];
+export function scopeGatePreview(
+  plan: PlanDoc,
+  opts: {
+    /** MUST step ids whose work items the Commit-for-approval click will create (D2) —
+     *  counted as tracked by G17 in the preview only; see the docblock */
+    workItemsPendingFor?: Iterable<string>;
+  } = {},
+): ScopeGatePreview {
+  const gates = [
+    checkG2ExactlyOnePriority(plan),
+    checkG3MustCoverage(plan),
+    checkG4SinglePassFail(plan),
+    checkG17MustStepsTracked(plan, { pendingStepIds: opts.workItemsPendingFor }),
+    checkG18MustTargetsExecutable(plan),
+  ];
   // Deliberately NOT `refusalDetail`: this one appends `(FR-0NN)` for the
   // disabled-button title, which is a different string for a different reader.
-  // Safe to keep separate because `absent` is unreachable here — these three
+  // Safe to keep separate because `absent` is unreachable here — these five
   // checks are CALLED, not looked up in a catalogue, so the status the shared
   // formatter exists to stop dropping cannot arise on this path.
   const failures = gates
@@ -47,7 +79,7 @@ export function scopeGatePreview(plan: PlanDoc): ScopeGatePreview {
  * What preflight would say about a dispatch, run READ-ONLY before the operator
  * leaves the page.
  *
- * The dashboard previews gate outcomes everywhere except the backlog's build
+ * The dashboard previewed gate outcomes everywhere except the work items' build
  * dispatch, which handed the operator four values to copy and no indication of
  * whether the build would be allowed to start — the verdict arrived as a failed
  * Actions run. `actions.ts` states the principle this restores: the operator should

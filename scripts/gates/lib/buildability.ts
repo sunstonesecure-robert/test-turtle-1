@@ -10,7 +10,7 @@ import type { GateResult } from './runner';
  *
  * THE GAP THIS FILLS. Nothing anywhere reported that a workload's approved plan
  * can never be built. The operator found out by dispatching a build and reading a
- * failed Actions run; `/workloads`, `/backlog` and the readiness check all showed
+ * failed Actions run; `/workloads`, the work-item cards and the readiness check all showed
  * the workload as fine. Two live workloads in the governed repo were in exactly
  * that state on 2026-08-17, and three more were working only because obsolete
  * files nobody meant to keep had never been cleaned up — a tidy-up commit would

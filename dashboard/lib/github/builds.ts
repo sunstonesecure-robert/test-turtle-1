@@ -1,11 +1,15 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
-import { errorStatus } from './errors';
+import { errorMessage, errorStatus, Refusal } from './errors';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
-import { readPlanAtRef, slugFromPlanRef } from './plans';
+import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha } from './plans';
+import { findIntentConfirmation, getChunk } from './chunks';
+import { getWorkload } from './workloads';
 import type { PlanStep } from '../../../schemas/plan';
 import type { MergeAuthority } from '../../../schemas/executor';
 import { checkpointPathsTouched, type CheckpointPath } from '../../../scripts/gates/lib/checkpoint-paths';
+import { checkB5ConfirmationRecorded } from '../../../scripts/gates/lib/checks-preflight';
+import { AGENTIC_WORKFLOWS } from '../../../scripts/gates/lib/readiness';
 import { readCheckpointPaths } from './checkpoint-config';
 
 /**
@@ -517,4 +521,365 @@ export async function resolveVerifiedCommit(
   return newest?.mergeCommitSha
     ? { sha: newest.mergeCommitSha, source: 'merged-deliverable', prNumber: newest.number }
     : { sha: frozenSha, source: 'frozen-plan' };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Dispatching a build (GHI #196; decision D4, 2026-09-08) — the one governed
+ * action the dashboard could not perform.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The workflow every build runs as, and the file it must exist as on the target.
+ *
+ * Derived from the readiness list, not typed here: `init --verify` (I5) asserts this
+ * exact filename exists in the target, and `workflowDispatchUrl` derives its link from
+ * the same constants. Three readers of one filename must not be able to disagree.
+ */
+const BUILD_WORKFLOW = 'build-template' satisfies (typeof AGENTIC_WORKFLOWS)[number];
+export const BUILD_WORKFLOW_PATH = `.github/workflows/${BUILD_WORKFLOW}.lock.yml`;
+
+export interface DispatchBuildInput {
+  slug: string;
+  /** the work item (chunk issue number) this build delivers. Never optional: the
+   *  dashboard dispatches per work item only (D4) — a chunkless "whole plan" build is
+   *  the Actions UI's legacy route, and the agent choosing the step is GHI #116's
+   *  problem, not a feature. */
+  chunk: number;
+  /** nobody watching — allowed only on a work item whose intent the operator confirmed */
+  unattended: boolean;
+  /** @login of the operator who clicked, and when — the event comment's attribution */
+  actor: string;
+  at: string;
+}
+
+export interface DispatchBuildResult {
+  /** the run GitHub created, once it appeared; null when it had not yet — the caller
+   *  links the Runs page, never a guessed id */
+  runId: number | null;
+  /** the FULLY-QUALIFIED ref the dispatch was made on: `refs/tags/plan/<slug>/v<N>` */
+  ref: string;
+  /** the exact `workflow_dispatch` inputs GitHub received */
+  inputs: Record<string, string>;
+  /** the frozen plan, by its short name (`plan/<slug>/v<N>`) — what the run's
+   *  `head_branch` will read as, and what the operator knows the plan by */
+  planRef: string;
+  /** the workload issue the event comment was recorded on */
+  workloadIssue: number;
+}
+
+export interface DispatchBuildOptions {
+  /** how many times to look for the new run before giving the caller `null` */
+  attempts?: number;
+  /** pause between looks, in milliseconds */
+  delayMs?: number;
+}
+
+/**
+ * The sentence the workload card, the plan review and `dispatchBuild` all use for a
+ * flagged step whose confirmation is not on record — one wording, so the button that
+ * is withheld and the refusal a hand-crafted POST meets say the same thing. Names the
+ * authority and where the record is made; no gate id (operator-visible copy).
+ */
+export function awaitingConfirmationSentence(step: Pick<PlanStep, 'id' | 'authority'>): string {
+  const who = step.authority ? `${step.authority.replace('-', ' and ')} confirmation` : 'outside confirmation';
+  return `step ${step.id} is flagged high-stakes and its ${who} is not on record, so the build's own gate would refuse it before the agent started. Record the confirmation under High-stakes on the plan review, then dispatch.`;
+}
+
+/**
+ * Dispatch a build of ONE work item of a workload's official frozen plan, on the frozen
+ * tag by construction.
+ *
+ * WHY THE REF IS DERIVED AND FULLY QUALIFIED. Runs 33931241186 and 33976904559 on
+ * `lza-phase0` were both refused at the workflow's own tag guard because GitHub's
+ * Run-workflow picker offers the BRANCH `plan/lza-phase0/v1` first and the tag of the
+ * same name second; the operator picked what was offered. The guard was right; the door
+ * was wrong. Here the ref is `refs/tags/` + the tag `resolveCurrent` found — the newest
+ * frozen version, which is the official plan by derivation (GHI #44) — so no caller can
+ * type a name, and the tag/branch ambiguity cannot arise. The workflow's first step and
+ * preflight B8 still check it; this makes the check unable to fail for this door.
+ *
+ * WHY IT REFUSES WHAT THE RUNNER WOULD REFUSE. Every refusal below is a question the
+ * preflight asks on the runner two minutes later — B7 (workload active), B3 (the work
+ * item is `chunk:ready` and exactly one step of THIS plan tracks it), B4 (an unattended
+ * run has the confirmation on record). Asking them here, read-only, before spending a
+ * run is `actions.ts`'s principle: the refusal before the click, never only after. The
+ * gate remains the authority (GHI #108); this is a preview that happens to refuse. The
+ * sentences carry no gate ids — they reach the operator's page verbatim (house rule).
+ *
+ * Nothing is written on any refusal. The dispatch is the first write, the event comment
+ * on the workload issue the second; the run lookup after them is read-only and may
+ * fail without undoing either.
+ */
+export async function dispatchBuild(
+  gh: Octokit,
+  repo: RepoRef,
+  input: DispatchBuildInput,
+  opts: DispatchBuildOptions = {},
+): Promise<DispatchBuildResult> {
+  const { slug, chunk } = input;
+  if (!Number.isInteger(chunk) || chunk <= 0) {
+    throw new Refusal(
+      `"${String(chunk)}" is not a work item number — a build delivers one work item, so no run was started. Dispatch from a work item's own row.`,
+    );
+  }
+
+  // 1. The official plan: the newest frozen tag, or nothing to build from.
+  const planRef = await resolveCurrent(gh, repo, slug);
+  if (planRef === null) {
+    throw new Refusal(
+      `workload ${slug} has no approved plan — nothing is frozen to build from, so no run was started. Approve a plan first (Commit for approval, then merge the approval pull request); the frozen tag that creates is the only ref a build runs on.`,
+    );
+  }
+  // The tag's commit, for the record. `resolveCurrent` just listed this tag and tags
+  // are never deleted, so an absent answer here is a fault, not a state.
+  const frozenSha = await tagTargetSha(gh, repo, planRef);
+  if (frozenSha === null) throw new Error(`frozen tag ${planRef} was listed but cannot be resolved to a commit`);
+
+  // 2. The workload must be active (B7 would refuse anyway — spend no run).
+  const workload = await getWorkload(gh, repo, slug);
+  if (!workload) {
+    throw new Refusal(
+      `no workload is named ${slug} — a build belongs to a workload, and none carries this slug, so no run was started. Introduce the workload first.`,
+    );
+  }
+  if (workload.state !== 'active') {
+    throw new Refusal(
+      `workload ${slug} is ${workload.state ?? 'in no single state (its issue does not carry exactly one workload label)'}, not active — the build's own preflight would refuse it on the runner, so no run was spent. ${inactiveWorkloadRemedy(workload.state)}`,
+    );
+  }
+
+  // 3. The work item must be a ready chunk that exactly one step of THIS frozen plan
+  //    tracks (B3's binding). A chunk of another workload, another version, or none
+  //    is refused here rather than two minutes later on the runner.
+  const item = await getChunk(gh, repo, chunk);
+  if (!item) {
+    throw new Refusal(
+      `issue #${chunk} is not a work item (it carries no work-item label) — a build delivers one work item, so no run was started. Dispatch from a work item's own row.`,
+    );
+  }
+  if (item.state !== 'ready') {
+    throw new Refusal(
+      `work item #${chunk} still carries the retired title-only label — a build delivers a work item that says what "done" means, so no run was started. Write its intent, outcome metric and acceptance on its workload's card under Work items — an item the plan tracks is listed there, not among the unbound ones — and dispatch again.`,
+    );
+  }
+  const missing = (['intent', 'outcomeMetric', 'acceptance'] as const).filter((f) => item[f] === null);
+  if (missing.length > 0) {
+    throw new Refusal(
+      `work item #${chunk} is labelled ready but its requirement is missing ${missing.join(', ')} — the runner's gate would refuse the build, so no run was spent. Complete the requirement on the work item and dispatch again.`,
+    );
+  }
+  // `readPlanAtRef` THROWS on a frozen document that no longer parses. That is a fault:
+  // the freeze wrote it, nothing else can, and no remedy of the operator's fixes it.
+  const plan = await readPlanAtRef(gh, repo, planRef);
+  const claiming = plan.steps.filter((s) => s.tracking_issue === chunk);
+  if (claiming.length === 0) {
+    throw new Refusal(
+      `work item #${chunk} is not tracked by any step of ${planRef} — the gate on the runner would refuse this build, so no run was spent. A build delivers the step that tracks its work item: re-open the plan and bind a step to #${chunk} at Commit for approval, or dispatch one of the work items this plan does track.`,
+    );
+  }
+  if (claiming.length > 1) {
+    throw new Refusal(
+      `work item #${chunk} is tracked by ${claiming.map((s) => s.id).join(' and ')} in ${planRef} — one work item delivers one step, so this build cannot say which step it is for and the runner's gate would refuse it. Re-open the plan and give each step its own work item.`,
+    );
+  }
+  const step = claiming[0]!;
+
+  // 3b. A flagged step's outside confirmation must be on record (the runner's B5,
+  //     scoped to this one step — GHI #87). Asked here with the gate's own function
+  //     so the click and the runner cannot disagree, and so a run is not spent to
+  //     learn what the review's High-stakes section already shows. Unflagged steps
+  //     cost nothing.
+  if (step.high_stakes) {
+    const b5 = await checkB5ConfirmationRecorded(gh, repo, planRef, [step.id]);
+    if (b5.status !== 'pass') {
+      throw new Refusal(`${awaitingConfirmationSentence(step)} No run was started.`);
+    }
+  }
+
+  // 4. Unattended needs the confirmation ON RECORD — the well-formed comment carrying
+  //    identity and timestamp, not the label alone (B4's rule; the label is a light).
+  let confirmation: { by: string; at: string } | null = null;
+  if (input.unattended) {
+    if (!item.intentConfirmed) {
+      throw new Refusal(
+        `work item #${chunk} carries no intent confirmation — an unattended build runs with nobody watching, and only your recorded confirmation authorizes that, so no run was started. Confirm the work item's intent on its row, or dispatch it attended.`,
+      );
+    }
+    confirmation = await findIntentConfirmation(gh, repo, chunk);
+    if (!confirmation) {
+      throw new Refusal(
+        `work item #${chunk} carries the intent:confirmed label but no well-formed confirmation on record — the label without the record authorizes nothing, so no run was started. Confirm the work item's intent again (which writes the record), or dispatch it attended.`,
+      );
+    }
+  }
+
+  // 5. The workflow to run, found by the file it must exist as. Absent from the listing
+  //    is a verified absence (the listing IS the set of workflows GitHub knows), and the
+  //    remedy is init; an unreadable listing throws and is a fault.
+  const workflows = await gh.paginate(gh.actions.listRepoWorkflows, { ...repo, per_page: 100 });
+  const workflow = workflows.find((w) => w.path === BUILD_WORKFLOW_PATH);
+  if (!workflow) {
+    throw new Refusal(
+      `the build workflow is not installed on ${repo.owner}/${repo.repo} (${BUILD_WORKFLOW_PATH} is not among its workflows) — nothing there can run a build, so no run was started. Run \`npm run init\` against the target, then dispatch again.`,
+    );
+  }
+  if (workflow.state !== 'active') {
+    throw new Refusal(
+      `the build workflow is disabled in the Actions UI (state: ${workflow.state}) — GitHub refuses to start it, so no run was started. Re-enable it under Actions → ${BUILD_WORKFLOW} → Enable workflow, then dispatch again.`,
+    );
+  }
+
+  // The runs on this workflow and tag BEFORE the dispatch. GitHub does not return the
+  // run a dispatch creates (204, no body), so "the new run" is found by difference: a
+  // previous build of the same work item on the same tag is a real run on this exact
+  // key, and reading the newest row without this snapshot would link the operator to
+  // it and call it theirs. Clock-free on purpose — comparing `created_at` against the
+  // operator's `at` trusts two clocks to agree.
+  const before = new Set(await listRunIds(gh, repo, workflow.id, planRef));
+
+  // THE DISPATCH. Inputs are the template's own names (`templates/workflows/
+  // build-template.md`, `on.workflow_dispatch.inputs`), every one a string as GitHub
+  // requires. `gates_ref` is sent blank deliberately: the workflow then runs its gates
+  // from the default branch — CURRENT rules over a FROZEN plan (GHI #107).
+  const ref = `refs/tags/${planRef}`;
+  const inputs: Record<string, string> = {
+    plan_ref: planRef,
+    workload: slug,
+    chunk: String(chunk),
+    unattended: input.unattended ? 'true' : 'false',
+    gates_ref: '',
+  };
+  await gh.actions.createWorkflowDispatch({ ...repo, workflow_id: workflow.id, ref, inputs });
+
+  // THE RECORD, before the lookup: who started what is the durable fact; the run id is
+  // a convenience the Runs page can supply if this comment has to stand without it.
+  await gh.issues.createComment({
+    ...repo,
+    issue_number: workload.issueNumber,
+    body: serializeBuildDispatchEvent({
+      slug,
+      chunk,
+      planRef,
+      stepId: step.id,
+      frozenSha,
+      unattended: input.unattended,
+      confirmation,
+      by: input.actor,
+      at: input.at,
+    }),
+  });
+
+  const runId = await findNewRun(gh, repo, workflow.id, planRef, before, opts);
+  return { runId, ref, inputs, planRef, workloadIssue: workload.issueNumber };
+}
+
+function inactiveWorkloadRemedy(state: string | null): string {
+  switch (state) {
+    case 'proposed':
+      return 'Activate the workload from its card, then dispatch.';
+    case 'deferred':
+      return 'Reactivate the workload from its card, then dispatch.';
+    case null:
+      return 'Fix the labels on its issue so it carries exactly one workload state, then dispatch.';
+    default:
+      return 'A completed, canceled or archived workload does not build; introduce a new workload for new work.';
+  }
+}
+
+/** Run ids on one workflow for one plan ref — `head_branch` IS the tag name for a run
+ *  dispatched on a tag, which is what makes the plan ref the session key (FR-013). */
+async function listRunIds(gh: Octokit, repo: RepoRef, workflowId: number, planRef: string): Promise<number[]> {
+  const { data } = await gh.actions.listWorkflowRuns({
+    ...repo,
+    workflow_id: workflowId,
+    branch: planRef,
+    event: 'workflow_dispatch',
+    per_page: 20,
+  });
+  return data.workflow_runs.map((r) => r.id).filter((id) => Number.isInteger(id) && id > 0);
+}
+
+/**
+ * The run the dispatch produced, once GitHub lists it: the newest id on this workflow
+ * and tag that was not there before. A few short looks, then `null` — the dispatch is
+ * accepted asynchronously and a run can take several seconds to appear, but a server
+ * action should not hold the page for long when the Runs page will show it anyway.
+ *
+ * A failed lookup is `null`, not a throw: the build HAS started and the record IS
+ * written by the time this runs, and a crash page over a read that changed nothing
+ * would tell the operator the opposite of what happened.
+ */
+async function findNewRun(
+  gh: Octokit,
+  repo: RepoRef,
+  workflowId: number,
+  planRef: string,
+  before: Set<number>,
+  opts: DispatchBuildOptions,
+): Promise<number | null> {
+  const attempts = opts.attempts ?? 4;
+  const delayMs = opts.delayMs ?? 750;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const fresh = (await listRunIds(gh, repo, workflowId, planRef)).filter((id) => !before.has(id));
+      if (fresh.length > 0) return Math.max(...fresh);
+    } catch (error: unknown) {
+      console.warn(
+        `build dispatched on ${planRef}, but its run could not be looked up (${errorStatus(error) ?? 'no status'}: ${errorMessage(error)}) — the Runs page will show it`,
+      );
+      return null;
+    }
+    if (i + 1 < attempts && delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return null;
+}
+
+// ---------- the dispatch event comment ----------
+
+export interface BuildDispatchEvent {
+  slug: string;
+  chunk: number;
+  planRef: string;
+  unattended: boolean;
+  by: string;
+  at: string;
+}
+
+const BUILD_DISPATCH_RE =
+  /<!--\s*build-dispatch:v1\s+workload:(\S+)\s+chunk:(\d+)\s+plan:(\S+)\s+unattended:(true|false)\s+by:@(\S+)\s+at:(\S+?)\s*-->/;
+
+/**
+ * The event comment on the workload issue: a visible sentence for the operator reading
+ * the issue, then the machine-readable marker (the same dual rendering every other
+ * event comment here uses — a marker-only body renders as an EMPTY comment on GitHub).
+ * Attribution is the point: the run's own actor is the dashboard's token, so without
+ * this line the record would say a robot started the build.
+ */
+function serializeBuildDispatchEvent(e: {
+  slug: string;
+  chunk: number;
+  planRef: string;
+  stepId: string;
+  frozenSha: string;
+  unattended: boolean;
+  confirmation: { by: string; at: string } | null;
+  by: string;
+  at: string;
+}): string {
+  const mode = e.unattended
+    ? `unattended — nobody watching, authorized by the intent confirmation of @${e.confirmation?.by ?? 'unknown'} at ${e.confirmation?.at ?? 'unknown'}`
+    : 'attended';
+  const visible =
+    `**Build dispatched** for work item #${e.chunk} on \`${e.planRef}\` by @${e.by} at ${e.at}\n` +
+    `> step: ${e.stepId} · mode: ${mode}\n` +
+    `> ref: \`refs/tags/${e.planRef}\` (commit ${e.frozenSha})`;
+  const marker = `<!-- build-dispatch:v1 workload:${e.slug} chunk:${e.chunk} plan:${e.planRef} unattended:${e.unattended} by:@${e.by} at:${e.at} -->`;
+  return `${visible}\n\n${marker}`;
+}
+
+/** The dispatch event a comment records, or null when the comment is not one. */
+export function parseBuildDispatchEvent(body: string): BuildDispatchEvent | null {
+  const m = BUILD_DISPATCH_RE.exec(body);
+  if (!m) return null;
+  return { slug: m[1]!, chunk: Number(m[2]), planRef: m[3]!, unattended: m[4] === 'true', by: m[5]!, at: m[6]! };
 }

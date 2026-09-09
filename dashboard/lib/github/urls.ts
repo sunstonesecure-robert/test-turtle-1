@@ -21,7 +21,7 @@ export type OversightWorkflow =
  * The Run-workflow page for ONE workflow — where its `workflow_dispatch` form
  * lives.
  *
- * The backlog's Dispatch action used to point at `/actions`, the repo's whole
+ * The work items' Dispatch link used to point at `/actions`, the repo's whole
  * run history (live finding, 2026-08-17: "links to github but not a specific
  * action"). That is the wrong page in the most literal sense: the operator was
  * told to dispatch a build and handed a list of everything that ever ran, then
@@ -67,4 +67,14 @@ export function commitUrl(repo: RepoRef, sha: string): string {
 export function blobUrl(repo: RepoRef, ref: string, path: string): string {
   const encoded = path.split('/').map(encodeURIComponent).join('/');
   return `${repoUrl(repo)}/blob/${ref}/${encoded}`;
+}
+
+/**
+ * One workflow run, on the web — where the operator watches a build the dashboard
+ * dispatched (GHI #196). The dispatcher returns the run id once GitHub shows the
+ * run; when it has not appeared yet the caller links the Runs page instead, so
+ * this is only ever built from an id that was read back, never guessed.
+ */
+export function runUrl(repo: RepoRef, runId: number): string {
+  return `${repoUrl(repo)}/actions/runs/${runId}`;
 }

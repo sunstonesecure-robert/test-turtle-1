@@ -40,10 +40,10 @@ export const PlanStep = z
      */
     scope: z.array(z.string().min(1)).optional(),
     /**
-     * The BACKLOG CHUNK issue this step delivers — one field, one meaning
+     * The WORK ITEM issue this step delivers — one field, one meaning
      * (clarified 2026-08-17, GHI #101). It is simultaneously the FR-025 mirror for
      * linkability and the FR-017 build binding, because in this system the issue
-     * that represents a step's work IS its backlog chunk; the alternative, a second
+     * that represents a step's work IS its work item; the alternative, a second
      * `chunk_issue` field, was rejected because all three existing readers already
      * assume that meaning (B3's build binding, confirm-record's `confirmed:*`
      * label, the portfolio's conflict attribution).

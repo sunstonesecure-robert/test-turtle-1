@@ -84,7 +84,7 @@ jobs:
       #
       # An unqualified `actions/checkout` on a `pull_request` event checks out the PR's
       # MERGE COMMIT, and the step below then executes `scripts/gates/plan-gate.ts` out
-      # of it — so an approval pull request could carry a neutered G1–G16 and have its
+      # of it — so an approval pull request could carry a neutered G1–G18 and have its
       # own gate report the required check green. The agent path cannot reach this
       # (`plan-publish` writes only `plans/<slug>/plan.json`, so a plan branch's gate
       # code is whatever base had), but a hand-crafted `plan/**` branch can, and the

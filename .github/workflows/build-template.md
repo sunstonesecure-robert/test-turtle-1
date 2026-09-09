@@ -1,4 +1,11 @@
 ---
+# RUN NAME CARRIES THE BINDING (GHI #196, decision D4 rider of 2026-09-08). `build-publish`
+# is a `workflow_run` consumer and cannot see this run's dispatch inputs, so the
+# workload, the work item and the frozen plan ref travel in the run's name — trusted
+# data for GHI #116's binding, written by GitHub from the inputs, not claimed by the
+# agent. The step id is not a dispatch input (preflight B3 derives it from the plan's
+# `tracking_issue`), so it is not here; slug + work item + plan ref identify the step.
+run-name: "build-template — ${{ inputs.workload }} · #${{ inputs.chunk }} on ${{ inputs.plan_ref }}"
 on:
   workflow_dispatch:
     inputs:

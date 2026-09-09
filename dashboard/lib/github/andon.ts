@@ -14,7 +14,11 @@ import { withdrawOpenCorrections } from './corrections';
 // is referenced only inside a function body, never at module-evaluation time.
 // Imported rather than re-spelled: one definition of the plan document's repo
 // path, so the break body can never name a path no reader looks at.
-import { planPath } from './plans';
+import { parsePlanRef, planPath } from './plans';
+// The approval pull request is the go-ahead's door; a withdrawal has to shut it
+// (or refuse, once it has been walked through). approval.ts imports nothing from
+// here, so this edge closes no cycle.
+import { approvalPrMerged, closeOpenApprovalPr } from './approval';
 // The live/terminal split of the andon:* family, and the one predicate that reads it —
 // taken from the taxonomy rather than re-spelled, so a query here can never disagree with
 // the break page about which labels mean "still waiting on you".
@@ -212,12 +216,26 @@ export async function withdrawProposal(
     throw new Refusal('withdrawal refused: a cause must be recorded (issue-tracker-contract.md §Andon Break)');
   }
   const andon = await getAndon(gh, repo, issueNumber); // throws if the issue is not an Andon break
+  const version = parsePlanRef(andon.planRef);
+  // The approval pull request Commit for approval opened for this version. It is
+  // closed WITH the proposal: left open it stays mergeable — every required check is
+  // green once the cascade has withdrawn the corrections — and a merge would freeze a
+  // plan whose derived work items the withdrawal is about to close (D2/E3, D4).
+  const closePr = async (): Promise<void> => {
+    if (!version) return;
+    await closeOpenApprovalPr(gh, repo, {
+      ...version,
+      comment: `**Closed with the proposal**: Andon #${issueNumber} was withdrawn by @${input.by} at ${input.at} — this plan is not going to be approved.\n> ${cause.replace(/\n/g, '\n> ')}`,
+    });
+  };
   if (andon.labels.includes('andon:superseded')) {
     // Idempotent — already withdrawn (double submit). Not a bare return: a prior
     // attempt may have set the terminal label and then failed before dropping
-    // the live labels or closing, so finish that teardown to converge. No second
-    // cascade or comment — those already ran on the attempt that superseded it.
+    // the live labels, closing, or closing the pull request, so finish that
+    // teardown to converge. No second cascade or comment — those already ran on
+    // the attempt that superseded it.
     await dropLiveLabelsAndClose(gh, repo, issueNumber);
+    await closePr();
     return []; // the cascade already ran on the attempt that superseded it
   }
   if (andon.labels.includes('andon:resolved')) {
@@ -227,6 +245,15 @@ export async function withdrawProposal(
   }
   if (!andon.labels.includes('andon:open') && !andon.labels.includes('andon:under-review')) {
     throw new Refusal(`Andon #${issueNumber} is not a live break (labels: ${andon.labels.join(', ') || 'none'}) — nothing to withdraw`);
+  }
+  // The go-ahead window (the guard `commitPlanUpdate` makes, mirrored): once the
+  // approval pull request has MERGED the freeze is imminent and will tag the plan
+  // whatever the labels say right now. A withdrawal here would close work items the
+  // official version is about to track — refused, and the freeze resolves the break.
+  if (version && (await approvalPrMerged(gh, repo, version))) {
+    throw new Refusal(
+      `Andon #${issueNumber} cannot be withdrawn: the approval pull request for ${andon.planRef} is merged, so the go-ahead has happened and the freeze is imminent. Wait for the plan to freeze — this review resolves on its own — then change it through Re-open`,
+    );
   }
 
   // Cascade first: no correction:open may outlive its break (data-model "Correction").
@@ -253,6 +280,9 @@ export async function withdrawProposal(
   // searchable record; closure is never deletion, FR-042).
   await gh.issues.addLabels({ ...repo, issue_number: issueNumber, labels: ['andon:superseded'] });
   await dropLiveLabelsAndClose(gh, repo, issueNumber);
+  // Last, so a failure here leaves a superseded break whose retry re-enters the
+  // idempotent branch above and closes the pull request then.
+  await closePr();
   return cascaded;
 }
 

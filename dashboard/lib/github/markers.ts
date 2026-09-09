@@ -474,6 +474,58 @@ export function parseIntentConfirmed(body: string): IntentConfirmed | null {
   return m ? { by: m[1]!, at: m[2]!, chunk: Number(m[3]) } : null;
 }
 
+// ---------- Work-item derivation: <!-- chunk-derived:v2 plan:plan/<slug>/v<N> step:step-<id> digest:<sha256> ----------
+
+/**
+ * Where a work item CAME FROM: the plan step it mirrors (ADR-0002, GHI #197, D2).
+ *
+ * Written at Commit for approval on the body of every work item the operator derives
+ * from a step, and re-written whenever Commit rewrites the requirement. It is the
+ * IDEMPOTENCY KEY of that derivation: a resubmitted Commit, or a re-open that inherits
+ * the step, finds the item by (slug, step) and reuses it instead of minting a second
+ * issue for the same work. The plan VERSION is recorded for the audit trail but is not
+ * part of the key — a re-opened plan's v2 carries the same steps as v1 and must find
+ * v1's items, not create twins.
+ *
+ * `digest` is `sha256(intent|outcomeMetric|acceptance)` of the requirement as it was
+ * DERIVED (decision D8 as amended 2026-09-08; experiment E4). Inheritance is not
+ * staleness: when a re-opened plan changes a step, Commit compares what the step now
+ * derives to what the item carries and rewrites the item in place, clearing an
+ * `intent:confirmed` that was given to the old text. B3 checks presence and claim, not
+ * content, so the digest is the record this reconciliation and a future B4 read.
+ * A `v1` marker (written before the digest existed) still parses, with `digest: null`
+ * — an item from before the rule is reconciled by its content, never re-minted.
+ *
+ * Anchored to the same grammars as `parsePlanRef` (`plan/<slug>/v<N>`) and the plan
+ * schema's step id (`step-[a-z0-9-]+`), so a marker can only ever name a plan a
+ * workload could have and a step a plan could carry.
+ */
+export interface DerivationMarker {
+  planRef: string; // plan/<slug>/v<N>
+  stepId: string; // step-*
+  /** sha256 hex of the derived requirement; null on a v1 marker written before it existed */
+  digest: string | null;
+}
+
+const DERIVATION_RE =
+  /<!--\s*chunk-derived:v(1|2)\s+plan:(plan\/[a-z0-9][a-z0-9-]*\/v\d+)\s+step:(step-[a-z0-9-]+)(?:\s+digest:([0-9a-f]{64}))?\s*-->/;
+
+export function serializeDerivationMarker(d: DerivationMarker): string {
+  // Always the current grammar: a v1 marker being re-emitted without a digest would
+  // be a rewrite that forgot to record what it wrote.
+  return d.digest
+    ? `<!-- chunk-derived:v2 plan:${d.planRef} step:${d.stepId} digest:${d.digest} -->`
+    : `<!-- chunk-derived:v1 plan:${d.planRef} step:${d.stepId} -->`;
+}
+
+export function parseDerivationMarker(body: string): DerivationMarker | null {
+  const m = DERIVATION_RE.exec(body);
+  if (!m) return null;
+  // A v2 marker must carry its digest; a v1 must not — anything else is not ours.
+  if ((m[1] === '2') !== (m[4] !== undefined)) return null;
+  return { planRef: m[2]!, stepId: m[3]!, digest: m[4] ?? null };
+}
+
 // ---------- Revision commit trailer: addresses: correction #N ----------
 
 const ADDRESSES_RE = /addresses:\s*correction\s+#(\d+)/i;

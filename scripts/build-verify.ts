@@ -38,6 +38,29 @@ import type { CheckConclusion } from './vt-report';
  * but "approved" is not "trusted with the repository's write scope" — a verification
  * target's job is to look at the tree and say pass or fail, and nothing it needs is
  * in a token.
+ *
+ * A TARGET THAT CHANGES THE CHECKOUT IS NOT A RESULT (GHI #162, option 3 then 1). All
+ * targets run in one writable checkout, one after another. A target that writes a
+ * file — an `npm run fix` that rewrites the thing a later test reads, or a build that
+ * emits what a later assertion looks for — changes the subject every later target
+ * sees, and the check runs would still be recorded against the merge commit as if
+ * they described it. That is GHI #141's shape (a completion earned against code the
+ * repository never held) by a different route. So the runner snapshots the tree
+ * before and after every target: a target that left the checkout different from how
+ * it found it is recorded `action_required`, naming what it touched, whatever its
+ * exit status said — a green verdict on a tree the commit does not contain is not a
+ * verdict on the commit — and the checkout is reset before the next target runs.
+ * G4 already refuses a chained check, so each target is one independent assertion
+ * and the reset breaks nothing the contract permits; a build-then-test plan breaks
+ * loudly here rather than passing silently.
+ *
+ * Known blind spot, accepted and named: the snapshot is `git status --porcelain`
+ * plus HEAD, so `.gitignore`d output (`node_modules/`, `cdk.out/`) is invisible, and
+ * `git clean -fd` (no `-x`) leaves it in place. Ignored paths are, by the
+ * repository's own declaration, not part of the tree the commit describes — and
+ * flagging every `npm ci` would make each real target on an LZA plan
+ * `action_required`. Whether that stays acceptable is the question the first live
+ * run answers on GHI #162.
  */
 
 /** Environment variables a verification target must never inherit. */
@@ -56,6 +79,87 @@ export interface VerifyOutcome {
   results: { id: string; conclusion: CheckConclusion }[];
   /** MUST-mapped targets that carry no `run` and were therefore NOT reported */
   unexecutable: string[];
+  /** targets recorded `action_required` because they changed the checkout (GHI #162),
+   *  with what each one touched — for the run log; `vt-results.json` carries only the
+   *  conclusion */
+  mutated: { id: string; changes: string[] }[];
+}
+
+/**
+ * What the checkout looked like at one instant (GHI #162). Two facts, because a target
+ * can change the tree two ways: write to the working copy (`status` shows it) or move
+ * HEAD by committing or checking out another ref (`status` stays clean; `head` moves).
+ */
+export interface CheckoutSnapshot {
+  /** `git rev-parse HEAD` */
+  head: string;
+  /** `git status --porcelain=v1 --untracked-files=all`, one entry per line, sorted so
+   *  two snapshots of the same state compare equal whatever order git listed them in */
+  status: string[];
+}
+
+/** Runs git in the checkout; a failure is a FAULT (the runner needs a working tree),
+ *  not a refusal — the workflow always checks the merge commit out at `--cwd`. */
+function git(cwd: string, args: string[]): string {
+  const proc = spawnSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  if (proc.error) throw new Error(`git ${args[0]} could not run in ${cwd}: ${proc.error.message}`);
+  if (proc.status !== 0) {
+    throw new Error(
+      `git ${args.join(' ')} exited ${proc.status} in ${cwd}: ${proc.stderr.trim()} — the verification checkout must be a git working tree`,
+    );
+  }
+  return proc.stdout;
+}
+
+export function snapshotCheckout(cwd: string): CheckoutSnapshot {
+  const head = git(cwd, ['rev-parse', 'HEAD']).trim();
+  const status = git(cwd, ['status', '--porcelain=v1', '--untracked-files=all'])
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .sort();
+  return { head, status };
+}
+
+/** One porcelain v1 entry (`XY path`, or `XY from -> to` for a rename) as a phrase. */
+function describeEntry(entry: string): string {
+  const code = entry.slice(0, 2);
+  const path = entry.slice(3);
+  if (code === '??') return `created ${path}`;
+  if (code.includes('D')) return `deleted ${path}`;
+  if (code.includes('R')) return `renamed ${path}`;
+  if (code.includes('A')) return `added ${path}`;
+  if (code.includes('M')) return `modified ${path}`;
+  return `changed ${path} (${code.trim()})`;
+}
+
+/**
+ * PURE: what a target changed between two snapshots, as phrases an operator can read.
+ * Empty means the target left the checkout exactly as it found it. Pre-existing state
+ * (an entry present in BOTH snapshots) is not attributed to the target; an entry that
+ * DISAPPEARED is — the target altered something that was already there.
+ */
+export function checkoutMutation(before: CheckoutSnapshot, after: CheckoutSnapshot): string[] {
+  const changes: string[] = [];
+  if (before.head !== after.head) {
+    changes.push(`moved HEAD from ${before.head.slice(0, 8)} to ${after.head.slice(0, 8)}`);
+  }
+  const was = new Set(before.status);
+  const now = new Set(after.status);
+  for (const entry of after.status) if (!was.has(entry)) changes.push(describeEntry(entry));
+  for (const entry of before.status) if (!now.has(entry)) changes.push(`undid a pre-existing change: ${describeEntry(entry)}`);
+  return changes;
+}
+
+/**
+ * Put the checkout back to `head` with a clean working copy — option 1 on GHI #162,
+ * chosen over a worktree per target because it is one git call and the detection above
+ * already guarantees what the isolation was for: the target that changed the tree is
+ * recorded as such, and the next target sees the merged tree. No `-x`: ignored output
+ * stays, consistent with the snapshot not seeing it.
+ */
+export function resetCheckout(cwd: string, head: string): void {
+  git(cwd, ['reset', '-q', '--hard', head]);
+  git(cwd, ['clean', '-fdq']);
 }
 
 /** The MUST-mapped targets — the only ones completion (L3) reads. A SHOULD/COULD
@@ -76,6 +180,7 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string): Ve
 
   const results: { id: string; conclusion: CheckConclusion }[] = [];
   const unexecutable: string[] = [];
+  const mutated: { id: string; changes: string[] }[] = [];
   const mustIds = new Set(mustMappedTargetIds(plan));
 
   for (const target of targetsToVerify(plan)) {
@@ -84,6 +189,7 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string): Ve
       console.log(`– ${target.id}: no \`run\` — not executable deterministically, NOT reported`);
       continue;
     }
+    const before = snapshotCheckout(cwd);
     const started = Date.now();
     const proc = spawnSync('bash', ['-euo', 'pipefail', '-c', target.run], {
       cwd,
@@ -96,7 +202,7 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string): Ve
     // target means — they are the verification not having happened. `timed_out`
     // and `action_required` say so, and L3 treats every non-success as unmet, so
     // neither can be mistaken for a pass.
-    const conclusion: CheckConclusion =
+    let conclusion: CheckConclusion =
       proc.error && /ETIMEDOUT|timed out/i.test(String(proc.error.message))
         ? 'timed_out'
         : proc.error
@@ -105,12 +211,26 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string): Ve
             ? 'success'
             : 'failure';
     const ms = Date.now() - started;
+    // Snapshotted AFTER the verdict is formed and BEFORE it is recorded: a target that
+    // changed the tree has its verdict replaced, not annotated (GHI #162).
+    const changes = checkoutMutation(before, snapshotCheckout(cwd));
+    if (changes.length > 0) {
+      conclusion = 'action_required';
+      mutated.push({ id: target.id, changes });
+    }
     console.log(`${conclusion === 'success' ? '✓' : '✗'} ${target.id} (${ms}ms) — ${target.run}`);
     if (proc.stdout?.trim()) console.log(`  stdout: ${proc.stdout.trim().slice(0, 2000)}`);
     if (proc.stderr?.trim()) console.log(`  stderr: ${proc.stderr.trim().slice(0, 2000)}`);
+    if (changes.length > 0) {
+      console.log(
+        `  CHANGED THE CHECKOUT (exit ${proc.status ?? 'none'}): ${changes.join('; ')} — recorded action_required, because a ` +
+          'result about a tree the merge commit does not contain is not a result about the commit; checkout reset before the next target',
+      );
+      resetCheckout(cwd, before.head);
+    }
     results.push({ id: target.id, conclusion });
   }
-  return { planRef, results, unexecutable };
+  return { planRef, results, unexecutable, mutated };
 }
 
 export async function buildVerify(
@@ -193,6 +313,16 @@ if (isMain) {
           `NOT VERIFIED (no \`run\` on a MUST-mapped target): ${outcome.unexecutable.join(', ')} — no check run will ` +
             'be recorded for these, so completion (L3) stays refused until the plan is re-opened to add an ' +
             'executable form or a conformant executor interprets them in verify mode.',
+        );
+      }
+      if (outcome.mutated.length > 0) {
+        // Also loud, also not a failure of this run: the results file carries the
+        // `action_required`, this line carries the why the check run cannot.
+        console.log(
+          `CHANGED THE CHECKOUT (recorded action_required, GHI #162): ${outcome.mutated
+            .map((m) => `${m.id} — ${m.changes.join('; ')}`)
+            .join(' | ')}. A verification target must leave the tree as the merge commit has it; ` +
+            'make the target read-only, or re-open the plan to move the build step out of verification.',
         );
       }
       // The RUN's own status reflects whether verification could be performed, not

@@ -12,6 +12,7 @@ import {
   checkG14WorkItemUnclaimedElsewhere,
   checkG15NoUnaddressedContradiction,
 } from './lib/checks-binding';
+import { checkG17MustStepsTracked, checkG18MustTargetsExecutable } from './lib/checks-approval';
 
 /**
  * plan-gate (T035 + T057 + T093 + T107 + T240) — required status check on every approval PR.
@@ -25,7 +26,10 @@ import {
  * G16 no step's declared scope reaches the installed oversight machinery or the
  * governance record (FR-068 — the SUBJECT boundary, so the operator is never asked
  * to approve the system rewriting its own controls), judged against THIS workload's
- * own subject-workflow namespace (T279).
+ * own subject-workflow namespace (T279), G17 every MUST step tracks a work item and
+ * G18 every MUST-mapped verification target carries an executable `run` (decision
+ * D6, 2026-09-08 — the two ways a plan could clear every other gate and still be
+ * undispatchable or uncompletable after the freeze, GHI #197 / #146).
  *
  * G12 is NOT in the set and its number is not reused: the intent-drift gate is
  * deferred to GHI #28 with its detection mechanism unsettled, and two gates sharing
@@ -89,6 +93,11 @@ export async function planGate(
     // above it and the one nothing asked until GHI #141 (FR-068). Pure: it reads the
     // declared scopes and the derived reserved set, no API call.
     { id: 'G16', skip: unparsed, run: () => checkG16SubjectBoundary(plan!, { planRef }) },
+    // G17/G18 read the document as it stands on the approval PR: by then the
+    // Commit-for-approval click has created the work items and written the links
+    // (D2), so no `pendingStepIds` here — that projection belongs to the preview only.
+    { id: 'G17', skip: unparsed, run: () => checkG17MustStepsTracked(plan!) },
+    { id: 'G18', skip: unparsed, run: () => checkG18MustTargetsExecutable(plan!) },
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };
 }
@@ -148,7 +157,7 @@ export async function sweepNonPlanPrs(gh: Octokit, repo: RepoRef): Promise<{ prN
         title: 'not an approval pull request — no plan document to gate',
         summary:
           `Pull request #${pr.number} has head \`${pr.head.ref}\`, which is not a \`plan/<slug>/v<N>\` approval ` +
-          'branch, so it carries no plan document and there is nothing for G1-G16 to read.\n\n' +
+          'branch, so it carries no plan document and there is nothing for G1–G18 to read.\n\n' +
           'Recorded as `skipped` rather than `success` deliberately: this pull request was not gated, and a green ' +
           '`plan-gate` here would claim it was. Whatever governs this pull request is its own required check — for a ' +
           '`build/**` deliverable that is `deliverable-gate` (D1–D6).',

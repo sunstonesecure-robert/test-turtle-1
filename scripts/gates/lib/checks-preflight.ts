@@ -159,7 +159,7 @@ export async function checkB3ChunkReady(
     return { id: 'B3', status: 'fail', requirement: 'FR-017', detail: `issue #${chunkIssue} is not a chunk (no chunk:* label)` };
   }
   if (chunk.state !== 'ready') {
-    return { id: 'B3', status: 'fail', requirement: 'FR-017', detail: `chunk #${chunkIssue} is chunk:${chunk.state} — promote it with the full requirement before handing it to an agent` };
+    return { id: 'B3', status: 'fail', requirement: 'FR-017', detail: `chunk #${chunkIssue} carries the retired chunk:${chunk.state} label — a work item exists only with its full requirement (rule of 2026-09-07); write its intent, outcome metric and acceptance on the Workloads page (on its workload's card, or under unbound work items) and it becomes chunk:ready` };
   }
   const missing = (['intent', 'outcomeMetric', 'acceptance'] as const).filter((f) => chunk[f] === null);
   if (missing.length > 0) {
