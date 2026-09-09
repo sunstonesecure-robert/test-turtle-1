@@ -76,6 +76,55 @@ export async function createAndonIssue(
   return issue.number;
 }
 
+/**
+ * What a break issue with NO `andon:v1` header is. The header is written by the
+ * PUBLISHER (plan-publish), not the agent — gh-aw's safe-output sanitizer strips
+ * agent HTML comments — so a break without one is a proposal whose plan has not
+ * been published yet: the planning run has finished (it raised this issue) and the
+ * publisher has not run, was skipped, or failed. Found live 2026-09-09 (test-turtle-1
+ * #79): the agent finished 1.6 s inside a 15-minute step cap, the run concluded
+ * `failure`, the publisher skipped, and "View plan" crashed on this refusal. The
+ * review page renders this instead so the operator sees the state and the remedy.
+ * Pure over the body; the run id comes from the gh-aw footer link the publisher
+ * itself keys on, the plan ref from the agent's "Plan ref:" line when present.
+ */
+export type UnpublishedAndon = {
+  kind: 'unpublished';
+  issueNumber: number;
+  title: string;
+  /** the planning run that raised the break, from the gh-aw footer — null when absent */
+  runId: string | null;
+  /** the plan ref the agent named in prose, when it did */
+  planRef: string | null;
+  labels: string[];
+};
+
+export function isUnpublishedAndon(x: AndonBreak | UnpublishedAndon): x is UnpublishedAndon {
+  return 'kind' in x && x.kind === 'unpublished';
+}
+
+export function unpublishedAndonFromBody(body: string): { runId: string | null; planRef: string | null } {
+  const run = /\/actions\/runs\/(\d+)(?!\d)/.exec(body);
+  const ref = /\*\*Plan ref:\*\*\s*`(plan\/[a-z0-9][a-z0-9-]*\/v\d+)`/.exec(body);
+  return { runId: run?.[1] ?? null, planRef: ref?.[1] ?? null };
+}
+
+/**
+ * `getAndon` that tells "not published yet" apart from a fault. A header → the
+ * break; no header → an `UnpublishedAndon` describing what is missing; anything
+ * else (404, 5xx, no permission) stays a throw — unreadable is not unpublished.
+ */
+export async function getAndonOrUnpublished(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<AndonBreak | UnpublishedAndon> {
+  const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+  const body = issue.body ?? '';
+  const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+  const header = parseAndonHeader(body);
+  if (!header) {
+    return { kind: 'unpublished', issueNumber, title: issue.title, labels, ...unpublishedAndonFromBody(body) };
+  }
+  return { issueNumber, runId: header.runId, planRef: header.planRef, items: parseJudgmentItems(body), labels };
+}
+
 export async function getAndon(gh: Octokit, repo: RepoRef, issueNumber: number): Promise<AndonBreak> {
   const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
   const header = parseAndonHeader(issue.body ?? '');

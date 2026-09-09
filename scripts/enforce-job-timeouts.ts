@@ -23,7 +23,8 @@ import { basename, join } from 'node:path';
  */
 
 const JOB_TIMEOUTS: Record<string, Record<string, number>> = {
-  'templates/workflows/plan-propose.lock.yml': { agent: 20, detection: 25 },
+  'templates/workflows/plan-propose.lock.yml': { agent: 35, detection: 25 },
+  'templates/workflows/plan-revise.lock.yml': { agent: 35, detection: 25 },
   'templates/workflows/build-template.lock.yml': { agent: 35, detection: 25 },
 };
 

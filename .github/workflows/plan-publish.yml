@@ -27,7 +27,26 @@ name: plan-publish
 # `plan/<slug>/v<N>` — an existing frozen TAG is a hard error, so nothing here can
 # overwrite an approved plan. Removing the trigger would mean granting the agent
 # `contents: write`, which is strictly worse.
+# WHY `failure` IS ACCEPTED (2026-09-09, run 34307255293 on test-turtle-1). gh-aw's agent step
+# carries the frontmatter `timeout-minutes` as a STEP cap. The first LZA plan finished — result
+# event, 45 turns, plan.json uploaded, the Andon raised by safe_outputs — and the cap fired 1.6 s
+# later during harness teardown, so the RUN concluded `failure` while gh-aw's own conclusion job
+# said "completed successfully with valid safe outputs". A publisher gated on `success` skipped,
+# and the break stood with no plan branch and no header: the exact dead end PR #125 describes.
+# The conclusion is not the signal; the artifact is. This job now runs on `success` OR `failure`
+# and lets the probe below decide: a `plan.json` artifact means there is something to publish
+# (validated untrusted, as always); none means the agent did not finish, and the job says so and
+# exits clean rather than red — a failed agent run is already red on its own.
+# WHY `workflow_dispatch`. GitHub emits no `workflow_run` event for a re-run, and a publish that
+# was skipped cannot be replayed — so the operator can ask for one by run id (the id is in the
+# Andon's footer). Untrusted input: digits only, read through env, never interpolated into a script.
 on: # zizmor: ignore[dangerous-triggers]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "The plan-propose / plan-revise run whose plan.json to publish (digits only — the id in the Andon issue's footer link)"
+        required: true
+        type: string
   workflow_run:
     # MUST match the compiled workflow's `name:` exactly (workflow_run keys on the name,
     # not the file/workflow id) — drift is caught by tests/unit/workflow-linkage.test.ts.
@@ -42,32 +61,61 @@ permissions:
   contents: write # plan/<slug>/v<N> branch + plans/<slug>/plan.json commit — the only writer of unfrozen plan branches
   issues: write # locate the Andon break (gh-aw footer run-link) + inject the andon:v1 header the safe-output sanitizer strips
 concurrency:
-  group: plan-publish-${{ github.event.workflow_run.id }}
+  group: plan-publish-${{ github.event.workflow_run.id || inputs.run_id }}
 jobs:
   publish:
-    if: github.event.workflow_run.conclusion == 'success'
+    # `success` or `failure` — see the header. `cancelled` and `skipped` are not accepted: a
+    # cancelled agent uploaded nothing worth publishing, and the probe would only say so.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # One resolution of "which run", used by every step below. The dispatch input is
+      # untrusted text; it is validated to digits before anything reads it.
+      PP_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: probe — did that run upload a plan.json artifact?
+        id: probe
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! [[ "$PP_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::run_id must be digits, got '$PP_RUN_ID'"; exit 1
+          fi
+          names="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID/artifacts" --jq '.artifacts[].name')"
+          if grep -qx 'plan.json' <<<"$names"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "run $PP_RUN_ID uploaded plan.json — publishing"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::run $PP_RUN_ID uploaded no plan.json artifact (artifacts: ${names:-none}) — the agent did not finish, so there is nothing to publish; that run's own failure is the record"
+          fi
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # No git credentials in .git/config: every write here goes through
           # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - if: steps.probe.outputs.present == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
-      - run: npm ci
+      - if: steps.probe.outputs.present == 'true'
+        run: npm ci
       - name: download the proposed plan artifact
+        if: steps.probe.outputs.present == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ env.PP_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}/plan-artifacts
       - name: publish plan branch (validate, patch andon_issue, branch + commit)
+        if: steps.probe.outputs.present == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PP_RUN_ID: ${{ github.event.workflow_run.id }}
         run: >-
           npx tsx scripts/plan-publish.ts
           --dir "$RUNNER_TEMP/plan-artifacts"

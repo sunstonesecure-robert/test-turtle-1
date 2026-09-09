@@ -10,8 +10,12 @@ permissions:
   issues: read
   actions: read
 engine: claude
-timeout-minutes: 15
-# cost ceiling: $5 per run (constitution: Cost & Observability; enforced via timeout-minutes + engine limits)
+timeout-minutes: 30
+# cost ceiling: $5 per run (constitution: Cost & Observability; enforced via the AIC guardrail + engine limits,
+# not this cap). 30, not the 15 it was: on 2026-09-09 the first LZA plan (run 34307255293 on test-turtle-1)
+# FINISHED in 14 min 45 s (45 turns, result event 03:44:43.78) and the 15-minute step cap fired 1.6 s
+# later, during harness teardown — the run concluded `failure`, plan-publish skipped, and Andon #79 stood
+# without a plan or header. gh-aw's documented default is 20; an LZA-sized plan needs headroom above it.
 # timeout-minutes compiles to a STEP-level cap only (gh-aw v0.81.6 has no job-level knob for the
 # agent/detection jobs) — after EVERY compile run scripts/enforce-job-timeouts.ts to inject the
 # job-level backstop into the .lock.yml; tests/unit/workflow-timeouts.test.ts guards it (#39, PB-004).
