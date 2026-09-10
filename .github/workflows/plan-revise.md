@@ -21,6 +21,13 @@ timeout-minutes: 30
 # job-level backstop into the .lock.yml; tests/unit/workflow-timeouts.test.ts guards it (#39, PB-004).
 safe-outputs:
   upload-artifact:
+    # TWO uploads, not gh-aw's default of one. Step 4 of the prompt below tells the agent to
+    # upload plan.json AND addresses.json; with the default cap the second was refused at
+    # ingestion ("Too many items of type 'upload_artifact'. Maximum allowed: 1") and the
+    # publisher — rightly — declined the pair-less revision (live finding, 2026-09-10,
+    # test-turtle-1 run 34513826030 / Andon #79; GHI #216 is the page that could not say so).
+    # tests/unit/workflow-linkage.test.ts guards this against the prompt's upload count.
+    max-uploads: 2
 steps:
   # CAN THIS KEY PAY FOR THE RUN? Asked in one second, before any container pull
   # (operator ask, 2026-08-23, after run 32658500322 died at "Credit balance is too
