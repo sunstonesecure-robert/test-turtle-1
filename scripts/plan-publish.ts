@@ -122,8 +122,10 @@ export async function publishPlan(
   // LIVE = open OR under-review: a revision can land after the operator has
   // picked the review up (label flipped) — matching only andon:open here made
   // the FR-058 guard below mis-refuse a live revision as an abandoned version
-  // (PR #25 review finding). The run-link fallback stays on andon:open: a
-  // fresh sanitized break is always still open.
+  // (PR #25 review finding). The run-link fallback below searches BOTH live
+  // labels too: a headerless break the operator has already picked up (Start
+  // review flips it to under-review before the publisher ran — 2026-09-09,
+  // Codex on PR #209) must still be publishable by run id.
   const liveBreak = await findOpenAndonByPlanRef(gh, repo, planRef);
   if (liveBreak !== null) andon = { number: liveBreak };
   if (!andon) {
@@ -153,8 +155,14 @@ export async function publishPlan(
     // Boundary-anchored: a bare .includes() would let run 123 claim the break
     // for run 123456 when both are open concurrently.
     const runLink = new RegExp(`/actions/runs/${opts.runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`);
-    const openBreaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:open', state: 'open', per_page: 100 });
-    andon = openBreaks.find((issue) => runLink.test(issue.body ?? ''));
+    const liveBreaks = (
+      await Promise.all(
+        ['andon:open', 'andon:under-review'].map((label) =>
+          gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'open', per_page: 100 }),
+        ),
+      )
+    ).flat();
+    andon = liveBreaks.find((issue) => runLink.test(issue.body ?? ''));
     if (andon) {
       const header = serializeAndonHeader({ runId: parsed.data.run_id, planRef });
       await gh.issues.update({ ...repo, issue_number: andon.number, body: `${header}\n${andon.body ?? ''}` });

@@ -2,13 +2,13 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { errorMessage, errorStatus, Refusal } from './errors';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
-import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha } from './plans';
+import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha, freezeCompletion, freezeIncompleteSentence } from './plans';
 import { findIntentConfirmation, getChunk } from './chunks';
 import { getWorkload } from './workloads';
 import type { PlanStep } from '../../../schemas/plan';
 import type { MergeAuthority } from '../../../schemas/executor';
 import { checkpointPathsTouched, type CheckpointPath } from '../../../scripts/gates/lib/checkpoint-paths';
-import { checkB5ConfirmationRecorded } from '../../../scripts/gates/lib/checks-preflight';
+import { checkB5ConfirmationRecorded, checkB6NotFlagged } from '../../../scripts/gates/lib/checks-preflight';
 import { AGENTIC_WORKFLOWS } from '../../../scripts/gates/lib/readiness';
 import { readCheckpointPaths } from './checkpoint-config';
 
@@ -565,6 +565,14 @@ export interface DispatchBuildResult {
   planRef: string;
   /** the workload issue the event comment was recorded on */
   workloadIssue: number;
+  /**
+   * Non-null when the build STARTED but its record comment could not be written: the
+   * sentence names what failed and the exact fact that went unrecorded (who started
+   * what, when) so the operator can add it to the workload by hand. The dispatch is
+   * not undone — GitHub has the run — and the action must not report failure, or the
+   * operator retries and starts a second paid build (PR #204 review).
+   */
+  recordWarning: string | null;
 }
 
 export interface DispatchBuildOptions {
@@ -583,6 +591,16 @@ export interface DispatchBuildOptions {
 export function awaitingConfirmationSentence(step: Pick<PlanStep, 'id' | 'authority'>): string {
   const who = step.authority ? `${step.authority.replace('-', ' and ')} confirmation` : 'outside confirmation';
   return `step ${step.id} is flagged high-stakes and its ${who} is not on record, so the build's own gate would refuse it before the agent started. Record the confirmation under High-stakes on the plan review, then dispatch.`;
+}
+
+/**
+ * The sentence for a work item carrying `flagged:wrong-assumption` — evidence
+ * contradicted an assumption it rests on (GHI #205). One wording for the card, the
+ * review and `dispatchBuild`'s refusal, so the withheld button and a hand-crafted
+ * POST say the same thing. Names the two remedies; no gate id (operator-visible copy).
+ */
+export function wrongAssumptionSentence(issueNumber: number): string {
+  return `work item #${issueNumber} is flagged as resting on a wrong assumption — evidence contradicted it, and the build's own gate would refuse it before the agent started. Resolve the contradiction on the Evidence page, or re-open the plan so the step is judged again, then dispatch.`;
 }
 
 /**
@@ -608,7 +626,8 @@ export function awaitingConfirmationSentence(step: Pick<PlanStep, 'id' | 'author
  *
  * Nothing is written on any refusal. The dispatch is the first write, the event comment
  * on the workload issue the second; the run lookup after them is read-only and may
- * fail without undoing either.
+ * fail without undoing either. A failed event comment is reported in `recordWarning`
+ * rather than thrown, for the same reason the lookup is: the build has started.
  */
 export async function dispatchBuild(
   gh: Octokit,
@@ -634,6 +653,15 @@ export async function dispatchBuild(
   // are never deleted, so an absent answer here is a fault, not a state.
   const frozenSha = await tagTargetSha(gh, repo, planRef);
   if (frozenSha === null) throw new Error(`frozen tag ${planRef} was listed but cannot be resolved to a commit`);
+  // 1b. The freeze must have COMPLETED (GHI #212; review of PR #214): the tag comes
+  //     first, the work items are rewritten to this version's steps after it, and the
+  //     break is resolved last. A tag with an unresolved break is a freeze that stopped
+  //     part-way — this item may still say, and still be confirmed for, what the
+  //     previous version said — and the runner's B1 would refuse it; spend no run.
+  const completion = await freezeCompletion(gh, repo, planRef);
+  if (!completion.complete) {
+    throw new Refusal(`${freezeIncompleteSentence(planRef)} No run was started.`);
+  }
 
   // 2. The workload must be active (B7 would refuse anyway — spend no run).
   const workload = await getWorkload(gh, repo, slug);
@@ -696,6 +724,16 @@ export async function dispatchBuild(
     }
   }
 
+  // 3c. A contradicted work item does not build (the runner's B6, GHI #205). The
+  //     gate's own function, not a restatement of its predicate: the label it reads
+  //     is the label the Evidence page writes, and two readers of one label is how a
+  //     card and a runner come to disagree. Asked here so a run is not spent to fail
+  //     on it two minutes later.
+  const b6 = await checkB6NotFlagged(gh, repo, chunk);
+  if (b6.status !== 'pass') {
+    throw new Refusal(`${wrongAssumptionSentence(chunk)} No run was started.`);
+  }
+
   // 4. Unattended needs the confirmation ON RECORD — the well-formed comment carrying
   //    identity and timestamp, not the label alone (B4's rule; the label is a light).
   let confirmation: { by: string; at: string } | null = null;
@@ -753,24 +791,41 @@ export async function dispatchBuild(
 
   // THE RECORD, before the lookup: who started what is the durable fact; the run id is
   // a convenience the Runs page can supply if this comment has to stand without it.
-  await gh.issues.createComment({
-    ...repo,
-    issue_number: workload.issueNumber,
-    body: serializeBuildDispatchEvent({
-      slug,
-      chunk,
-      planRef,
-      stepId: step.id,
-      frozenSha,
-      unattended: input.unattended,
-      confirmation,
-      by: input.actor,
-      at: input.at,
-    }),
-  });
+  //
+  // A FAILED RECORD IS A WARNING, NOT A THROW. The dispatch above is the one write
+  // that cannot be taken back — GitHub has the run — so a fault here must not reach
+  // the operator as "the dispatch failed": they would retry, and the retry is a second
+  // paid build of the same work item (PR #204 review). The build is reported as
+  // running, and the warning carries the exact fact that went unrecorded so it can be
+  // added by hand. A fault BEFORE the dispatch still throws — nothing has happened yet.
+  let recordWarning: string | null = null;
+  try {
+    await gh.issues.createComment({
+      ...repo,
+      issue_number: workload.issueNumber,
+      body: serializeBuildDispatchEvent({
+        slug,
+        chunk,
+        planRef,
+        stepId: step.id,
+        frozenSha,
+        unattended: input.unattended,
+        confirmation,
+        by: input.actor,
+        at: input.at,
+      }),
+    });
+  } catch (error: unknown) {
+    recordWarning =
+      `the dispatch record could not be written on workload issue #${workload.issueNumber} ` +
+      `(${errorStatus(error) ?? 'no status'}: ${errorMessage(error)}). Unrecorded fact: ` +
+      `build of work item #${chunk} (step ${step.id}) on ${planRef}, ${input.unattended ? 'unattended' : 'attended'}, ` +
+      `dispatched by @${input.actor} at ${input.at}`;
+    console.warn(`build dispatched on ${planRef}, but ${recordWarning}`);
+  }
 
   const runId = await findNewRun(gh, repo, workflow.id, planRef, before, opts);
-  return { runId, ref, inputs, planRef, workloadIssue: workload.issueNumber };
+  return { runId, ref, inputs, planRef, workloadIssue: workload.issueNumber, recordWarning };
 }
 
 function inactiveWorkloadRemedy(state: string | null): string {

@@ -12,7 +12,7 @@ import {
   checkG14WorkItemUnclaimedElsewhere,
   checkG15NoUnaddressedContradiction,
 } from './lib/checks-binding';
-import { checkG17MustStepsTracked, checkG18MustTargetsExecutable } from './lib/checks-approval';
+import { checkG17MustStepsTracked, checkG18MustTargetsExecutable, verifyTrackedWorkItems } from './lib/checks-approval';
 
 /**
  * plan-gate (T035 + T057 + T093 + T107 + T240) — required status check on every approval PR.
@@ -96,7 +96,25 @@ export async function planGate(
     // G17/G18 read the document as it stands on the approval PR: by then the
     // Commit-for-approval click has created the work items and written the links
     // (D2), so no `pendingStepIds` here — that projection belongs to the preview only.
-    { id: 'G17', skip: unparsed, run: () => checkG17MustStepsTracked(plan!) },
+    //
+    // G17 then goes one step further than the preview can: it RESOLVES each MUST
+    // binding to a complete work item (PR #204 F7). "Is a number" is what the pure
+    // check asks, and an approval branch edited after the commit can name a number
+    // that is nothing — a 404, a non-chunk, a title-only legacy item — and freeze a
+    // plan whose step can never pass B3. Only when the pure check passed: a step with
+    // no binding already has its clause, and reading the tracker for it would add
+    // nothing but a second remedy for one fault. Order preserved — the pure fail set
+    // is the preview's, and the resolution clauses come after it.
+    {
+      id: 'G17',
+      skip: unparsed,
+      run: async () => {
+        const pure = checkG17MustStepsTracked(plan!);
+        if (pure.status !== 'pass') return pure;
+        const problems = await verifyTrackedWorkItems(gh, repo, plan!);
+        return problems.length === 0 ? pure : { ...pure, status: 'fail', detail: problems.join('; ') };
+      },
+    },
     { id: 'G18', skip: unparsed, run: () => checkG18MustTargetsExecutable(plan!) },
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };

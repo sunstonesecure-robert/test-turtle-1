@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { findLiveAndonsBySlug, withdrawProposal } from './andon';
+import { closeDerivedChunks, type ClosedDerivedChunk } from './chunks';
 import { reopenPlan, type ReopenResult } from './plans';
 import { cancelWorkloadRuns, type CanceledRun } from './runs';
 import { applyLifecycleTransition, type Workload } from './workloads';
@@ -22,7 +23,13 @@ import type { WorkloadAction } from './markers';
  *      the cancellation as its recorded cause — resolved is approval-only
  *      (T198) — and each break's open corrections cascade to withdrawn,
  *      causes recorded (no correction:open outlives its break).
- *   3. label flip + event comment (reason + actor + timestamp).
+ *   3. the work items Commit for approval derived for those proposals, and that
+ *      no frozen version tracks, are closed with the cancellation as their reason
+ *      (ADR-0002; EXPERIMENTS.md E3) — the same `closeDerivedChunks` the Withdraw
+ *      button calls, because a cancel IS a withdrawal of every live proposal and
+ *      must not leave ready items nobody will build (PR #204 review). Items a
+ *      frozen version tracks stay open: they are the approved plan's record.
+ *   4. label flip + event comment (reason + actor + timestamp).
  *
  * reactivate (FR-040): when the gate's L8 scan reported requires_review, the
  * plan is re-opened FIRST (the FR-008 path — a fresh version + Andon break),
@@ -45,6 +52,8 @@ export interface LifecycleEffects {
   workload: Workload;
   canceledRuns: CanceledRun[];
   supersededBreaks: number[];
+  /** the derived work items a cancel closed (none for every other action) */
+  closedWorkItems: ClosedDerivedChunk[];
   reopened: ReopenResult | null;
 }
 
@@ -67,19 +76,20 @@ export async function performLifecycleTransition(
 
   let canceledRuns: CanceledRun[] = [];
   let supersededBreaks: number[] = [];
+  let closedWorkItems: ClosedDerivedChunk[] = [];
   let reopened: ReopenResult | null = null;
   let reason = input.reason;
 
   if (input.action === 'cancel') {
     canceledRuns = await cancelWorkloadRuns(gh, repo, input.slug);
+    const cause = `workload ${input.slug} canceled: ${input.reason ?? '(no reason recorded)'}`;
     supersededBreaks = await findLiveAndonsBySlug(gh, repo, input.slug);
     for (const andonIssue of supersededBreaks) {
-      await withdrawProposal(gh, repo, andonIssue, {
-        by: input.actor,
-        at: input.at,
-        cause: `workload ${input.slug} canceled: ${input.reason ?? '(no reason recorded)'}`,
-      });
+      await withdrawProposal(gh, repo, andonIssue, { by: input.actor, at: input.at, cause });
     }
+    // The same cause, on the items: a reader of a closed work item learns which
+    // cancellation closed it, in the same words the break's record uses.
+    closedWorkItems = await closeDerivedChunks(gh, repo, { slug: input.slug, reason: cause, actor: input.actor, at: input.at });
   }
 
   if (input.action === 'reactivate' && input.requiresReview) {
@@ -109,5 +119,5 @@ export async function performLifecycleTransition(
     ...(input.revisit !== undefined ? { revisit: input.revisit } : {}),
   });
 
-  return { workload, canceledRuns, supersededBreaks, reopened };
+  return { workload, canceledRuns, supersededBreaks, closedWorkItems, reopened };
 }

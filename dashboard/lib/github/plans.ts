@@ -2,8 +2,14 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { PlanDoc } from '../../../schemas/plan';
 import { errorMessage, errorStatus, Refusal } from './errors';
-import { createAndonIssue, dropLiveLabelsAndClose } from './andon';
+import { createAndonIssue, dropLiveLabelsAndClose, findResolvedAndonByPlanRef } from './andon';
 import { CONTRADICTION_LABEL } from './labels';
+// Static import that closes an import cycle (chunks.ts imports parsePlanRef and friends
+// from here): only functions are exchanged, at call time, never module-evaluation
+// values — the same shape andon.ts ↔ corrections.ts already carries. The freeze is the
+// one moment a version becomes official, so the items that mirror its steps are brought
+// into line HERE, not at Commit for approval (GHI #212).
+import { reconcileFrozenPlanItems, type ReconciledChunk } from './chunks';
 
 /**
  * Plan module (T033 tracer surface): read the plan document from a ref, resolve
@@ -520,7 +526,7 @@ export async function freezeApprovedPlan(
   gh: Octokit,
   repo: RepoRef,
   input: { slug: string; version: number; mergeSha: string; andonIssue: number; approver: string; approvedAt: string },
-): Promise<{ tagRef: string }> {
+): Promise<{ tagRef: string; reconciled: ReconciledChunk[] }> {
   const tagRef = planBranch(input.slug, input.version);
 
   const existingTarget = await tagTargetSha(gh, repo, tagRef);
@@ -550,13 +556,82 @@ export async function freezeApprovedPlan(
   // retryable freeze rather than a resolved review with work still blocked.
   await clearContradictionFlags(gh, repo, input.slug, tagRef);
 
+  // The work items this version tracks now mirror ITS steps (D8 as amended; GHI #212).
+  // Here and not at Commit for approval: until this tag existed, the previous version
+  // was official, and its items had to keep saying what IT said. Attributed to the
+  // approver at the approval time — the freeze is their act. Before the break closes,
+  // for the same reason as the flags above: a failure leaves a retryable freeze.
+  let reconciled: ReconciledChunk[] = [];
+  // SUPERSEDED FREEZES RECONCILE NOTHING (review of PR #214). A re-run of v1's
+  // post-merge workflow after v2 froze passes the same-merge check above (resumable
+  // by design) and would otherwise write v1's requirement over the item v2 now
+  // owns, clearing v2's confirmation. The newest frozen tag is the official version,
+  // and the items mirror IT; an older version's freeze has only its own tag and
+  // break to finish. (`reconcileDerivedChunk` carries the same lock per item, keyed
+  // on the marker's version, for the race the workflow's serialization cannot see.)
+  const newest = await resolveCurrent(gh, repo, input.slug);
+  const newestVersion = newest ? (parsePlanRef(newest)?.version ?? input.version) : input.version;
+  if (newestVersion <= input.version) {
+    let frozenDoc: PlanFile | null = null;
+    try {
+      frozenDoc = await readPlanFileAtRef(gh, repo, tagRef);
+    } catch (error: unknown) {
+      // Only a VERIFIED absence (both document paths 404 — readPlanFileAtRef's own
+      // plain Error) means there is nothing tracking anything; an API error is a fault
+      // and stops the freeze here, retryable (unreadable ≠ absent, GHI #150).
+      if (errorStatus(error) !== undefined) throw error;
+    }
+    if (frozenDoc) {
+      reconciled = await reconcileFrozenPlanItems(gh, repo, {
+        planRef: tagRef,
+        plan: PlanDoc.parse(JSON.parse(frozenDoc.raw)),
+        actor: input.approver,
+        at: input.approvedAt,
+      });
+    }
+  }
+
   // Terminal label BEFORE the live ones are dropped (GHI #48, the
   // withdrawProposal ordering): a partial failure never leaves the break with
   // no andon:* label, and the re-runnable freeze converges from any point.
   await gh.issues.addLabels({ ...repo, issue_number: input.andonIssue, labels: ['andon:resolved'] });
   await dropLiveLabelsAndClose(gh, repo, input.andonIssue);
 
-  return { tagRef };
+  return { tagRef, reconciled };
+}
+
+/**
+ * Has the freeze of this frozen tag COMPLETED — tag, flags, work-item reconciliation,
+ * break resolved? (GHI #212; review of PR #214.) The tag is created FIRST so that
+ * `resolveCurrent` and the approval record agree from the earliest moment, which means
+ * a freeze that failed after the tag (an issue API 503 while rewriting an inherited
+ * item, say) leaves a tag that IS the official version while the items it tracks may
+ * still say — and still carry the confirmation for — what the previous version said.
+ * A build authorized on that state would run v2 on v1's requirement.
+ *
+ * `andon:resolved` is written last, so a resolved break naming the ref is the proof
+ * the whole freeze ran. Preflight B1 and the dashboard dispatcher both ask this, and
+ * both refuse until the re-run of `plan-post-merge` converges. Plans frozen before
+ * this rule have resolved breaks and pass. A LIST read (not read-after-write
+ * consistent): a "not complete" seconds after a real freeze is fail-closed, with a
+ * remedy that is just "reload".
+ */
+export async function freezeCompletion(
+  gh: Octokit,
+  repo: RepoRef,
+  planRef: string,
+): Promise<{ complete: boolean; andonIssue: number | null }> {
+  const andonIssue = await findResolvedAndonByPlanRef(gh, repo, planRef);
+  return { complete: andonIssue !== null, andonIssue };
+}
+
+/** The one sentence both refusers print — the runner's gate and the dashboard cannot
+ *  disagree about why a frozen plan is not yet buildable. */
+export function freezeIncompleteSentence(planRef: string): string {
+  return (
+    `${planRef} is the newest frozen version but its freeze has not completed — the review that approved it is not yet resolved, ` +
+    'so its work items may still say what the previous version said. Re-run the plan-post-merge workflow for the approval pull request (it resumes where it stopped), then try again.'
+  );
 }
 
 /**

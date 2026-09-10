@@ -29,7 +29,13 @@
 #                      not yet verified — a question asked of repository state, so it
 #                      recovers a lost run without the operator naming a commit. A
 #                      person may also name `commit` (and `plan_ref`) to re-verify one
-#                      merge; B9 refuses a commit the approved plan never led to.
+#                      merge; B9 refuses a commit the approved plan never led to, and
+#                      the subject step REFUSES (exit 1) a named commit that is not a
+#                      merged deliverable's merge commit — a named commit is a
+#                      verification request, and an empty run that exits green would
+#                      answer it with nothing while looking like an answer (PR #204 F8).
+#                      Only the no-input sweep and the `push` path may find nothing and
+#                      exit clean: an ordinary push is not a verification event.
 # There is deliberately NO scheduled sweep (option 1 on GHI #160 was offered and
 # declined): a merge is verified within seconds or the operator sees a gap on the
 # card, not a result that arrives on a timer.
@@ -129,6 +135,17 @@ jobs:
           fi
           sha="$(printf '%s' "$out" | sed -n 1p)"
           plan_ref="$(printf '%s' "$out" | sed -n 2p)"
+          # An EXPLICIT commit that resolves to no deliverable is a refusal, not an empty
+          # run (PR #204 F8). The resolver prints two empty lines for "nothing", which is
+          # right for the sweep and for a push — neither asked about a particular commit.
+          # But a person or build-merge that NAMED a commit asked "verify this", and a
+          # green run that verified nothing is the absent-≠-success shape in the one
+          # pipeline that must never have it. Checked before the plan_ref cross-check,
+          # which cannot fire on an empty plan_ref and would otherwise let this through.
+          if [ -n "$BV_INPUT_COMMIT" ] && [ -z "$plan_ref" ]; then
+            echo "refusing: commit $BV_INPUT_COMMIT is not a merged deliverable's merge commit — no merged build/* pull request with a deliverable:v1 marker has it as its merge commit, so there is nothing to verify. Pass the merge commit of a MERGED deliverable pull request (its sha on the default branch), or leave commit empty to sweep for the newest unverified merge" >&2
+            exit 1
+          fi
           if [ -n "$BV_INPUT_PLAN_REF" ] && [ -n "$plan_ref" ] && [ "$BV_INPUT_PLAN_REF" != "$plan_ref" ]; then
             echo "refusing: plan_ref input '$BV_INPUT_PLAN_REF' disagrees with the deliverable pull request's marker ('$plan_ref') for $sha — the marker is the record; re-run without plan_ref, or with the marker's value" >&2
             exit 1

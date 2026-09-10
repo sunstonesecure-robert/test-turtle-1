@@ -10,6 +10,7 @@ import {
   serializeIntentConfirmed,
   type DerivationMarker,
 } from './markers';
+import { CONTRADICTION_LABEL } from './labels';
 import { parsePlanRef, tryReadPlanAtRef, workItemsOf } from './plans';
 import { mergeRecheck } from './read-after-write';
 
@@ -56,6 +57,15 @@ export interface Chunk {
   intentConfirmation: { by: string; at: string } | null;
   /** the plan step this item was derived from (ADR-0002), or null for a hand-typed item */
   derivedFrom: { planRef: string; stepId: string } | null;
+  /**
+   * The `flagged:wrong-assumption` label (FR-022): evidence contradicted an assumption
+   * this item rests on. Read here, from the issue already in hand, so the workload
+   * card and the plan review can withhold the dispatch button without a second
+   * request — the build's own gate (B6) refuses such an item on the runner, and a
+   * button that leads to that refusal spends a paid run to learn what the label
+   * already said (GHI #205).
+   */
+  flaggedWrongAssumption: boolean;
   intent: string | null;
   outcomeMetric: string | null;
   acceptance: string | null;
@@ -165,6 +175,7 @@ function toChunk(issue: IssueLike, intentConfirmation: { by: string; at: string 
     intentConfirmed: labels.includes('intent:confirmed'),
     intentConfirmation,
     derivedFrom: marker ? { planRef: marker.planRef, stepId: marker.stepId } : null,
+    flaggedWrongAssumption: labels.includes(CONTRADICTION_LABEL),
     intent: fields.intent,
     outcomeMetric: fields.outcomeMetric,
     acceptance: fields.acceptance,
@@ -383,18 +394,29 @@ export async function confirmIntent(
   await gh.issues.addLabels({ ...repo, issue_number: input.issueNumber, labels: ['intent:confirmed'] });
 }
 
-/** The well-formed confirmation comment for this chunk, or null (B4's input). */
+/**
+ * The well-formed confirmation comment for this chunk, or null (B4's input).
+ *
+ * THE NEWEST ONE. Confirmation comments are append-only: `reconcileDerivedChunk`
+ * clears a stale label but leaves the old comment as audit, and the operator then
+ * confirms the new text with a second comment. Two records exist, and the
+ * authorization — who permitted the unattended build, and when — is the later one.
+ * Comments paginate oldest → newest, so the last match is kept; returning the first
+ * attributed the current authorization to whoever confirmed the previous wording
+ * (PR #204 review).
+ */
 export async function findIntentConfirmation(
   gh: Octokit,
   repo: RepoRef,
   issueNumber: number,
 ): Promise<{ by: string; at: string } | null> {
   const comments = await gh.paginate(gh.issues.listComments, { ...repo, issue_number: issueNumber, per_page: 100 });
+  let newest: { by: string; at: string } | null = null;
   for (const comment of comments) {
     const parsed = parseIntentConfirmed(comment.body ?? '');
-    if (parsed && parsed.chunk === issueNumber) return { by: parsed.by, at: parsed.at };
+    if (parsed && parsed.chunk === issueNumber) newest = { by: parsed.by, at: parsed.at };
   }
-  return null;
+  return newest;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,8 +647,116 @@ export interface ReconciledChunk {
   stepId: string;
   /** true when the requirement was rewritten from the step */
   rewritten: boolean;
+  /** true when the issue title was brought to the step's — on a full rewrite, and on
+   *  the title-only path where the requirement itself was unchanged */
+  titleUpdated: boolean;
   /** true when an `intent:confirmed` given to the old text was cleared */
   confirmationCleared: boolean;
+}
+
+/**
+ * What a derived item and its step disagree about — the ONE comparison behind the
+ * review row's preview, the Commit-for-approval preview and the freeze-time rewrite
+ * (GHI #212). Pure: it reads nothing. `outcomeMetric` keeps the operator's typed value
+ * where the plan supplies none (an opted-in SHOULD step), so a metric the plan never
+ * wrote is never reported as a change.
+ */
+export interface DerivedChunkComparison {
+  /** false for a hand-typed item — nothing is ever rewritten for it */
+  derived: boolean;
+  requirementChanges: boolean;
+  titleChanges: boolean;
+  /** an `intent:confirmed` on the item would be cleared by a requirement rewrite */
+  confirmationWillClear: boolean;
+  derivedTitle: string;
+  expected: { intent: string; outcomeMetric: string; acceptance: string };
+}
+
+export function compareDerivedChunk(
+  current: {
+    title: string;
+    intent: string | null;
+    outcomeMetric: string | null;
+    acceptance: string | null;
+    derivedFrom: unknown | null;
+    intentConfirmed: boolean;
+  },
+  plan: PlanDoc,
+  step: PlanStep,
+): DerivedChunkComparison {
+  const derived = deriveWorkItemFromStep(plan, step);
+  const expected = {
+    intent: derived.intent,
+    outcomeMetric: derived.outcomeMetric.length > 0 ? derived.outcomeMetric : (current.outcomeMetric ?? ''),
+    acceptance: derived.acceptance,
+  };
+  const isDerived = current.derivedFrom !== null && current.derivedFrom !== undefined;
+  const requirementChanges =
+    isDerived &&
+    (current.intent !== expected.intent || current.outcomeMetric !== expected.outcomeMetric || current.acceptance !== expected.acceptance);
+  return {
+    derived: isDerived,
+    requirementChanges,
+    titleChanges: isDerived && current.title !== derived.title,
+    confirmationWillClear: requirementChanges && current.intentConfirmed,
+    derivedTitle: derived.title,
+    expected,
+  };
+}
+
+/** What the freeze WILL do to one bound item — shown on the review and in the Commit banner. */
+export interface ReconciliationPreview {
+  issueNumber: number;
+  stepId: string;
+  requirementChanges: boolean;
+  titleChanges: boolean;
+  confirmationWillClear: boolean;
+}
+
+/**
+ * Read-only twin of `reconcileDerivedChunk`: says what the freeze would change, and
+ * writes nothing. Commit for approval shows this (GHI #212) — the item of the version
+ * that is STILL OFFICIAL must not be rewritten to a version nobody has approved yet.
+ */
+export async function previewDerivedChunkReconciliation(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { issueNumber: number; plan: PlanDoc; step: PlanStep },
+): Promise<ReconciliationPreview> {
+  const chunk = await getChunk(gh, repo, input.issueNumber);
+  const none = { issueNumber: input.issueNumber, stepId: input.step.id, requirementChanges: false, titleChanges: false, confirmationWillClear: false };
+  if (!chunk || !chunk.derivedFrom) return none;
+  const c = compareDerivedChunk(chunk, input.plan, input.step);
+  return { ...none, requirementChanges: c.requirementChanges, titleChanges: c.titleChanges, confirmationWillClear: c.confirmationWillClear };
+}
+
+/**
+ * The freeze's half of D8 (GHI #212): bring every item the NOW-FROZEN plan tracks
+ * into line with its step. Runs from `freezeApprovedPlan`, after the tag exists —
+ * the first moment the new version is official — so an item only ever mirrors an
+ * approved step, and the previous version's items are untouched while its successor
+ * is under review. A number that names no issue (verified 404) is skipped: G17
+ * refused it at approval, and the freeze must not stall on it. Idempotent like its
+ * callee, so a re-run freeze converges.
+ */
+export async function reconcileFrozenPlanItems(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { planRef: string; plan: PlanDoc; actor: string; at: string },
+): Promise<ReconciledChunk[]> {
+  const out: ReconciledChunk[] = [];
+  for (const step of input.plan.steps) {
+    if (typeof step.tracking_issue !== 'number') continue;
+    let outcome: ReconciledChunk;
+    try {
+      outcome = await reconcileDerivedChunk(gh, repo, { issueNumber: step.tracking_issue, planRef: input.planRef, plan: input.plan, step, actor: input.actor, at: input.at });
+    } catch (error: unknown) {
+      if (errorStatus(error) === 404) continue;
+      throw error;
+    }
+    if (outcome.rewritten || outcome.titleUpdated) out.push(outcome);
+  }
+  return out;
 }
 
 /**
@@ -655,6 +785,13 @@ export interface ReconciledChunk {
  * every append-only record does; without the label B4 blocks until the operator
  * confirms the new text, and the row offers Confirm intent again. Idempotent: an item
  * that already says what the step says is left untouched, so a resubmit converges.
+ *
+ * A TITLE ALONE IS NOT A REQUIREMENT CHANGE. The title is the step's name, and the
+ * item is found and read by it on every list; a renamed step must not leave its item
+ * carrying the old name forever (PR #204 review). But the intent confirmation binds
+ * to the REQUIREMENT — the three sections the operator read and agreed to — not to
+ * the heading above them, so a title-only change updates the title, records why, and
+ * leaves the label alone: nobody's confirmation is revoked over a rename.
  */
 export async function reconcileDerivedChunk(
   gh: Octokit,
@@ -668,23 +805,50 @@ export async function reconcileDerivedChunk(
   // Not derived, not ours to rewrite: a hand-typed legacy item bound by a link keeps
   // the operator's words. (The review never offers such an item; a hand-crafted POST
   // is refused upstream.)
-  if (!marker) return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: false, confirmationCleared: false };
+  if (!marker) return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: false, titleUpdated: false, confirmationCleared: false };
+  // NEVER WRITE AN OLDER VERSION OVER A NEWER ONE (review of PR #214). The marker
+  // names the version whose step this item last mirrored; a caller reconciling
+  // against an OLDER version of the same workload — a re-run of a superseded freeze,
+  // or two freezes racing — leaves the item alone. The freeze checks the same at the
+  // plan level; this is the lock that holds when that check ran before the newer tag
+  // appeared.
+  const mine = parsePlanRef(input.planRef)!;
+  const theirs = parsePlanRef(marker.planRef);
+  if (theirs && theirs.slug === mine.slug && theirs.version > mine.version) {
+    return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: false, titleUpdated: false, confirmationCleared: false };
+  }
   const current = parseChunkBody(body);
-  const derived = deriveWorkItemFromStep(input.plan, input.step);
-  const expected = {
-    intent: derived.intent,
-    outcomeMetric: derived.outcomeMetric.length > 0 ? derived.outcomeMetric : (current.outcomeMetric ?? ''),
-    acceptance: derived.acceptance,
-  };
-  const digest = requirementDigest(expected);
-  const unchanged =
-    current.intent === expected.intent &&
-    current.outcomeMetric === expected.outcomeMetric &&
-    current.acceptance === expected.acceptance &&
-    (marker.digest === null || marker.digest === digest);
-  if (unchanged) return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: false, confirmationCleared: false };
-
   const labels = labelNames(issue as IssueLike);
+  // ONE comparison with the review row's preview and Commit's (GHI #212); the marker's
+  // digest is this writer's own extra: a digest that disagrees with the derived text is
+  // a change whichever side moved.
+  const cmp = compareDerivedChunk(
+    { title: issue.title, ...current, derivedFrom: marker, intentConfirmed: labels.includes('intent:confirmed') },
+    input.plan,
+    input.step,
+  );
+  const { expected } = cmp;
+  const derived = { title: cmp.derivedTitle };
+  const digest = requirementDigest(expected);
+  const unchanged = !cmp.requirementChanges && (marker.digest === null || marker.digest === digest);
+  if (unchanged) {
+    if (!cmp.titleChanges) {
+      return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: false, titleUpdated: false, confirmationCleared: false };
+    }
+    // Record first (FR-042), then the one field that moved. The body is not rewritten:
+    // its marker already carries this requirement's digest, and re-emitting it for the
+    // new version would claim a change to the requirement that did not happen.
+    await gh.issues.createComment({
+      ...repo,
+      issue_number: input.issueNumber,
+      body:
+        `**Title updated from step \`${input.step.id}\` of \`${input.planRef}\`** by @${input.actor} at ${input.at} — ` +
+        `the step was renamed and its requirement is unchanged, so the intent confirmation on record still stands.`,
+    });
+    await gh.issues.update({ ...repo, issue_number: input.issueNumber, title: derived.title });
+    return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: false, titleUpdated: true, confirmationCleared: false };
+  }
+
   const confirmationCleared = labels.includes('intent:confirmed');
   await gh.issues.createComment({
     ...repo,
@@ -708,7 +872,9 @@ export async function reconcileDerivedChunk(
     ].join('\n'),
   });
   if (confirmationCleared) await removeLabelIfPresent(gh, repo, input.issueNumber, 'intent:confirmed');
-  return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: true, confirmationCleared };
+  // The full rewrite always writes the step's title too (`issues.update` above), so a
+  // reader asking "did the title change?" gets the same answer on either path.
+  return { issueNumber: input.issueNumber, stepId: input.step.id, rewritten: true, titleUpdated: true, confirmationCleared };
 }
 
 /** One work item `closeDerivedChunks` closed, and the step it was for. */

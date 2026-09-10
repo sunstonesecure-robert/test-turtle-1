@@ -22,8 +22,16 @@ on:
 permissions:
   contents: write # frozen tag creation — this workflow is its ONLY writer (no branch pushes)
   issues: write # andon:resolved + close
+# ONE freeze at a time, repository-wide (review of PR #214). Keyed per version, two
+# versions of one workload could freeze concurrently — and a re-run of v1 could reconcile
+# the shared work items back to v1's text after v2 had rewritten them. A freeze takes
+# seconds and approvals are rare, so serializing all of them costs nothing an operator
+# can see; `freezeApprovedPlan` also refuses to reconcile for a superseded version, and
+# each item refuses an older version than its marker — three locks, because the
+# work items are shared state and the version that owns them is the newest tag.
 concurrency:
-  group: plan-post-merge-${{ github.event.pull_request.head.ref }}
+  group: plan-post-merge
+  cancel-in-progress: false
 jobs:
   freeze:
     if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'plan/')

@@ -257,11 +257,22 @@ export async function buildVerify(
  * its `deliverable:v1` marker — written by the deterministic `build-publish`, which
  * holds a write scope no executor has. A branch named `build/…` proves nothing; the
  * marker is what makes this a deliverable.
+ *
+ * ASSOCIATED IS NOT MERGED (PR #204 review finding F8). GitHub lists a pull request
+ * as "associated" with every commit on its head branch, open or merged — so a commit
+ * on an OPEN build branch resolved here to its plan ref and would have been verified
+ * as though it had landed, with `vt-*` check runs recorded against a commit the default
+ * branch does not contain: GHI #141's shape again. Two facts are required of the pull
+ * request, and both are GitHub's record rather than the branch's name: it MERGED
+ * (`merged_at` set), and THIS sha is its merge commit (`merge_commit_sha`). A merged
+ * pull request whose merge commit is some other sha is also declined — the commit
+ * asked about is then one of the branch's own, not the deliverable that landed.
  */
 export async function planRefForMergedCommit(gh: Octokit, repo: RepoRef, sha: string): Promise<string | null> {
   const { data: prs } = await gh.repos.listPullRequestsAssociatedWithCommit({ ...repo, commit_sha: sha });
   for (const pr of prs) {
     if (!pr.head.ref.startsWith('build/')) continue;
+    if (!pr.merged_at || pr.merge_commit_sha !== sha) continue;
     const marker = parseDeliverableMarker(pr.body ?? '');
     if (marker) return marker.planRef;
   }

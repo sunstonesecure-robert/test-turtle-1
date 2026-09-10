@@ -90,6 +90,24 @@ export interface PastedEntryInput {
   text: string;
 }
 
+/**
+ * The review-state guard the panel's record action applies before composing anything
+ * (PR #204 review). A confirmation is recorded on a LIVE review (the answer arrived
+ * early) or a RESOLVED one (the ordinary case: frozen plan, refused build, answer
+ * afterwards) — never on a WITHDRAWN one. A withdrawn proposal's plan version will
+ * never be built, so an answer recorded against it authorizes nothing and, worse,
+ * lands a ledger the next proposal's step may not match. JSX-free so the rule is
+ * pinned by a test; the `'use server'` action calls it and can add nothing to it.
+ */
+export function assertReviewAcceptsConfirmation(andonIssue: number, labels: readonly string[]): void {
+  if (labels.includes('andon:superseded')) {
+    throw new Refusal(
+      `Review #${andonIssue} was withdrawn, so no answer is recorded against its proposal — that plan version will never be built. ` +
+        'Propose again; the new proposal\'s review is where the authority\'s answer is recorded, against the step as it then reads',
+    );
+  }
+}
+
 export interface RecordConfirmationInput {
   /** the plan the review is about — the frozen tag, or the live branch */
   planRef: string;
@@ -332,6 +350,25 @@ export async function composeConfirmationEntry(
     if (!parsed.success) {
       throw new Refusal(
         `${path} on ${branch} is not a valid confirmation record (${zodIssues(parsed.error.issues)}), so nothing can be appended to it — fix the file by hand, then record the answer here`,
+      );
+    }
+    // The three fields that make a ledger THIS step's: workload, step id, authority.
+    // The path is derived from the first two, so a mismatch means a ledger was put at
+    // this path by hand for something else — and the gate (B5, confirm-record) keeps
+    // refusing it while an append here would grow it and open a pull request for it
+    // (PR #204 review). Nothing is appended to a ledger that is not this step's.
+    if (parsed.data.workload !== workload) {
+      throw new Refusal(
+        `${path} on ${branch} names workload "${parsed.data.workload}", but this review is about ${workload} — ` +
+          'a ledger for another workload cannot be appended to, and the build gate would refuse it either way; ' +
+          `move the old ledger aside by hand, then record the answer here`,
+      );
+    }
+    if (parsed.data.step_id !== step.id) {
+      throw new Refusal(
+        `${path} on ${branch} names step "${parsed.data.step_id}", but this answer is about ${step.id} — ` +
+          'a ledger for another step cannot be appended to, and the build gate would refuse it either way; ' +
+          `move the old ledger aside by hand, then record the answer here`,
       );
     }
     if (parsed.data.authority !== authority) {

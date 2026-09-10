@@ -1,3 +1,7 @@
+import type { Octokit } from '@octokit/rest';
+import type { RepoRef } from '../../../dashboard/lib/github/client';
+import { getChunk } from '../../../dashboard/lib/github/chunks';
+import { errorStatus } from '../../../dashboard/lib/github/errors';
 import type { PlanDoc } from '../../../schemas/plan';
 import type { GateResult } from './runner';
 
@@ -29,10 +33,13 @@ import type { GateResult } from './runner';
  *
  * WHY A SEPARATE MODULE. `checks-core.ts` is G1 plus the checks that read the Andon
  * break and the tag history; `checks-scope.ts` is the commitment-scope derivation;
- * `checks-binding.ts` is the cross-plan claims on a work item. These two read only
- * the document, are shared with the review page's preview (`gate-preview.ts`), and
- * hand the Commit-for-approval action the derivations it refuses on — one predicate,
- * imported by every caller, never restated.
+ * `checks-binding.ts` is the cross-plan claims on a work item. The two CHECKS read
+ * only the document, are shared with the review page's preview (`gate-preview.ts`),
+ * and hand the Commit-for-approval action the derivations it refuses on — one
+ * predicate, imported by every caller, never restated. `verifyTrackedWorkItems`
+ * below is the one async companion, and it is kept apart from `checkG17…` on
+ * purpose: the preview imports the pure check synchronously, and a gate that reads
+ * the tracker cannot be previewed on every render of a live review.
  *
  * NOT RE-JUDGED ON OLD TAGS. Both run when `plan-gate` runs, which is on an approval
  * pull request — a plan frozen before 2026-09-08 is never handed to them, and its
@@ -80,6 +87,70 @@ export function checkG17MustStepsTracked(
           )
           .join('; '),
       };
+}
+
+/** The remedy every clause below ends with. There is exactly one: a binding written
+ *  after Commit for approval is a binding nothing validated, and the only path that
+ *  validates one is the commit itself. */
+const REBIND = 're-open the plan and bind the step to a complete work item at Commit for approval';
+
+/**
+ * G17's second half, on the approval PR only: does each MUST binding RESOLVE to a
+ * complete work item? (PR #204 review finding F7.)
+ *
+ * The pure check above asks whether `tracking_issue` is a number. On the approval PR
+ * that is not enough: an approval branch is an ordinary branch, and a plan edited after
+ * Commit for approval can name an issue that does not exist, an issue that is not a
+ * work item at all, a legacy title-only item, or a `chunk:ready` item whose requirement
+ * sections are empty. Every one of those passes "is a number", freezes, and then can
+ * never pass preflight B3 — the lza-phase0 dead end (GHI #197) reached by a different
+ * door, discovered only when the first build is dispatched.
+ *
+ * SAME READER AS B3, NOT A RESTATEMENT. `getChunk` is the label reader and body parser
+ * B3 resolves the build's chunk with, so what this refuses at approval is exactly what
+ * B3 would refuse at dispatch — one predicate about "a complete work item", two gates.
+ * The plan-binding half of B3 (does the FROZEN plan claim the chunk?) is not asked:
+ * there is no frozen plan yet, this document is the one about to become it.
+ *
+ * ONLY A VERIFIED 404 IS "ABSENT". Any other error — a 5xx, a rate limit, a read scope
+ * missing from the job and answering 403 — is the gate being unable to read, not the
+ * item being missing, and it THROWS: a fail clause about an item this gate never saw
+ * would be a verdict nobody made (the GHI #108 stance), and the run going red says
+ * "could not read", which is the truth.
+ *
+ * Returns one clause per offending binding, plan order, each carrying the remedy; empty
+ * means every MUST binding resolves to a complete work item. The caller (plan-gate)
+ * turns a non-empty list into a G17 fail.
+ */
+export async function verifyTrackedWorkItems(gh: Octokit, repo: RepoRef, plan: PlanDoc): Promise<string[]> {
+  const problems: string[] = [];
+  for (const step of plan.steps) {
+    if (step.priority !== 'MUST' || typeof step.tracking_issue !== 'number') continue;
+    const issue = step.tracking_issue;
+    let chunk;
+    try {
+      chunk = await getChunk(gh, repo, issue);
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 404) throw error;
+      problems.push(`MUST step '${step.id}' tracks #${issue}, which does not exist (404) — ${REBIND}`);
+      continue;
+    }
+    if (chunk === null) {
+      problems.push(`MUST step '${step.id}' tracks #${issue}, which is not a work item (no chunk:* label) — ${REBIND}`);
+      continue;
+    }
+    if (chunk.state !== 'ready') {
+      problems.push(
+        `MUST step '${step.id}' tracks #${issue}, a legacy title-only item (the retired chunk:${chunk.state} label, rule of 2026-09-07) with no requirement behind it — ${REBIND}`,
+      );
+      continue;
+    }
+    const missing = (['intent', 'outcomeMetric', 'acceptance'] as const).filter((f) => chunk[f] === null);
+    if (missing.length > 0) {
+      problems.push(`MUST step '${step.id}' tracks #${issue}, labeled ready but missing section(s): ${missing.join(', ')} — ${REBIND}`);
+    }
+  }
+  return problems;
 }
 
 /** Verification targets that map to a MUST step and carry no executable `run`, in

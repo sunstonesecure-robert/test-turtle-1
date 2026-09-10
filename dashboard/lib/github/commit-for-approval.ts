@@ -9,10 +9,10 @@ import {
   findDerivedChunk,
   getChunk,
   listOpenDerived,
-  reconcileDerivedChunk,
+  previewDerivedChunkReconciliation,
   type Chunk,
   type CreatedChunk,
-  type ReconciledChunk,
+  type ReconciliationPreview,
 } from './chunks';
 import { errorStatus, Refusal } from './errors';
 import { reconcileHighStakesRouting } from './high-stakes';
@@ -120,9 +120,10 @@ export interface CommitForApprovalResult {
   created: CreatedChunk[];
   /** every binding the commit wrote onto the plan that was not there before */
   linked: { stepId: string; issueNumber: number }[];
-  /** existing items whose requirement this commit rewrote from a changed step (D8) —
-   *  an item that already said what its step says is not listed */
-  reconciled: ReconciledChunk[];
+  /** existing items the FREEZE will rewrite from a changed step (D8; GHI #212) — read
+   *  here, written by `freezeApprovedPlan` once the version is official. An item that
+   *  already says what its step says is not listed */
+  willReconcile: ReconciliationPreview[];
 }
 
 /** 404-only tolerance, the review page's rule: a number naming no issue is `null`;
@@ -145,7 +146,9 @@ function stepLabel(step: PlanStep): string {
  * write every link in one plan commit → open the approval pull request.
  *
  * REFUSED BEFORE ANY WRITE when: the review is not live; a MUST step would track
- * nothing; an inherited or linked number is not a ready work item of this workload;
+ * nothing; an inherited or linked number is not a ready work item of this workload
+ * (an inherited number whose marker names ANOTHER workload included — the
+ * reconciliation pass would otherwise rewrite that workload's item);
  * two rows would resolve to one item (B3's one-step-per-item rule, G13) — a `create`
  * row counts by the item ALREADY derived for its step, when there is one, so a repair
  * that re-creates step A while another row links A's existing item is caught here and
@@ -155,11 +158,13 @@ function stepLabel(step: PlanStep): string {
  * approved); or a created step has no outcome metric — that last one is
  * `createChunksFromSteps`'s own refusal, raised before it writes.
  *
- * RECONCILED (D8 as amended 2026-09-08, E4): every EXISTING item the commit binds —
- * inherited, linked, or found already derived for a `create` row — is compared to
- * what its step now derives, and one that no longer matches is rewritten in place
- * with an event naming this version and its stale `intent:confirmed` cleared
- * (`reconcileDerivedChunk`). Inheritance is not staleness.
+ * WILL RECONCILE (D8 as amended 2026-09-08, E4; timing per GHI #212): every EXISTING
+ * item the commit binds — inherited, linked, or found already derived for a `create`
+ * row — is compared to what its step now derives, and the ones that no longer match
+ * are REPORTED, not rewritten. The rewrite (in place, an event naming the version, the
+ * stale `intent:confirmed` cleared) is the freeze's: until the approval merges, the
+ * previous version is still official and its items must keep saying what it said.
+ * Inheritance is not staleness — and a review is not an approval.
  *
  * IDEMPOTENT ON RESUBMIT. `createChunksFromSteps` finds the item already derived for a
  * step by its marker and reuses it; a matching item is not rewritten; a plan whose
@@ -241,14 +246,24 @@ export async function commitForApproval(gh: Octokit, repo: RepoRef, input: Commi
       problems.push(`${stepLabel(step)} ${role} #${choice.issueNumber}, which still carries the retired title-only label — write its requirement (Workloads page, unbound work items) or create one from the step`);
       continue;
     }
-    if (choice.mode === 'link') {
+    const ownerSlug = item.derivedFrom ? parsePlanRef(item.derivedFrom.planRef)?.slug : undefined;
+    if (choice.mode === 'link' && ownerSlug !== parsedRef.slug) {
       // The select offers this workload's own items only; a POST naming any other is
       // refused here rather than judged by G14 on the pull request two clicks later.
-      const ownerSlug = item.derivedFrom ? parsePlanRef(item.derivedFrom.planRef)?.slug : undefined;
-      if (ownerSlug !== parsedRef.slug) {
-        problems.push(`${stepLabel(step)} would link #${choice.issueNumber}, which is not one of this workload's own work items — link only an item derived for ${parsedRef.slug}, or create one from the step`);
-        continue;
-      }
+      problems.push(`${stepLabel(step)} would link #${choice.issueNumber}, which is not one of this workload's own work items — link only an item derived for ${parsedRef.slug}, or create one from the step`);
+      continue;
+    }
+    if (choice.mode === 'inherited' && item.derivedFrom && ownerSlug !== parsedRef.slug) {
+      // An inherited number is the plan's own word, but the plan branch is writable by
+      // the agent and by hand, and the reconciliation pass below REWRITES every bound
+      // derived item to this step. Accepting a number derived for another workload
+      // would rewrite that workload's item in this one's name (PR #204 review, P1). A
+      // marker-less inherited item is still allowed: it is a legacy hand-typed issue
+      // nothing claims, and the reconciliation leaves it exactly as it is.
+      problems.push(
+        `${stepLabel(step)} inherits #${choice.issueNumber}, which was derived for workload ${ownerSlug ?? 'unknown'}, not ${parsedRef.slug} — a step tracks only its own workload's items. Re-open the plan and bind the step to one of ${parsedRef.slug}'s items: create one from the step, or link an unbound item derived for it`,
+      );
+      continue;
     }
     claim(choice.issueNumber, step);
     existing.push({ step, issueNumber: choice.issueNumber });
@@ -280,14 +295,16 @@ export async function commitForApproval(gh: Octokit, repo: RepoRef, input: Commi
     at: input.at,
   });
 
-  // ---- existing items say what their steps now say (D8: inheritance is not staleness) ----
+  // ---- what the FREEZE will do to the existing items (D8; GHI #212) — read, not written ----
   // Every item the commit binds that it did not just create: the validation pass
   // collected the inherited, linked and to-be-reused ones. A freshly created item
-  // already carries its step's text, so it is not read back.
-  const reconciled: ReconciledChunk[] = [];
+  // already carries its step's text. Nothing is rewritten here: the version under
+  // review is not official until its approval merges, and the item it inherits still
+  // belongs to the version that IS — `freezeApprovedPlan` performs the rewrite.
+  const willReconcile: ReconciliationPreview[] = [];
   for (const { step, issueNumber } of existing) {
-    const outcome = await reconcileDerivedChunk(gh, repo, { issueNumber, planRef, plan, step, actor: input.actor, at: input.at });
-    if (outcome.rewritten) reconciled.push(outcome);
+    const preview = await previewDerivedChunkReconciliation(gh, repo, { issueNumber, plan, step });
+    if (preview.requirementChanges || preview.titleChanges) willReconcile.push(preview);
   }
 
   // ---- one plan commit carrying every link ----
@@ -332,7 +349,7 @@ export async function commitForApproval(gh: Octokit, repo: RepoRef, input: Commi
   await reconcileHighStakesRouting(gh, repo, bound, routed);
 
   const pr = await openApprovalPr(gh, repo, { slug: parsedRef.slug, version: parsedRef.version });
-  return { planRef, pr, created: createdOrReused.filter((c) => c.created), linked, reconciled };
+  return { planRef, pr, created: createdOrReused.filter((c) => c.created), linked, willReconcile };
 }
 
 /** The outcome metric the plan supplies for a step, or '' — the row shows a field then. */

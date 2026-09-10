@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
-import { resolveCurrent, slugFromPlanRef, tagExists, tagTargetSha, tryReadPlanAtRef } from '../../../dashboard/lib/github/plans';
+import { resolveCurrent, slugFromPlanRef, tagExists, tagTargetSha, tryReadPlanAtRef, freezeCompletion, freezeIncompleteSentence } from '../../../dashboard/lib/github/plans';
 import { getWorkload } from '../../../dashboard/lib/github/workloads';
 import { getChunk, findIntentConfirmation } from '../../../dashboard/lib/github/chunks';
 import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors';
@@ -41,6 +41,15 @@ export async function checkB1FrozenCurrent(
   const current = await resolveCurrent(gh, repo, slug);
   if (current !== planRef) {
     return { id: 'B1', status: 'fail', requirement: 'FR-007', detail: `official version is ${current ?? 'unset (nothing frozen)'}, not ${planRef}` };
+  }
+  // The tag alone is not the whole freeze (GHI #212; review of PR #214): the work
+  // items are brought to this version's steps AFTER the tag, and the break is
+  // resolved last. A tag whose break is not resolved is a freeze that stopped
+  // part-way — its items may still carry the previous version's text and
+  // confirmation — and authorizes nothing until the re-run converges.
+  const completion = await freezeCompletion(gh, repo, planRef);
+  if (!completion.complete) {
+    return { id: 'B1', status: 'fail', requirement: 'FR-007', detail: freezeIncompleteSentence(planRef) };
   }
   return { id: 'B1', status: 'pass', requirement: 'FR-007' };
 }

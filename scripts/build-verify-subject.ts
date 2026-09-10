@@ -15,7 +15,14 @@ import type { Octokit } from '@octokit/rest';
  * workflow needs the answer as STEP OUTPUTS before it decides whether to check
  * anything out, and a script whose job is "print two values" must not also be the
  * script that writes a results file. Exits 0 either way: "no deliverable to verify"
- * is the ordinary case, not a failure.
+ * is the ordinary case for the sweep and for a push, not a failure. The WORKFLOW is
+ * what refuses an explicitly named `commit` that came back empty (PR #204 F8): this
+ * script does not know whether the sha it was handed was a request or a push, and
+ * the step does, so the refusal lives there — see build-verify.yml's subject step.
+ *
+ * "Merged deliverable" is asked strictly (`planRefForMergedCommit`): the pull request
+ * must have MERGED and the sha must be ITS merge commit — a commit on an open build
+ * branch is associated with its pull request and is not a deliverable that landed.
  *
  * TWO MODES, and the second one exists because of a platform fact (found live,
  * 2026-08-25):

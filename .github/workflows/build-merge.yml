@@ -26,7 +26,10 @@
 # bot's merge ever started on its own; every "automated" verify in the PB-013 log was a
 # hand dispatch. `workflow_dispatch` is exempt from both rules, so after each merge this
 # job dispatches `build-verify` with the merge commit, and verification is on the card
-# within seconds. That exemption is documented by GitHub and observed here for the first
+# within seconds. EVERY merge is attempted: a dispatch that fails is collected, not
+# fatal mid-loop, so one refused dispatch cannot leave the later merges undispatched
+# and unnamed — the step goes red after the loop with one by-hand remedy line per
+# merge it could not start (PR #204 F9). That exemption is documented by GitHub and observed here for the first
 # time by experiment E1 (docs/shared-understanding/EXPERIMENTS.md): a merge with no
 # `build-verify` run behind it — on a GREEN build-merge run — is E1 failing, and
 # `gh workflow run build-verify.yml` by hand is the recovery. The dispatch step runs
@@ -144,18 +147,30 @@ jobs:
             echo "nothing merged in this sweep — no verification to start"
             exit 0
           fi
+          # A dispatch that fails must fail THIS run: the merge stands, and a red
+          # build-merge is how the missing verification gets seen. But it must fail
+          # AFTER the loop, not inside it (PR #204 F9): exiting on the first refused
+          # dispatch left every later merge in the same sweep undispatched AND unnamed,
+          # so the operator re-ran one command and the rest stayed silently unverified.
+          # Every sha is attempted, the failures are collected, and the remedy names
+          # each one — the exact command by hand, one line per merge.
+          failed=()
           while IFS= read -r sha; do
             [ -n "$sha" ] || continue
-            # A dispatch that fails must fail THIS run: the merge stands, and a red
-            # build-merge is how the missing verification gets seen. The remedy is the
-            # same command by hand.
             if gh workflow run build-verify.yml --repo "$GITHUB_REPOSITORY" --ref "$BM_DEFAULT_BRANCH" -f "commit=$sha"; then
               echo "started build-verify for merge commit $sha (E1: expect a run with event=workflow_dispatch within a minute)"
             else
-              echo "could not start build-verify for merge commit $sha — the merge stands and is UNVERIFIED; run: gh workflow run build-verify.yml -f commit=$sha" >&2
-              exit 1
+              echo "could not start build-verify for merge commit $sha — the merge stands and is UNVERIFIED" >&2
+              failed+=("$sha")
             fi
           done <<< "$merged"
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "${#failed[@]} merge(s) stand UNVERIFIED because build-verify could not be started; run by hand:" >&2
+            for sha in "${failed[@]}"; do
+              echo "  gh workflow run build-verify.yml -f commit=$sha" >&2
+            done
+            exit 1
+          fi
   transition:
     # The close event. Who merged it is not this job's business — only that it happened.
     if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')

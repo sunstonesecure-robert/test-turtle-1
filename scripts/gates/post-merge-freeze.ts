@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   if (!record) throw new Error(`PR #${prArg} has no approval record`);
   const plan = await readPlanAtRef(gh, repo, head);
 
-  const { tagRef } = await freezeApprovedPlan(gh, repo, {
+  const { tagRef, reconciled } = await freezeApprovedPlan(gh, repo, {
     slug: m.slug,
     version: m.version,
     mergeSha: record.mergeSha,
@@ -58,6 +58,14 @@ async function main(): Promise<void> {
     approvedAt: record.approvedAt,
   });
   console.log(`frozen ${tagRef} — approver @${record.approver} at ${record.approvedAt}`);
+  // The items this version tracks now mirror ITS steps (GHI #212) — say which moved.
+  for (const r of reconciled) {
+    console.log(
+      r.rewritten
+        ? `work item #${r.issueNumber} (${r.stepId}) rewritten from its changed step${r.confirmationCleared ? '; its intent confirmation was cleared — confirm again' : ''}`
+        : `work item #${r.issueNumber} (${r.stepId}) took its step's new title (requirement unchanged)`,
+    );
+  }
 }
 
 main().catch((error) => {

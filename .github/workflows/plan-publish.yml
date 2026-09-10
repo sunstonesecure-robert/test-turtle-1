@@ -60,6 +60,7 @@ on: # zizmor: ignore[dangerous-triggers]
 permissions:
   contents: write # plan/<slug>/v<N> branch + plans/<slug>/plan.json commit — the only writer of unfrozen plan branches
   issues: write # locate the Andon break (gh-aw footer run-link) + inject the andon:v1 header the safe-output sanitizer strips
+  actions: read # the artifact probe and the cross-run download read ANOTHER run's artifacts; an explicit permissions block sets every unlisted scope to none, and a private target 403s without this (Codex on PR #209)
 concurrency:
   group: plan-publish-${{ github.event.workflow_run.id || inputs.run_id }}
 jobs:
@@ -77,7 +78,7 @@ jobs:
       # untrusted text; it is validated to digits before anything reads it.
       PP_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
     steps:
-      - name: probe — did that run upload a plan.json artifact?
+      - name: probe — did that run upload the artifacts a publish needs?
         id: probe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -85,14 +86,33 @@ jobs:
           if ! [[ "$PP_RUN_ID" =~ ^[0-9]+$ ]]; then
             echo "::error::run_id must be digits, got '$PP_RUN_ID'"; exit 1
           fi
-          names="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID/artifacts" --jq '.artifacts[].name')"
-          if grep -qx 'plan.json' <<<"$names"; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-            echo "run $PP_RUN_ID uploaded plan.json — publishing"
-          else
+          # Only artifacts GitHub can still serve count: an EXPIRED plan.json is listed but not
+          # downloadable, and a probe that said "present" would start a publish that dies at the
+          # download step (Codex on PR #209).
+          live="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID/artifacts" --jq '.artifacts[] | select(.expired == false) | .name')"
+          expired="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID/artifacts" --jq '.artifacts[] | select(.expired == true) | .name')"
+          run_name="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID" --jq '.name')"
+          has() { grep -qx -- "$1" <<<"$2"; }
+          if ! has plan.json "$live"; then
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::run $PP_RUN_ID uploaded no plan.json artifact (artifacts: ${names:-none}) — the agent did not finish, so there is nothing to publish; that run's own failure is the record"
+            if has plan.json "$expired"; then
+              echo "::notice::run $PP_RUN_ID's plan.json artifact has EXPIRED (GitHub's artifact retention) — nothing can be published from it; re-dispatch plan-propose for the workload and, if a headerless Andon still stands for it, withdraw that break first"
+            else
+              echo "::notice::run $PP_RUN_ID uploaded no plan.json artifact (live artifacts: ${live:-none}) — the agent did not finish, so there is nothing to publish; that run's own failure is the record"
+            fi
+            exit 0
           fi
+          # A REVISION uploads two artifacts (plan.json, then addresses.json — the correction
+          # numbers it carries out). A run that ended between the two would publish a revision
+          # whose corrections can never be marked addressed (readAddressesFile reads a missing
+          # file as "none"); require the pair before publishing a plan-revise run (Codex on PR #209).
+          if [[ "$run_name" == *plan-revise* ]] && ! has addresses.json "$live"; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::run $PP_RUN_ID is a plan-revise run that uploaded plan.json but no addresses.json — the revision is incomplete (the agent stopped between its two uploads); not published. Re-run plan-revise for the review"
+            exit 0
+          fi
+          echo "present=true" >> "$GITHUB_OUTPUT"
+          echo "run $PP_RUN_ID ($run_name) uploaded what a publish needs — publishing"
       - if: steps.probe.outputs.present == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

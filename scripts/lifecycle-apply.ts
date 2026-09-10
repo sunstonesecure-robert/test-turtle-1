@@ -243,6 +243,7 @@ async function main(): Promise<void> {
   console.log(`workload ${slug} → workload:${result.workload.state}`);
   for (const run of result.canceledRuns) console.log(`canceled in-flight run ${run.id} (${run.headBranch})`);
   for (const issue of result.supersededBreaks) console.log(`Andon #${issue} → andon:superseded (cause: workload canceled), open corrections withdrawn`);
+  for (const item of result.closedWorkItems) console.log(`work item #${item.issueNumber} (step ${item.stepId} of ${item.planRef}) closed — no frozen version tracks it`);
   if (result.reopened) console.log(`plan re-opened for review: ${result.reopened.planRef} (Andon #${result.reopened.andonIssue}) — FR-040`);
 
   if (action === 'complete') {
