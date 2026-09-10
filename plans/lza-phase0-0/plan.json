@@ -17,7 +17,7 @@
       "scope": [
         "lza.lock"
       ],
-      "tracking_issue": null
+      "tracking_issue": 81
     },
     {
       "id": "step-deploy-scripts",
@@ -33,7 +33,7 @@
       "scope": [
         "deploy/**"
       ],
-      "tracking_issue": null
+      "tracking_issue": 82
     },
     {
       "id": "step-config",
@@ -49,7 +49,7 @@
       "scope": [
         "config/**"
       ],
-      "tracking_issue": null
+      "tracking_issue": 83
     },
     {
       "id": "step-control-tower",
@@ -65,7 +65,7 @@
       "scope": [
         "control-tower/**"
       ],
-      "tracking_issue": null
+      "tracking_issue": 84
     },
     {
       "id": "step-deployment",
@@ -81,7 +81,7 @@
       "scope": [
         "deployment/**"
       ],
-      "tracking_issue": null
+      "tracking_issue": 85
     },
     {
       "id": "step-tests",
@@ -101,7 +101,7 @@
       "scope": [
         "tests/**"
       ],
-      "tracking_issue": null
+      "tracking_issue": 86
     },
     {
       "id": "step-meta",
@@ -123,7 +123,7 @@
         ".editorconfig",
         ".yamllint.yml"
       ],
-      "tracking_issue": null
+      "tracking_issue": 87
     },
     {
       "id": "step-workflow",
@@ -139,7 +139,7 @@
       "scope": [
         ".github/workflows/lza-phase0-0_*.yml"
       ],
-      "tracking_issue": null
+      "tracking_issue": 88
     }
   ],
   "verification_targets": [
