@@ -330,7 +330,7 @@
     },
     {
       "id": "bc-workflow-name-refs",
-      "description": "Renaming the workflow to the slug-prefixed lza-phase0-0_validate-offline.yml must be propagated to every internal reference: check 6 of validate-config-offline.sh (actionlint + yamllint targets), the consistency.bats path list, the workflow's own paths self-reference, and the concurrency group prefix."
+      "description": "Renaming the workflow to the slug-prefixed lza-phase0-0_validate-offline.yml must be propagated to every internal reference: check 6 of validate-config-offline.sh (actionlint + yamllint targets), the consistency.bats path list, and the workflow's own paths self-reference. Additionally the concurrency group must be a FULLY LITERAL static value with no ${{ ... }} expressions: Guard D6.2 (scripts/gates/lib/checks-subject-workflow.ts:450) rejects any ${{ ... }} expression in the group even when the literal prefix is correct, so the example's `group: lza-phase0_validate-offline-${{ github.workflow }}-${{ github.ref }}` still fails the guard. Set the concurrency block to exactly `group: lza-phase0_validate-offline` with `cancel-in-progress: false` (per operator correction #80)."
     },
     {
       "id": "bc-tests-shared-dir",
