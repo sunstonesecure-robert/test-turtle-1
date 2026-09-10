@@ -42,22 +42,17 @@ const INSTRUCTION_HEADING = '**Instruction (exactly one, actionable):**';
 
 /**
  * Exactly-one-instruction template validation (FR-004): the agent receives ONE
- * specific actionable instruction — not a paragraph of context, not a list of
- * asks. Returns the problems; empty means valid.
+ * specific actionable instruction. The gate is FORMAT-AGNOSTIC — blank lines,
+ * line breaks, markdown lists, headings, code fences and quoted examples are all
+ * legitimate ways to write one instruction, so none of them is read as a second
+ * instruction. Whether the prose carries one ask is the operator's judgment, not
+ * the gate's (Deterministic-First). The only structural refusal is an empty
+ * body. Returns the problems; empty means valid.
  */
 export function instructionProblems(instruction: string): string[] {
   const problems: string[] = [];
-  const trimmed = instruction.trim();
-  if (trimmed.length === 0) {
+  if (instruction.trim().length === 0) {
     problems.push('instruction is empty — state exactly one specific, actionable instruction (FR-004)');
-    return problems;
-  }
-  if (/\n\s*\n/.test(trimmed)) {
-    problems.push('multiple paragraphs — a correction carries exactly one instruction; send the rest as separate corrections');
-  }
-  const listItems = trimmed.split('\n').filter((line) => /^\s*([-*+]|\d+[.)])\s+/.test(line));
-  if (listItems.length >= 2) {
-    problems.push(`${listItems.length} list items — a correction carries exactly one instruction; send one correction per item`);
   }
   return problems;
 }
