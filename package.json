@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "init": "tsx scripts/setup-repo.ts",
+    "lock:enforce": "tsx scripts/enforce-job-timeouts.ts && tsx scripts/enforce-upload-caps.ts",
     "gate:plan": "tsx scripts/gates/plan-gate.ts",
     "gate:preflight": "tsx scripts/gates/build-preflight.ts",
     "gate:lifecycle": "tsx scripts/gates/lifecycle-gate.ts",

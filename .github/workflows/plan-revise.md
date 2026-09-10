@@ -27,6 +27,11 @@ safe-outputs:
     # publisher — rightly — declined the pair-less revision (live finding, 2026-09-10,
     # test-turtle-1 run 34513826030 / Andon #79; GHI #216 is the page that could not say so).
     # tests/unit/workflow-linkage.test.ts guards this against the prompt's upload count.
+    #
+    # NOT SUFFICIENT ON ITS OWN (finding 4b, run 34526914991): gh-aw's ingestion validator caps
+    # upload_artifact items by a `max` key the compiler never writes, and falls back to one. After
+    # every compile run `npm run lock:enforce` — scripts/enforce-upload-caps.ts mirrors this value
+    # as `"max"` into the lock's embedded config; tests/unit/upload-caps.test.ts fails without it.
     max-uploads: 2
 steps:
   # CAN THIS KEY PAY FOR THE RUN? Asked in one second, before any container pull
