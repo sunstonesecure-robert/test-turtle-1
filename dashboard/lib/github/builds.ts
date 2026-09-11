@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
-import { apiMessage, errorMessage, errorStatus, Refusal } from './errors';
+import { credentialRemedy, errorMessage, errorStatus, githubSaid, isPermissionDenied, Refusal } from './errors';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
 import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha, freezeCompletion, freezeIncompleteSentence } from './plans';
 import { findIntentConfirmation, getChunk } from './chunks';
@@ -805,11 +805,11 @@ export async function dispatchBuild(
     // permission signal is GitHub's own wording for a denied scope, for a PAT and for an
     // App installation token alike. Any other status is still a fault: a 404 or 422 means
     // the lookups above lied.
-    if (errorStatus(error) === 403 && /Resource not accessible by (personal access token|integration)/i.test(apiMessage(error))) {
+    if (isPermissionDenied(error)) {
       throw new Refusal(
-        `GitHub refused to start the build: the dashboard's token may not start workflow runs on this repository. ` +
-          `Starting a run needs the fine-grained permission Actions: Read and write (CONFIGURATION_GUIDE.md §1, the Actions row); ` +
-          `edit the token's repository permissions, then dispatch again. No run was started. GitHub said: ${apiMessage(error)}`,
+        `GitHub refused to start the build: the dashboard's credential may not start workflow runs on this repository. ` +
+          `Starting a run needs the permission Actions: Read and write (CONFIGURATION_GUIDE.md §1, the Actions row); ` +
+          `${credentialRemedy(error, 'Actions: Read and write')}, then dispatch again. No run was started. ${githubSaid(error)}`,
       );
     }
     throw error;

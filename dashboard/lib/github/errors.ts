@@ -62,3 +62,49 @@ export function isRefusal(error: unknown): error is Refusal {
   if (error instanceof Refusal) return true;
   return error instanceof Error && error.name === 'Refusal';
 }
+
+/**
+ * A 403 that means "this credential lacks a permission" — GitHub's own wording for a
+ * fine-grained PAT ("…by personal access token") and for an App installation token
+ * ("…by integration"). GitHub also answers 403 for an exhausted rate limit and for an
+ * Actions policy block; neither is about the token's scope, and "edit the token" would be
+ * the wrong remedy for both (Codex P2 on PR #221) — so callers must test THIS, never a
+ * bare status === 403, before turning a 403 into a refusal.
+ */
+export function isPermissionDenied(error: unknown): boolean {
+  return errorStatus(error) === 403 && /Resource not accessible by (personal access token|integration)/i.test(apiMessage(error));
+}
+
+/**
+ * The permission list GitHub attaches to a permission-denied response
+ * (`x-accepted-github-permissions`, e.g. `contents=write; workflows=write`), or null when
+ * absent. Quoted in a refusal it names the EXACT scope the token lacks — the afternoon of
+ * 2026-09-11 was spent inferring "Workflows" from a docs table when GitHub had said so in
+ * the header of the very response the operator was shown.
+ */
+export function acceptedPermissions(error: unknown): string | null {
+  const headers = (error as { response?: { headers?: Record<string, unknown> } } | null)?.response?.headers;
+  const value = headers?.['x-accepted-github-permissions'];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/** "GitHub said: …" with the accepted-permissions header appended when GitHub sent one. */
+export function githubSaid(error: unknown): string {
+  const accepted = acceptedPermissions(error);
+  return `GitHub said: ${apiMessage(error)}${accepted ? ` (permissions it accepts for this call: ${accepted})` : ''}`;
+}
+
+/**
+ * The remedy sentence for a permission refusal, by credential type — GitHub's wording
+ * tells them apart. A fine-grained PAT's permissions are edited on the token; a GitHub App
+ * installation token's are NOT: they come from the App, so the fix is to grant the
+ * permission on the App, approve the updated permissions on the installation, and issue a
+ * new token (Codex P2 on PR #227 — telling App users to "edit the token" sent them to a
+ * control that does not exist).
+ */
+export function credentialRemedy(error: unknown, permission: string): string {
+  return /by integration/i.test(apiMessage(error))
+    ? `this credential is a GitHub App installation token, so grant ${permission} on the App itself, approve the updated permissions on this repository's installation, then issue a new token`
+    : `edit the token's repository permissions to add ${permission}`;
+}
+

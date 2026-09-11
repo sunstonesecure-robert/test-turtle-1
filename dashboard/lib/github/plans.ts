@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { PlanDoc } from '../../../schemas/plan';
-import { errorMessage, errorStatus, Refusal } from './errors';
+import { credentialRemedy, errorMessage, errorStatus, githubSaid, isPermissionDenied, Refusal } from './errors';
 import { createAndonIssue, dropLiveLabelsAndClose, findResolvedAndonByPlanRef } from './andon';
 import { CONTRADICTION_LABEL } from './labels';
 // Static import that closes an import cycle (chunks.ts imports parsePlanRef and friends
@@ -882,8 +882,24 @@ export async function reopenPlan(
     await gh.git.createRef({ ...repo, ref: `refs/heads/${planRef}`, sha: frozenSha });
   } catch (error: unknown) {
     // TOCTOU with the in-flight check above: a concurrent re-open won.
-    if (errorStatus(error) !== 422) throw error;
-    throw new Refusal(`already re-opened: branch ${planRef} exists`);
+    if (errorStatus(error) === 422) throw new Refusal(`already re-opened: branch ${planRef} exists`);
+    // A PERMISSION 403 IS A REFUSAL, NOT A FAULT (live, 2026-09-11, the LZA re-open — the
+    // route ADR-0003 prescribes). Creating a branch whose tree carries .github/workflows/*
+    // needs the fine-grained WORKFLOWS permission as well as Contents (GitHub's
+    // permissions reference lists "Create a reference" under both), and the day-to-day
+    // token deliberately had none — this is the only dashboard action that creates a
+    // branch, and it had not run live since the fine-grained token was adopted. Nothing
+    // was written; the remedy is the operator's; the sentence is the product. Any other
+    // 403 (rate limit, policy) and every other status stay faults. GHI #226 moves the
+    // branch creation into a workflow so the token can drop Workflows again.
+    if (isPermissionDenied(error)) {
+      throw new Refusal(
+        `GitHub refused to create the branch ${planRef}: the dashboard's credential may not create a branch that carries workflow files. ` +
+          `That needs the permission Workflows: Read and write (CONFIGURATION_GUIDE.md §1, the Workflows row — a dated stopgap until GHI #226 moves this into a workflow); ` +
+          `${credentialRemedy(error, 'Workflows: Read and write')}, then re-open again. No branch and no new review were created. ${githubSaid(error)}`,
+      );
+    }
+    throw error;
   }
 
   const seed: PlanDoc = {

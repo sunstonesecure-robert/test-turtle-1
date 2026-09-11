@@ -79,6 +79,16 @@ export function createClient(opts: ClientOptions = {}): Octokit {
         if (/ - (?:304|404) with id /.test(args[0])) return;
         if (/\/actions\/variables\/[^ ]* - 403 with id /.test(args[0])) return;
         if (/\/actions\/permissions\/workflow - 403 with id /.test(args[0])) return;
+        // TWO MORE, for handled permission refusals on WRITES (Codex P2 on PR #227):
+        // creating a plan branch (`POST /git/refs`, re-open) and starting a build
+        // (`POST /actions/workflows/*/dispatches`). Both convert a permission 403 into a
+        // Refusal the operator reads as a sentence; the octokit log line fired first and
+        // put the red overlay over that sentence. A 403 on these paths that is NOT a
+        // permission denial (rate limit, policy) still THROWS as a fault and reaches the
+        // error boundary with the same status and URL — only the duplicate console line
+        // is dropped, as for 404 above. A 403 anywhere else still logs.
+        if (/\/git\/refs - 403 with id /.test(args[0])) return;
+        if (/\/actions\/workflows\/[^ ]*\/dispatches - 403 with id /.test(args[0])) return;
         console.error(...args);
       },
     },
