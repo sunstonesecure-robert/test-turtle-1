@@ -242,15 +242,23 @@ steps:
     env:
       GATES_REF: ${{ inputs.gates_ref }}
   - name: build-preflight (B1–B9 as applicable — MUST be step 1, fails the run before any agent step)
-    run: >-
-      npx tsx scripts/gates/build-preflight.ts
-      --plan-ref ${{ inputs.plan_ref }}
-      --workload ${{ inputs.workload }}
-      ${{ inputs.chunk && format('--chunk {0}', inputs.chunk) || '' }}
-      ${{ inputs.unattended == 'true' && '--unattended' || '' }}
-      --gates-ref ${{ steps.gates.outputs.ref }}
-      --gates-sha ${{ steps.gates.outputs.sha }}
-      --repo ${{ github.repository }} --json
+    # The JSON report is ALSO written to a handoff file under ${RUNNER_TEMP}/gh-aw, which the
+    # agent's sandbox mounts read-only at the same path — so the agent can read the gates'
+    # verdicts, including the step B3 resolved for the work item, instead of re-deriving them
+    # (live, 2026-09-11, run 34545293834: the agent looked for "any preflight handoff file" and
+    # found none). `pipefail` keeps a failing preflight failing through the tee.
+    run: |
+      set -o pipefail
+      mkdir -p "$RUNNER_TEMP/gh-aw/preflight"
+      npx tsx scripts/gates/build-preflight.ts \
+        --plan-ref ${{ inputs.plan_ref }} \
+        --workload ${{ inputs.workload }} \
+        ${{ inputs.chunk && format('--chunk {0}', inputs.chunk) || '' }} \
+        ${{ inputs.unattended == 'true' && '--unattended' || '' }} \
+        --gates-ref ${{ steps.gates.outputs.ref }} \
+        --gates-sha ${{ steps.gates.outputs.sha }} \
+        --repo ${{ github.repository }} --json \
+        | tee "$RUNNER_TEMP/gh-aw/preflight/report.json"
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -291,10 +299,23 @@ report by name; none of them is ever silently absent.
 the system — it describes THIS executor, and any executor satisfying
 `contracts/build-executor.md` is a legitimate replacement.
 
-**Build the step the chunk names, and nothing else.** When this run was given a chunk, exactly one
-plan step delivers it, and the high-stakes gate was scoped to that step alone (GHI #87) — so work
-that strays into another step is work no authority was asked about. If the chunk turns out to need
-a change to a different step, emit `missing-data` and stop rather than widening the build.
+**This run's work item: `#${{ inputs.chunk }}`, of workload `${{ inputs.workload }}`**
+(unattended: `${{ inputs.unattended }}`). That number is the dispatch input the operator chose on
+the dashboard; it is the ONE thing that tells you which step to build, and it reaches you only
+through this sentence — the dispatch payload is not visible from inside the sandbox (live,
+2026-09-11, run 34545293834: the first LZA build was dispatched for #81, the prompt never said so,
+and the agent rightly refused to guess among eight steps). Find the step whose `tracking_issue` is
+this number in the frozen plan; that step's `id` is your deliverable's `step_id`. An EMPTY value
+means a chunkless whole-plan build (the tracer path) and no `step_id` is scoped. The preflight's
+JSON report is at `$RUNNER_TEMP/gh-aw/preflight/report.json` if that path is readable from where
+you run — it names the same step under B3 and every gate's verdict; if it is not readable, the plan
+alone is enough and you say nothing about it.
+
+**Build the step the work item names, and nothing else.** When this run was given a work item,
+exactly one plan step delivers it, and the high-stakes gate was scoped to that step alone (GHI #87)
+— so work that strays into another step is work no authority was asked about. If the work item
+turns out to need a change to a different step, emit `missing-data` and stop rather than widening
+the build.
 
 Those gates ran from the CURRENT gate code, not the copy frozen into this tag, and the report
 names the ref and commit they came from (GHI #107). **The gate set is not frozen with the plan;
