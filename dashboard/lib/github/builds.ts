@@ -1,6 +1,6 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
-import { errorMessage, errorStatus, Refusal } from './errors';
+import { apiMessage, errorMessage, errorStatus, Refusal } from './errors';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
 import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha, freezeCompletion, freezeIncompleteSentence } from './plans';
 import { findIntentConfirmation, getChunk } from './chunks';
@@ -787,7 +787,33 @@ export async function dispatchBuild(
     unattended: input.unattended ? 'true' : 'false',
     gates_ref: '',
   };
-  await gh.actions.createWorkflowDispatch({ ...repo, workflow_id: workflow.id, ref, inputs });
+  try {
+    await gh.actions.createWorkflowDispatch({ ...repo, workflow_id: workflow.id, ref, inputs });
+  } catch (error: unknown) {
+    // A 403 HERE IS A REFUSAL, NOT A FAULT (live, 2026-09-11, the first LZA dispatch):
+    // starting a run is an Actions WRITE, and a day-to-day token minted from the guide's
+    // pre-Wave-1 row (Actions: Read) is denied with "Resource not accessible by personal
+    // access token". Nothing was started, nothing was written — but as a plain throw this
+    // reached the error boundary as "a fault in the dashboard" with a log digest, and the
+    // one sentence the operator needed (which permission, where) never arrived. The
+    // remedy is the operator's, so the sentence is the product; GitHub's own words ride
+    // along. ONLY the permission-denied 403 is converted (Codex P2 on PR #221): GitHub also
+    // answers 403 for an exhausted rate limit ("API rate limit exceeded", transient — the
+    // token is fine) and for a repository/organization Actions policy that blocks
+    // dispatches (not the token's scope either). Telling either operator to edit the token
+    // is the wrong remedy, so those stay faults with GitHub's message in the digest. The
+    // permission signal is GitHub's own wording for a denied scope, for a PAT and for an
+    // App installation token alike. Any other status is still a fault: a 404 or 422 means
+    // the lookups above lied.
+    if (errorStatus(error) === 403 && /Resource not accessible by (personal access token|integration)/i.test(apiMessage(error))) {
+      throw new Refusal(
+        `GitHub refused to start the build: the dashboard's token may not start workflow runs on this repository. ` +
+          `Starting a run needs the fine-grained permission Actions: Read and write (CONFIGURATION_GUIDE.md §1, the Actions row); ` +
+          `edit the token's repository permissions, then dispatch again. No run was started. GitHub said: ${apiMessage(error)}`,
+      );
+    }
+    throw error;
+  }
 
   // THE RECORD, before the lookup: who started what is the durable fact; the run id is
   // a convenience the Runs page can supply if this comment has to stand without it.
