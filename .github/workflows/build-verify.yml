@@ -92,16 +92,33 @@
 # a tree the merge commit does not contain.
 #
 # A TARGET THAT PASSES WITHOUT ITS STEP WITNESSED NOTHING (GHI #230, the NEGATIVE
-# CONTROL). Every target that concludes `success` is re-executed against the tree the
-# deliverable landed ON — the merge commit's first parent, checked out at `base/`, which
-# by construction contains none of this deliverable's work. A target that passes THERE
-# TOO asserts something that was already true, so its green says nothing about the step
-# it maps to; it is recorded `action_required` naming the reason, and L3 fails closed on
-# it. Found live 2026-09-11: of 19 targets, three reported success against a tree that
-# had received none of the plan's 8 steps — one because a `;`-list reports only its LAST
-# command's status, one because `!` inverts grep's exit 2 (an ERROR, not "no match")
-# into a pass. No single lint of the command text catches both; asking the target to
-# discriminate does, and it reads no command text at all.
+# CONTROL). Every target that concludes `success` is re-executed against the FROZEN PLAN
+# TREE — the commit `plan/<slug>/v<N>` tags, checked out at `base/`. A target that passes
+# THERE TOO asserts something that was already true before any of the plan's work
+# existed, so its green says nothing about the step it maps to; it is recorded
+# `action_required` naming the reason, and L3 fails closed on it. Found live 2026-09-11:
+# of 19 targets, three reported success against a tree that had received none of the
+# plan's 8 steps — one because a `;`-list reports only its LAST command's status, one
+# because `!` inverts grep's exit 2 (an ERROR, not "no match") into a pass. No single
+# lint of the command text catches both; asking the target to discriminate does, and it
+# reads no command text at all.
+#
+# WHY THE FROZEN TAG AND NOT THE MERGE COMMIT'S FIRST PARENT (Codex P1 on PR #233, and
+# this is the one that would have broken the north star). The first parent is the default
+# branch as it was immediately before THIS deliverable landed — which, on the second and
+# every later delivery of a multi-step plan, ALREADY CONTAINS the earlier steps. Since
+# this workflow runs EVERY target of the plan against every merged deliverable, and
+# lifecycle-gate L3 reads only the NEWEST merge commit, every earlier step's target would
+# pass on both trees, be demoted to `action_required`, and refuse completion forever: an
+# 8-MUST-step plan could never be completed incrementally, which is exactly the path the
+# deliverable seam exists for. The frozen tag has no such drift — `build-publish` cuts
+# every deliverable branch FROM that commit, so it contains none of the plan's work no
+# matter how many deliverables have landed. It is also what B9 already proved the subject
+# descends from, so the two trees are on one line of history by construction.
+#
+# THE RESIDUAL, NAMED. A plan RE-OPENED and re-frozen after some of its steps had already
+# landed carries that work in the new tag's tree, so those steps' targets would pass on
+# the base and be demoted. Real, narrower, and out of scope here — GHI #234.
 #
 # THE COMMANDS RUN WITHOUT CREDENTIALS: GITHUB_TOKEN and the agent keys are stripped
 # from the child environment before any target executes. Operator-approved is not the
@@ -159,7 +176,16 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 40, NOT 20 (Codex P1 on PR #233, 2026-09-12). The negative control re-executes
+    # every GREEN target a second time, so the worst case for a passing plan doubled
+    # while this budget did not. Each target may take 5 minutes; three slow greens went
+    # from ~12 minutes to ~24 and would be CANCELLED mid-run — before the artifact
+    # upload, so the `report` job records nothing at all and the merge reads unverified.
+    # The number tracks the work: the pass doubled, so the budget does. It was never a
+    # bound on target COUNT (19 targets × 5 minutes exceeds any of these), and a plan
+    # that needs more than this is a plan whose targets are too slow to verify on a
+    # merge — which the run says out loud rather than discovering at the cap.
+    timeout-minutes: 40
     # NO `permissions:` BLOCK HERE — see the note above the workflow-level one.
     #
     # WHAT `report` BINDS TO. Both come from the deterministic subject step, which
@@ -238,42 +264,6 @@ jobs:
         with:
           ref: ${{ steps.subject.outputs.sha }}
           path: subject
-          # DEPTH 2, for the negative control below: the merge commit plus its parents.
-          # `build-merge` always merges with `merge_method: 'merge'`, so the subject is
-          # a merge commit and its FIRST PARENT is the default branch exactly as it was
-          # before this deliverable landed. Nothing deeper is needed, and nothing
-          # shallower would resolve the parent at all.
-          fetch-depth: 2
-          persist-credentials: false
-      # THE TREE THE DELIVERABLE LANDED ON — the negative control's second subject
-      # (GHI #230). A verification target is supposed to WITNESS the step it maps to, so
-      # it is asked to: a target that passes here as well as on the merge commit passed
-      # without the work present, and its green is not evidence about the step. Found
-      # live on 2026-09-11, where three of four green targets reproduced as success
-      # against a tree that had received none of the plan's steps.
-      #
-      # The first parent, not `git merge-base`: it is the exact tree the merge added to,
-      # it needs no extra history, and for a squash or rebase landing it is still the
-      # commit immediately before the deliverable.
-      - name: resolve the tree this deliverable landed on
-        id: base
-        if: steps.subject.outputs.plan_ref != ''
-        run: |
-          set -euo pipefail
-          # A root commit has no parent. Then there is no control to run: the step
-          # outputs nothing, the checkout below is skipped, and build-verify.ts says so
-          # in its summary rather than reporting greens nobody questioned.
-          if sha="$(git -C subject rev-parse --verify --quiet 'HEAD^1')"; then
-            echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          else
-            echo "the commit under verification has no first parent — no negative control is possible" >&2
-          fi
-      - name: check out the tree this deliverable landed on
-        if: steps.base.outputs.sha != ''
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ steps.base.outputs.sha }}
-          path: base
           persist-credentials: false
       # PREFLIGHT B9 — the verified commit must DESCEND from the frozen plan tag
       # (FR-063). B8 asks the same family of question of a BUILD's dispatch ref; this
@@ -289,19 +279,40 @@ jobs:
           --plan-ref "$BV_PLAN_REF"
           --verify-commit "$BV_SUBJECT_SHA"
           --repo "$GITHUB_REPOSITORY" --json
+      # THE FROZEN PLAN TREE — the negative control's base (GHI #230; see the header for
+      # why it is this commit and not the merge commit's first parent). A verification
+      # target is supposed to WITNESS the step it maps to, so it is asked to: a target
+      # that passes here, on a tree holding none of the plan's work, passed without the
+      # work present, and its green is not evidence about the step.
+      #
+      # `plan_ref` comes from the deliverable pull request's own marker, never from a
+      # caller, so this checkout can only be the approved plan's own baseline.
+      #
+      # AFTER B9, DELIBERATELY. Both steps depend on the frozen tag resolving, and B9 is
+      # the one that can SAY SO: a tag that has gone missing gets its refusal — naming
+      # the plan ref, the commit and the rule — instead of a raw `couldn't find remote
+      # ref` from the checkout action, which reads like an infrastructure fault. The
+      # ordering costs nothing (no target has run yet either way) and buys the better
+      # message on the one failure both share.
+      - name: check out the frozen plan tree (the negative control's base)
+        if: steps.subject.outputs.plan_ref != ''
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: refs/tags/${{ steps.subject.outputs.plan_ref }}
+          path: base
+          persist-credentials: false
       - name: execute every verification target with an executable form
         if: steps.subject.outputs.plan_ref != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
-          # Empty when the subject has no parent — build-verify.ts then skips the
-          # control and says so, rather than silently reporting unquestioned greens.
-          BV_BASE_SHA: ${{ steps.base.outputs.sha }}
-        run: |
-          set -euo pipefail
-          args=(--plan-ref "$BV_PLAN_REF" --repo "$GITHUB_REPOSITORY" --cwd "$GITHUB_WORKSPACE/subject")
-          if [ -n "$BV_BASE_SHA" ]; then args+=(--base-cwd "$GITHUB_WORKSPACE/base"); fi
-          npx tsx scripts/build-verify.ts "${args[@]}" --out "$RUNNER_TEMP/verify/vt-results.json"
+        run: >-
+          npx tsx scripts/build-verify.ts
+          --plan-ref "$BV_PLAN_REF"
+          --repo "$GITHUB_REPOSITORY"
+          --cwd "$GITHUB_WORKSPACE/subject"
+          --base-cwd "$GITHUB_WORKSPACE/base"
+          --out "$RUNNER_TEMP/verify/vt-results.json"
       - name: upload the verification results for the report job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

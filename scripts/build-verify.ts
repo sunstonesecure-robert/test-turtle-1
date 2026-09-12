@@ -56,12 +56,29 @@ import type { CheckConclusion } from './vt-report';
  *
  * A TARGET THAT PASSES ON A TREE WITHOUT ITS STEP WITNESSED NOTHING (GHI #230, the
  * NEGATIVE CONTROL). Every target that concludes `success` is re-executed against the
- * tree the deliverable landed ON — the merge commit's first parent, which by
- * construction contains none of this deliverable's work. A target that passes THERE TOO
- * did not discriminate: whatever it asserts was already true before the step existed,
- * so its green says nothing about the step it maps to. Such a target is recorded
- * `action_required` naming the reason, and L3 (which fails closed on anything short of
- * `success`) refuses completion until it is fixed.
+ * FROZEN PLAN TREE — the commit `plan/<slug>/v<N>` tags. A target that passes THERE TOO
+ * did not discriminate: whatever it asserts was already true before any of the plan's
+ * work existed, so its green says nothing about the step it maps to. Such a target is
+ * recorded `action_required` naming the reason, and L3 (which fails closed on anything
+ * short of `success`) refuses completion until it is fixed.
+ *
+ * WHY THE FROZEN TAG AND NOT THE MERGE COMMIT'S FIRST PARENT (Codex P1 on PR #233,
+ * 2026-09-12 — the first version of this used the first parent and would have broken
+ * every multi-step plan). The first parent is the default branch as it was immediately
+ * before THIS deliverable landed, so on the second and every later delivery it ALREADY
+ * CONTAINS the earlier steps. `targetsToVerify` returns EVERY target of the plan, and
+ * L3 reads only the NEWEST merge commit (`resolveVerifiedCommit`) — so every earlier
+ * step's target would pass on both trees, be demoted, and refuse completion forever. An
+ * 8-MUST-step plan delivered one work item at a time — the north-star shape — could
+ * never complete. The frozen tag does not drift: `build-publish` cuts every deliverable
+ * branch FROM that commit (`createRef({ sha: tagSha })`), so it holds none of the plan's
+ * work however many deliverables have landed, and B9 has already proved the subject
+ * descends from it, so the two trees sit on one line of history by construction.
+ *
+ * THE RESIDUAL, NAMED RATHER THAN HIDDEN. A plan RE-OPENED and re-frozen (FR-008) after
+ * some of its steps had already landed carries that work in the new tag's tree, so those
+ * steps' targets pass on the base and are demoted. Real, narrower than the first-parent
+ * defect, and tracked on GHI #234 — not silently accepted here.
  *
  * WHY THIS AND NOT A LINT OF THE COMMAND TEXT. Found live on 2026-09-11: of 19 targets
  * on `plan/lza-phase0-0/v2`, three reported `success` against merge base `2847f881`, a
@@ -77,7 +94,16 @@ import type { CheckConclusion } from './vt-report';
  * ONLY THE GREENS ARE RE-RUN, deliberately. A target that already concluded non-success
  * on the subject is not a false green, so re-running it could only cost time — on a plan
  * whose steps are mostly unbuilt, which is the ordinary case mid-plan, that is most of
- * them. The property is identical either way.
+ * them. The property is identical either way. What the saving does NOT do is bound the
+ * worst case: a plan of slow GREEN targets executes twice, which is why the verify job's
+ * budget doubled with this change (build-verify.yml, `timeout-minutes: 40`) — a run
+ * cancelled at the cap uploads no artifact and reports nothing at all.
+ *
+ * A BASE THAT IS THE SUBJECT IS NOT A CONTROL. `vt-report`'s pre-US18 compatibility shim
+ * accepts a verified commit IDENTICAL to the frozen tag's; were that ever handed here,
+ * every target would trivially pass on both trees and the whole plan would be demoted at
+ * once. The two HEADs are compared before the loop and the control is skipped, loudly,
+ * rather than producing a verdict from a comparison of a tree with itself.
  *
  * THE OBJECTION, NAMED AND STAGED. A target legitimately guarding a PRE-EXISTING
  * invariant also passes on both trees. Under `maps_to` semantics it does not witness the
@@ -254,9 +280,14 @@ export function resetCheckout(cwd: string, head: string): void {
   git(cwd, ['clean', '-fdq']);
 }
 
-/** The MUST-mapped targets — the only ones completion (L3) reads. A SHOULD/COULD
- *  target is still verified when it carries `run`, because a result the plan can
- *  explain is always worth recording; it simply does not gate anything. */
+/** EVERY target the plan defines, unfiltered — not only the MUST-mapped ones, and not
+ *  only the ones the step under delivery maps to. (The name and the docstring said
+ *  "MUST-mapped" until 2026-09-12; the code never did, and one well-meaning edit to
+ *  match the prose would silently change what the negative control and L3 see.)
+ *
+ *  Completion (L3) reads only MUST-mapped results, but a SHOULD/COULD target carrying
+ *  `run` is still executed and recorded, because a result the plan can explain is worth
+ *  having; it simply gates nothing. */
 export function targetsToVerify(plan: PlanDoc): PlanDoc['verification_targets'] {
   return plan.verification_targets;
 }
@@ -268,7 +299,7 @@ export function mustMappedTargetIds(plan: PlanDoc): string[] {
 
 /**
  * @param cwd      the MERGED deliverable commit's checkout — the subject.
- * @param baseCwd  the tree the deliverable landed ON (the merge commit's first parent),
+ * @param baseCwd  the FROZEN PLAN TREE's checkout (the commit `plan/<slug>/v<N>` tags),
  *                 for the negative control. Omitted, the control does not run and the
  *                 runner says so loudly: a green with no control behind it is exactly
  *                 what GHI #230 is about, and it must not pass unremarked.
@@ -282,6 +313,24 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
   const mutated: { id: string; changes: string[] }[] = [];
   const nonDiscriminating: string[] = [];
   const mustIds = new Set(mustMappedTargetIds(plan));
+
+  // The control's tree, or `undefined` for "no control". Resolved ONCE, before any
+  // target runs: a base that is the subject itself compares a tree with itself, which
+  // would pass every target and demote the entire plan in one go.
+  let control: string | undefined;
+  if (baseCwd !== undefined) {
+    const subjectHead = snapshotCheckout(cwd).head;
+    const baseHead = snapshotCheckout(baseCwd).head;
+    if (baseHead === subjectHead) {
+      console.log(
+        `NO NEGATIVE CONTROL: the base tree is the commit under verification (${baseHead.slice(0, 8)}) — the pre-US18 ` +
+          "compatibility shim's identical binding. A tree compared with itself answers nothing, so no target is demoted. " +
+          'GHI #230.',
+      );
+    } else {
+      control = baseCwd;
+    }
+  }
 
   for (const target of targetsToVerify(plan)) {
     if (!target.run) {
@@ -297,13 +346,13 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
     // failed on the subject is not a false green, and re-running it would cost a second
     // execution to learn nothing.
     let base: TargetRun | null = null;
-    if (conclusion === 'success' && baseCwd !== undefined) {
-      base = executeTarget(target.run, baseCwd, env);
+    if (conclusion === 'success' && control !== undefined) {
+      base = executeTarget(target.run, control, env);
       // ONLY exit 0 demotes. A spawn error, a timeout or a mutation on the base tree
       // means the control could not be performed — and "could not ask" must never read
       // as "it discriminated", nor as "it did not". The subject's own verdict stands,
       // and the reason appears in the log below.
-      if (base.changes.length > 0) resetCheckout(baseCwd, base.before.head);
+      if (base.changes.length > 0) resetCheckout(control, base.before.head);
       if (base.status === 0 && base.changes.length === 0) {
         conclusion = 'action_required';
         nonDiscriminating.push(target.id);
@@ -323,16 +372,32 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
     if (base !== null) {
       if (nonDiscriminating.includes(target.id)) {
         console.log(
-          `  WITNESSED NOTHING (GHI #230): this also passed on ${base.before.head.slice(0, 8)}, the tree this deliverable ` +
-            `landed on — which contains none of its work. A target that passes with and without the step it maps to ` +
-            `(${target.maps_to.join(', ')}) asserts something that was already true, so its green is not evidence about the ` +
-            'step. Recorded action_required; re-open the plan to make the command fail on a tree lacking the step',
+          `  WITNESSED NOTHING (GHI #230): this also passed on ${base.before.head.slice(0, 8)}, the frozen tree of ` +
+            `${planRef}. A target that passes with and without the step it maps to (${target.maps_to.join(', ')}) asserts ` +
+            'something that was already true, so its green is not evidence about the step. Recorded action_required. ' +
+            'TWO CAUSES, AND THEY NEED OPPOSITE REMEDIES — check which one this is before acting: (1) the command does ' +
+            'not discriminate (the ordinary case) → re-open the plan and make it fail on a tree lacking the step; ' +
+            "(2) the frozen tree ALREADY CONTAINS this step's work, because the tag was cut after that work landed (a " +
+            'plan re-frozen mid-delivery, or work that reached the default branch by some other route) → re-opening ' +
+            'AGAIN makes it worse, since the next tag is cut from a default branch holding even more of it, and no ' +
+            'command can fail on a tree that has the step. The only exit from (2) is to retract the commitment: drop ' +
+            'the target, or take its step out of MUST. GHI #234',
         );
       } else if (base.changes.length > 0 || base.status === null) {
         console.log(
           `  negative control could not be performed (${base.changes.length > 0 ? `it changed the base checkout: ${base.changes.join('; ')}` : 'the command did not run'}) — ` +
             "the subject's verdict stands unmodified",
         );
+      } else {
+        // THE CONTROL'S OWN FAIL-OPEN, MADE VISIBLE. A non-zero exit on the base is read
+        // as "it discriminated" and the green stands — but this runner cannot tell
+        // "the assertion was false there" from "the command errored there" (a missing
+        // tool, exit 127, or grep's exit 2 on an absent file — the very
+        // error-laundered-as-signal mechanism GHI #230 exists to catch, now on the other
+        // side of the comparison). Undecidable in general, so it is printed rather than
+        // guessed at: a reader auditing a green can see what the base actually did.
+        console.log(`  negative control: exit ${base.status} on the frozen tree — it discriminated, green stands`);
+        if (base.stderr.trim()) console.log(`    base stderr: ${base.stderr.trim().slice(0, 400)}`);
       }
     }
     results.push({ id: target.id, conclusion });
@@ -397,9 +462,9 @@ if (isMain) {
   const repoArg = get('repo');
   const out = get('out') ?? 'vt-results.json';
   const cwd = get('cwd') ?? process.cwd();
-  // The tree the deliverable landed ON — the negative control's second subject (GHI
-  // #230). Optional so the CLI stays runnable by hand against one checkout; the
-  // workflow always passes it, and a run without it says so in the summary below.
+  // The FROZEN PLAN TREE — the negative control's base (GHI #230). Optional so the CLI
+  // stays runnable by hand against one checkout; the workflow always passes it, and a
+  // run without it says so in the summary below.
   const baseCwd = get('base-cwd');
   const commit = get('commit');
   const [owner, repoName] = (repoArg ?? '').split('/');
@@ -446,10 +511,10 @@ if (isMain) {
         // the operator acts on it by re-opening the plan — not by re-running this.
         console.log(
           `WITNESSED NOTHING (recorded action_required, GHI #230): ${outcome.nonDiscriminating.join(', ')} — each of these ` +
-            'passed on the merged commit AND on the tree the deliverable landed on, which contains none of its work. A ' +
-            'target that passes with and without the step it maps to asserts something that was already true, so its ' +
-            'green is not evidence about the step. Completion (L3) stays refused until the plan is re-opened to make the ' +
-            'command fail on a tree lacking the step.',
+            "passed on the merged commit AND on the frozen plan tree, which contains none of the plan's work. A target " +
+            'that passes with and without the step it maps to asserts something that was already true, so its green is ' +
+            'not evidence about the step. Completion (L3) stays refused until the plan is re-opened to make the command ' +
+            'fail on a tree lacking the step.',
         );
       }
       if (baseCwd === undefined) {

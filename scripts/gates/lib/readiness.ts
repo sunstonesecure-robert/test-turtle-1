@@ -5,6 +5,10 @@ import { EVIDENCE_BRANCH } from '../../../dashboard/lib/github/evidence-store';
 import type { GateResult } from './runner';
 import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
 import { AGENT_BUILD_ENVIRONMENT, SUBJECT_DEPLOY_ENVIRONMENT, PRODUCT_ENVIRONMENTS } from './environments';
+// From the MANIFEST module, never from `scripts/install.ts`: readiness is reached from a
+// dashboard page (the intake-refusal banner, FR-029) and the installer drags `node:fs`,
+// Octokit and `import.meta.url` into that bundle — the T261 build failure exactly.
+import { RETIRED_TEMPLATES } from '../../install-manifest';
 
 /**
  * Readiness checks (gate-checks-cli.md §4) — a pure function of live repo state,
@@ -436,6 +440,29 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
       else throw error;
     }
   }
+  // A RETIRED WORKFLOW STILL INSTALLED IS A STALE TARGET (Codex P2 on PR #233,
+  // 2026-09-12). I7 asks whether the deliverable-path workflow FILES are present, and a
+  // target initialized before a migration satisfies that with the OLD file — so
+  // readiness reported ready while the unattended reporting path was structurally
+  // broken, and had no way to tell the operator the migration had not been installed.
+  //
+  // The retirement list answers it exactly, and cheaply: a target carrying
+  // `.github/workflows/vt-report.yml` is BY CONSTRUCTION pre-GHI-#228, because the only
+  // thing that removes it is the `npm run init` that also installs the `report` job.
+  // Presence of a retired path is therefore a precise, one-probe migration detector.
+  //
+  // What this does NOT do is verify the CONTENT of an installed workflow — there is no
+  // version marker in any template, and inventing one touches all 20 of them. The
+  // general check is GHI #235; this closes the case that exists today.
+  const retiredStillInstalled: string[] = [];
+  for (const { path } of RETIRED_TEMPLATES) {
+    try {
+      await gh.repos.getContent({ ...repo, path });
+      retiredStillInstalled.push(path);
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 404) throw error;
+    }
+  }
   // The registration half. Read from the ruleset itself rather than from what init
   // intended to write: "we call setup-repo, so it must be registered" is precisely
   // the assumption that let a shipped feature never once work (GHI #134).
@@ -487,6 +514,14 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   const recordedOn = canOpenPrs.source === 'recorded' && canOpenPrs.at ? ` on ${canOpenPrs.at}` : '';
   const deliverableUnmet = [
     ...(missingDeliverable.length ? [`missing deliverable-path workflows: ${missingDeliverable.join(', ')}`] : []),
+    ...(retiredStillInstalled.length
+      ? [
+          `this target still carries retired workflow(s): ${retiredStillInstalled.join(', ')} — it was initialized before ` +
+            'the reporter moved into `build-verify`, so its installed `build-verify.yml` has no `report` job and NO `vt-*` ' +
+            'check run will ever reach a merge commit (GHI #228). Re-run `npm run init`, which installs the new workflow ' +
+            'and deletes the retired one',
+        ]
+      : []),
     ...(canOpenPrs.source !== 'unverifiable' && canOpenPrs.value === false
       ? [
           'GitHub Actions is NOT permitted to create pull requests on this repository — build-publish will write the ' +
