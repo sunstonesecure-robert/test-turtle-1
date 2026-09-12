@@ -525,6 +525,11 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
     const install = await installOversightFiles(gh, repo);
     if (install.committed) {
       changed.push(`installed oversight files (${install.fileCount} files, ${install.commitSha})`);
+      // Named separately, because a DELETION is the one thing init does that an
+      // operator cannot infer from "N files installed" (GHI #228).
+      if (install.deletedPaths.length > 0) {
+        changed.push(`retired workflow(s) removed from the target: ${install.deletedPaths.join(', ')}`);
+      }
     }
   } catch (error: unknown) {
     const status = errorStatus(error);

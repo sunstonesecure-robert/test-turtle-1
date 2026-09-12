@@ -54,6 +54,45 @@ import type { CheckConclusion } from './vt-report';
  * and the reset breaks nothing the contract permits; a build-then-test plan breaks
  * loudly here rather than passing silently.
  *
+ * A TARGET THAT PASSES ON A TREE WITHOUT ITS STEP WITNESSED NOTHING (GHI #230, the
+ * NEGATIVE CONTROL). Every target that concludes `success` is re-executed against the
+ * tree the deliverable landed ON — the merge commit's first parent, which by
+ * construction contains none of this deliverable's work. A target that passes THERE TOO
+ * did not discriminate: whatever it asserts was already true before the step existed,
+ * so its green says nothing about the step it maps to. Such a target is recorded
+ * `action_required` naming the reason, and L3 (which fails closed on anything short of
+ * `success`) refuses completion until it is fixed.
+ *
+ * WHY THIS AND NOT A LINT OF THE COMMAND TEXT. Found live on 2026-09-11: of 19 targets
+ * on `plan/lza-phase0-0/v2`, three reported `success` against merge base `2847f881`, a
+ * tree that had received none of the plan's 8 steps. Two mechanisms, and no single
+ * static rule catches both — a `;`-list or a `for` loop reports only its LAST command's
+ * status (`set -e` would fix those), while `! grep … missing-file` launders grep's exit
+ * 2 into a pass and is EXEMPT from errexit (`bash -c 'set -e; ! grep -q X missing; echo
+ * reached'` prints `reached`). The negative control is decidable, reads no command text,
+ * and asks the property that actually matters: not determinism (#145 made `run`
+ * deterministic and these strings were perfectly deterministic while lying), but
+ * DISCRIMINATION.
+ *
+ * ONLY THE GREENS ARE RE-RUN, deliberately. A target that already concluded non-success
+ * on the subject is not a false green, so re-running it could only cost time — on a plan
+ * whose steps are mostly unbuilt, which is the ordinary case mid-plan, that is most of
+ * them. The property is identical either way.
+ *
+ * THE OBJECTION, NAMED AND STAGED. A target legitimately guarding a PRE-EXISTING
+ * invariant also passes on both trees. Under `maps_to` semantics it does not witness the
+ * step it claims, so flagging it is right — but the plan schema may want an explicit
+ * regression-guard kind before this becomes an approval-time refusal. It reports
+ * `action_required` first; whether the plan gate should refuse such a target outright is
+ * decided after seeing how often this fires (GHI #230).
+ *
+ * WHAT THIS DELIBERATELY DOES NOT DO. The control fires AFTER a build. GHI #230 named
+ * three complements that fire earlier — an approval-time shell lint (a new gate), the
+ * rule taught to the proposing agent, and a decision about the inert `bash -euo pipefail`
+ * wrapper on the invocation below — and they are carried on GHI #232, not here. Until
+ * they land, a plan whose step carries a SINGLE vacuous target is still approvable; it is
+ * caught at verification rather than at the Andon break.
+ *
  * Known blind spot, accepted and named: the snapshot is `git status --porcelain`
  * plus HEAD, so `.gitignore`d output (`node_modules/`, `cdk.out/`) is invisible, and
  * `git clean -fd` (no `-x`) leaves it in place. Ignored paths are, by the
@@ -83,6 +122,59 @@ export interface VerifyOutcome {
    *  with what each one touched — for the run log; `vt-results.json` carries only the
    *  conclusion */
   mutated: { id: string; changes: string[] }[];
+  /** targets that passed on the subject AND on the tree the deliverable landed on, so
+   *  they witnessed nothing and were recorded `action_required` (GHI #230) */
+  nonDiscriminating: string[];
+}
+
+/** One target's execution in one checkout — the verdict plus what the tree looked like
+ *  before it, so the caller can detect a mutation and reset. */
+interface TargetRun {
+  conclusion: CheckConclusion;
+  before: CheckoutSnapshot;
+  changes: string[];
+  ms: number;
+  stdout: string;
+  stderr: string;
+  status: number | null;
+}
+
+/**
+ * Execute ONE target in ONE checkout and form its verdict, including the GHI #162
+ * mutation check. Extracted when the negative control gave the same command a second
+ * tree to run in (GHI #230): the two executions must be identical in every respect
+ * except which directory they happen in, and two copies of this logic would eventually
+ * differ in one — the timeout, the stripped environment, the snapshot — and the control
+ * would then be comparing two different questions.
+ */
+function executeTarget(run: string, cwd: string, env: NodeJS.ProcessEnv): TargetRun {
+  const before = snapshotCheckout(cwd);
+  const started = Date.now();
+  const proc = spawnSync('bash', ['-euo', 'pipefail', '-c', run], {
+    cwd,
+    env,
+    encoding: 'utf8',
+    timeout: 5 * 60 * 1000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  // A timeout, a missing shell, or a signal are NOT "failure" in the sense the
+  // target means — they are the verification not having happened. `timed_out`
+  // and `action_required` say so, and L3 treats every non-success as unmet, so
+  // neither can be mistaken for a pass.
+  let conclusion: CheckConclusion =
+    proc.error && /ETIMEDOUT|timed out/i.test(String(proc.error.message))
+      ? 'timed_out'
+      : proc.error
+        ? 'action_required'
+        : proc.status === 0
+          ? 'success'
+          : 'failure';
+  const ms = Date.now() - started;
+  // Snapshotted AFTER the verdict is formed and BEFORE it is recorded: a target that
+  // changed the tree has its verdict replaced, not annotated (GHI #162).
+  const changes = checkoutMutation(before, snapshotCheckout(cwd));
+  if (changes.length > 0) conclusion = 'action_required';
+  return { conclusion, before, changes, ms, stdout: proc.stdout ?? '', stderr: proc.stderr ?? '', status: proc.status };
 }
 
 /**
@@ -174,13 +266,21 @@ export function mustMappedTargetIds(plan: PlanDoc): string[] {
   return plan.verification_targets.filter((vt) => vt.maps_to.some((id) => must.has(id))).map((vt) => vt.id);
 }
 
-export function runVerification(plan: PlanDoc, planRef: string, cwd: string): VerifyOutcome {
+/**
+ * @param cwd      the MERGED deliverable commit's checkout — the subject.
+ * @param baseCwd  the tree the deliverable landed ON (the merge commit's first parent),
+ *                 for the negative control. Omitted, the control does not run and the
+ *                 runner says so loudly: a green with no control behind it is exactly
+ *                 what GHI #230 is about, and it must not pass unremarked.
+ */
+export function runVerification(plan: PlanDoc, planRef: string, cwd: string, baseCwd?: string): VerifyOutcome {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of CREDENTIAL_ENV) delete env[key];
 
   const results: { id: string; conclusion: CheckConclusion }[] = [];
   const unexecutable: string[] = [];
   const mutated: { id: string; changes: string[] }[] = [];
+  const nonDiscriminating: string[] = [];
   const mustIds = new Set(mustMappedTargetIds(plan));
 
   for (const target of targetsToVerify(plan)) {
@@ -189,48 +289,55 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string): Ve
       console.log(`– ${target.id}: no \`run\` — not executable deterministically, NOT reported`);
       continue;
     }
-    const before = snapshotCheckout(cwd);
-    const started = Date.now();
-    const proc = spawnSync('bash', ['-euo', 'pipefail', '-c', target.run], {
-      cwd,
-      env,
-      encoding: 'utf8',
-      timeout: 5 * 60 * 1000,
-      maxBuffer: 8 * 1024 * 1024,
-    });
-    // A timeout, a missing shell, or a signal are NOT "failure" in the sense the
-    // target means — they are the verification not having happened. `timed_out`
-    // and `action_required` say so, and L3 treats every non-success as unmet, so
-    // neither can be mistaken for a pass.
-    let conclusion: CheckConclusion =
-      proc.error && /ETIMEDOUT|timed out/i.test(String(proc.error.message))
-        ? 'timed_out'
-        : proc.error
-          ? 'action_required'
-          : proc.status === 0
-            ? 'success'
-            : 'failure';
-    const ms = Date.now() - started;
-    // Snapshotted AFTER the verdict is formed and BEFORE it is recorded: a target that
-    // changed the tree has its verdict replaced, not annotated (GHI #162).
-    const changes = checkoutMutation(before, snapshotCheckout(cwd));
-    if (changes.length > 0) {
-      conclusion = 'action_required';
-      mutated.push({ id: target.id, changes });
+    const subject = executeTarget(target.run, cwd, env);
+    let conclusion = subject.conclusion;
+    if (subject.changes.length > 0) mutated.push({ id: target.id, changes: subject.changes });
+
+    // THE NEGATIVE CONTROL (GHI #230). Only a green needs one: a target that already
+    // failed on the subject is not a false green, and re-running it would cost a second
+    // execution to learn nothing.
+    let base: TargetRun | null = null;
+    if (conclusion === 'success' && baseCwd !== undefined) {
+      base = executeTarget(target.run, baseCwd, env);
+      // ONLY exit 0 demotes. A spawn error, a timeout or a mutation on the base tree
+      // means the control could not be performed — and "could not ask" must never read
+      // as "it discriminated", nor as "it did not". The subject's own verdict stands,
+      // and the reason appears in the log below.
+      if (base.changes.length > 0) resetCheckout(baseCwd, base.before.head);
+      if (base.status === 0 && base.changes.length === 0) {
+        conclusion = 'action_required';
+        nonDiscriminating.push(target.id);
+      }
     }
-    console.log(`${conclusion === 'success' ? '✓' : '✗'} ${target.id} (${ms}ms) — ${target.run}`);
-    if (proc.stdout?.trim()) console.log(`  stdout: ${proc.stdout.trim().slice(0, 2000)}`);
-    if (proc.stderr?.trim()) console.log(`  stderr: ${proc.stderr.trim().slice(0, 2000)}`);
-    if (changes.length > 0) {
+
+    console.log(`${conclusion === 'success' ? '✓' : '✗'} ${target.id} (${subject.ms}ms) — ${target.run}`);
+    if (subject.stdout.trim()) console.log(`  stdout: ${subject.stdout.trim().slice(0, 2000)}`);
+    if (subject.stderr.trim()) console.log(`  stderr: ${subject.stderr.trim().slice(0, 2000)}`);
+    if (subject.changes.length > 0) {
       console.log(
-        `  CHANGED THE CHECKOUT (exit ${proc.status ?? 'none'}): ${changes.join('; ')} — recorded action_required, because a ` +
+        `  CHANGED THE CHECKOUT (exit ${subject.status ?? 'none'}): ${subject.changes.join('; ')} — recorded action_required, because a ` +
           'result about a tree the merge commit does not contain is not a result about the commit; checkout reset before the next target',
       );
-      resetCheckout(cwd, before.head);
+      resetCheckout(cwd, subject.before.head);
+    }
+    if (base !== null) {
+      if (nonDiscriminating.includes(target.id)) {
+        console.log(
+          `  WITNESSED NOTHING (GHI #230): this also passed on ${base.before.head.slice(0, 8)}, the tree this deliverable ` +
+            `landed on — which contains none of its work. A target that passes with and without the step it maps to ` +
+            `(${target.maps_to.join(', ')}) asserts something that was already true, so its green is not evidence about the ` +
+            'step. Recorded action_required; re-open the plan to make the command fail on a tree lacking the step',
+        );
+      } else if (base.changes.length > 0 || base.status === null) {
+        console.log(
+          `  negative control could not be performed (${base.changes.length > 0 ? `it changed the base checkout: ${base.changes.join('; ')}` : 'the command did not run'}) — ` +
+            "the subject's verdict stands unmodified",
+        );
+      }
     }
     results.push({ id: target.id, conclusion });
   }
-  return { planRef, results, unexecutable, mutated };
+  return { planRef, results, unexecutable, mutated, nonDiscriminating };
 }
 
 export async function buildVerify(
@@ -238,9 +345,10 @@ export async function buildVerify(
   repo: RepoRef,
   planRef: string,
   cwd: string,
+  baseCwd?: string,
 ): Promise<VerifyOutcome> {
   const plan = await readPlanAtRef(gh, repo, planRef);
-  return runVerification(plan, planRef, cwd);
+  return runVerification(plan, planRef, cwd, baseCwd);
 }
 
 /**
@@ -289,10 +397,16 @@ if (isMain) {
   const repoArg = get('repo');
   const out = get('out') ?? 'vt-results.json';
   const cwd = get('cwd') ?? process.cwd();
+  // The tree the deliverable landed ON — the negative control's second subject (GHI
+  // #230). Optional so the CLI stays runnable by hand against one checkout; the
+  // workflow always passes it, and a run without it says so in the summary below.
+  const baseCwd = get('base-cwd');
   const commit = get('commit');
   const [owner, repoName] = (repoArg ?? '').split('/');
   if (!owner || !repoName || (!get('plan-ref') && !commit)) {
-    console.error('usage: build-verify --repo <owner/repo> (--plan-ref <tag> | --commit <sha>) [--cwd <dir>] [--out <file>]');
+    console.error(
+      'usage: build-verify --repo <owner/repo> (--plan-ref <tag> | --commit <sha>) [--cwd <dir>] [--base-cwd <dir>] [--out <file>]',
+    );
     process.exit(2);
   }
   const gh = createClient();
@@ -312,7 +426,7 @@ if (isMain) {
         return ref;
       });
   resolve
-    .then((planRef) => buildVerify(gh, repo, planRef, cwd))
+    .then((planRef) => buildVerify(gh, repo, planRef, cwd, baseCwd))
     .then((outcome) => {
       mkdirSync(dirname(out) === '' ? '.' : dirname(out), { recursive: true });
       writeFileSync(out, `${JSON.stringify({ plan_ref: outcome.planRef, results: outcome.results }, null, 2)}\n`);
@@ -326,6 +440,27 @@ if (isMain) {
             'executable form or a conformant executor interprets them in verify mode.',
         );
       }
+      if (outcome.nonDiscriminating.length > 0) {
+        // Loud, and NOT a failure of this run: the targets ran, and what they reported
+        // is that they do not discriminate. That is a real finding about the PLAN, and
+        // the operator acts on it by re-opening the plan — not by re-running this.
+        console.log(
+          `WITNESSED NOTHING (recorded action_required, GHI #230): ${outcome.nonDiscriminating.join(', ')} — each of these ` +
+            'passed on the merged commit AND on the tree the deliverable landed on, which contains none of its work. A ' +
+            'target that passes with and without the step it maps to asserts something that was already true, so its ' +
+            'green is not evidence about the step. Completion (L3) stays refused until the plan is re-opened to make the ' +
+            'command fail on a tree lacking the step.',
+        );
+      }
+      if (baseCwd === undefined) {
+        // The control is what stops a vacuous target reporting a green nobody can
+        // question. A run without it is not wrong, but it is weaker, and saying so is
+        // cheaper than an operator assuming every green here was discriminated.
+        console.log(
+          'NO NEGATIVE CONTROL was performed (--base-cwd not given): every `success` above says the target passed on the ' +
+            'merged commit, and NOT that it would have failed without the work. GHI #230.',
+        );
+      }
       if (outcome.mutated.length > 0) {
         // Also loud, also not a failure of this run: the results file carries the
         // `action_required`, this line carries the why the check run cannot.
@@ -336,10 +471,19 @@ if (isMain) {
             'make the target read-only, or re-open the plan to move the build step out of verification.',
         );
       }
-      // The RUN's own status reflects whether verification could be performed, not
-      // whether the deliverable passed: a failing target is a real result that must
-      // reach `vt-report` and be recorded. Exiting non-zero here would suppress it,
-      // and an unreported failure reads exactly like an unreported success.
+      // THIS SCRIPT's exit status reflects whether verification could be PERFORMED,
+      // not whether the deliverable passed: a failing target is a real result that
+      // must reach the reporter and be recorded. Exiting non-zero here would suppress
+      // it, and an unreported failure reads exactly like an unreported success.
+      //
+      // THE RUN's conclusion is a wider claim than this script's, since GHI #228. The
+      // reporter is now a second JOB of the same build-verify run, so a report refusal
+      // — a commit that does not descend from the frozen tag, a superseded plan_ref,
+      // an unknown target id, a missing artifact — turns the RUN red while this job
+      // stayed green. A green run therefore means "verification could be performed AND
+      // its results were recorded", which is the honest reading and was previously
+      // split across two runs. Nothing about the rule on this line changes: a failing
+      // TARGET still exits 0 here, and still always will.
     })
     .catch((error) => {
       console.error(errorMessage(error));

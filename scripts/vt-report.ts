@@ -17,14 +17,25 @@ import { errorMessage } from '../dashboard/lib/github/errors';
  * on the workload's verified commit concluded `success`. Nothing else writes those
  * check runs.
  *
- * SUBSTRATE SPLIT — why this is a separate script behind a separate workflow:
- * the build-template agent job is read-only (gh-aw strict mode; its
- * `permissions:` are contents/issues/checks: READ). Emitting the check runs
- * from inside that job would require granting the agent `checks: write` — the
- * exact write capability the split exists to withhold. So the agent uploads an
- * artifact and templates/workflows/vt-report.yml (workflow_run on the build's
- * completion) runs this reporter with the narrow write scope, exactly as
- * plan-propose → plan-publish already does for plan branches.
+ * SUBSTRATE SPLIT — why this is a separate script behind its own JOB:
+ * whatever executes operator-approved or agent-authored commands must hold no
+ * write. That was true of the build-template agent job (gh-aw strict mode; its
+ * `permissions:` are contents/issues/checks: READ) and it is true of
+ * build-verify's `verify` job today. Emitting the check runs from inside either
+ * would require granting `checks: write` to the thing running the commands — the
+ * exact write capability the split exists to withhold. So the runner uploads an
+ * artifact and a narrow writer picks it up, exactly as plan-propose →
+ * plan-publish already does for plan branches.
+ *
+ * WHERE THAT WRITER LIVES (GHI #228, 2026-09-12): the `report` job of
+ * templates/workflows/build-verify.yml, with job-level `checks: write`. It was a
+ * separate `vt-report.yml` workflow triggered `workflow_run` on the verify run's
+ * completion, and on the pre-authorized path that trigger NEVER FIRED: GitHub
+ * suppresses events caused by the built-in token, exempting `workflow_dispatch`
+ * (which is how build-merge starts the verify run) but not the completion of the
+ * run that dispatch started. A job of a run that already exists needs no event.
+ * NOTHING IN THIS FILE CHANGED for that move — same CLI, same validation, same
+ * refusals — which is the point: the topology was wrong, the reporter was not.
  *
  * UNTRUSTED INPUT: vt-results.json is agent-authored data crossing the
  * read-only boundary (constitution: "the dashboard MUST treat downloaded
@@ -34,13 +45,24 @@ import { errorMessage } from '../dashboard/lib/github/errors';
  * than half a report.
  *
  * PROVENANCE (GHI #72 option A, decided 2026-07-28; rebound 2026-08-24 for FR-063):
- * the validation also binds the artifact to the run that produced it.
- * `workflow_run.head_sha` is the one signal here the agent cannot author, and it is
- * both the binding AND the answer to "which commit do these results describe?" — a
- * verify run's head is the merged deliverable commit, a pre-US18 build's head is the
- * frozen tag's own commit. The reported plan_ref must be the official version and
- * the run's commit must DESCEND from its tag, which is what stops a run for workload
- * A reporting against workload B's plan and completing B without B ever being built.
+ * the validation also binds the artifact to the run that produced it. The binding is a
+ * commit NO AGENT CAN AUTHOR, and it is simultaneously the answer to "which commit do
+ * these results describe?" — a verify run judges the merged deliverable commit, a
+ * pre-US18 build's own head was the frozen tag's commit. The reported plan_ref must be
+ * the official version and that commit must DESCEND from its tag, which is what stops a
+ * run for workload A reporting against workload B's plan and completing B without B
+ * ever being built.
+ *
+ * WHERE THE UNAUTHORABLE COMMIT COMES FROM (amended 2026-09-12, GHI #228). It used to
+ * be `workflow_run.head_sha` — the triggering run's head, read from an event payload.
+ * With the reporter a JOB of the verify run there is no event, so it is the verify
+ * job's own `steps.subject.outputs.sha`, produced by the deterministic subject resolver
+ * BEFORE the merged tree is checked out and before any target command runs. Strictly
+ * better: `workflow_run.head_sha` named the DEFAULT BRANCH's head, not the commit the
+ * run judged, which is why `verified-commit.txt` had to be preferred over it (see
+ * `boundSha` at the bottom of this file). The property that matters — that the value
+ * is produced by the deterministic substrate and not by anything the artifact's author
+ * controls — is unchanged.
  *
  * CHECK-RUN NAME = THE TARGET ID, VERBATIM. L3's row words the name `vt-<id>`,
  * and the schema constrains ids to `^vt-[a-z0-9-]+$` (schemas/plan.ts
@@ -97,12 +119,16 @@ const VtResult = z
  * The `vt-results.json` artifact contract (documented in
  * templates/workflows/build-template.md, which the build agent follows).
  *
- * `plan_ref` is carried IN the artifact because the artifact is the only
- * channel across the read-only boundary: the workflow_run event payload the
- * reporter is triggered by exposes the build run's id, not the `plan_ref`
- * input the build was dispatched with, so there is nowhere else for the frozen
- * ref to come from. It is treated as a claim, not a fact — see the
- * resolveCurrent check in reportVtResults.
+ * `plan_ref` is carried IN the artifact because the artifact is the channel across
+ * the read-only boundary: when the reporter was triggered by `workflow_run`, the event
+ * payload exposed the producing run's id and not the `plan_ref` it was dispatched
+ * with, so there was nowhere else for the frozen ref to come from. Since GHI #228 the
+ * reporter is a job of the verify run and COULD read `needs.verify.outputs.plan_ref`
+ * instead — it deliberately does not. The artifact channel is kept because the
+ * validation that matters does not trust either source: `plan_ref` is a CLAIM checked
+ * against the official frozen version for its slug (see resolveCurrent in
+ * reportVtResults), and swapping one untrusted-until-checked input for another buys
+ * nothing while making the CLI unrunnable by hand.
  *
  * `.strict()` on both objects: an unknown key means the build is emitting a
  * contract this reporter does not implement, and silently ignoring it would
@@ -130,9 +156,10 @@ export async function reportVtResults(
   gh: Octokit,
   repo: RepoRef,
   raw: unknown,
-  /** The triggering build run's commit (`workflow_run.head_sha`) — the trusted
-   *  provenance the artifact's claim is bound against. Omitted only by callers
-   *  with no triggering run (a local invocation); see the binding below. */
+  /** The commit the producing run judged, as the deterministic substrate reported it
+   *  (the verify job's `subject_sha` output; `workflow_run.head_sha` before GHI #228) —
+   *  the trusted provenance the artifact's claim is bound against. Omitted only by
+   *  callers with no producing run (a local invocation); see the binding below. */
   expectSha?: string,
 ): Promise<VtReportResult> {
   // The pre-extension artifact shape was a bare `[{ id, conclusion }]` array.
@@ -336,7 +363,7 @@ export async function reportVtResults(
  *   subject absent              → the artifact itself is missing or malformed. Loud.
  *
  * Before this file existed the reporter treated all three as "no artifact, exit 1",
- * which meant every ordinary push to the default branch produced a red vt-report run
+ * which meant every ordinary push to the default branch produced a red reporter run
  * (live, 2026-08-25). A check that cries wolf on every commit is a check nobody reads.
  */
 export function readVerifySubject(dir: string): { present: boolean; planRef: string; verifiedCommit: string } {
@@ -391,10 +418,12 @@ if (isMain) {
   const dir = get('dir');
   const repoArg = get('repo');
   const [owner, repoName] = (repoArg ?? '').split('/');
-  // The triggering build run's commit — the workflow passes
-  // `workflow_run.head_sha`, which preflight B8 guarantees is the frozen tag's
-  // commit. Required in the workflow; optional here only so the CLI stays runnable
-  // by hand, which is why the binding inside reportVtResults skips when absent.
+  // The commit the producing run judged. The workflow passes the verify job's own
+  // `subject_sha` output, which preflight B9 has already proved descends from the
+  // frozen tag (before GHI #228 it passed `workflow_run.head_sha`, the default
+  // branch's head, which is why the artifact's own value wins below). Required in the
+  // workflow; optional here only so the CLI stays runnable by hand, which is why the
+  // binding inside reportVtResults skips when absent.
   const expectSha = get('expect-sha');
   if (!dir || !owner || !repoName) {
     console.error('usage: vt-report --dir <artifacts-dir> --repo <owner/repo> [--expect-sha <sha>]');
@@ -423,11 +452,17 @@ if (isMain) {
   }
   // The commit the verify run ACTUALLY executed against, when it says so.
   //
-  // Preferred over `workflow_run.head_sha` because they can differ, and when they do
-  // the artifact is right: a `workflow_run`-triggered verify run reports the DEFAULT
-  // BRANCH as its head, while the commit it checked out and judged is the merge
-  // commit. Recording on head_sha would put the results on whatever main happened to
+  // Preferred over `--expect-sha` because the two could differ, and when they did the
+  // artifact was right: a `workflow_run`-triggered reporter saw the DEFAULT BRANCH as
+  // the verify run's head, while the commit it checked out and judged was the merge
+  // commit. Recording on that head would put the results on whatever main happened to
   // be — the same class of misplacement GHI #141 was about.
+  //
+  // Since GHI #228 both channels carry the SAME string: the report job passes the
+  // verify job's `subject_sha`, and the verify job wrote `verified-commit.txt` from
+  // that same step output. The preference is kept rather than simplified away, because
+  // it is the shape that survives a future producer that is not this workflow — and
+  // because the flag is a fallback for a hand-run CLI, not the binding.
   //
   // Trusted to the degree its producer is: `build-verify` is a deterministic workflow
   // with no write scope, not an agent, and the value it reports is still required to

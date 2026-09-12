@@ -40,6 +40,43 @@
 # declined): a merge is verified within seconds or the operator sees a gap on the
 # card, not a result that arrives on a timer.
 #
+# WHO RECORDS THE RESULTS, AND WHY IT IS A JOB OF THIS RUN (GHI #228, 2026-09-11):
+#   The `report` job at the bottom of this file. It used to be a SEPARATE workflow
+#   (`vt-report.yml`, triggered `workflow_run` on this one's completion) and on the
+#   pre-authorized path THAT NEVER FIRED — which is the second half of the same
+#   platform rule the trigger note above is about. GitHub: "events triggered by the
+#   GITHUB_TOKEN will not create a new workflow run", with `workflow_dispatch` and
+#   `repository_dispatch` as the only exceptions. build-merge's DISPATCH is exempt,
+#   so this run starts; the COMPLETION of a run the token dispatched is not, so no
+#   `workflow_run` was ever emitted for the reporter. Isolated live on 2026-09-11:
+#   two build-verify runs, same workflow pair, same `workflow_dispatch` event, same
+#   `success` conclusion, differing only in actor — 32872584724 (a person) was
+#   followed by a vt-report run 22 s later, 34637800206 (github-actions[bot]) by no
+#   run of any conclusion. Chaining one more `workflow_run` is not available either:
+#   GitHub stops the chain at three levels.
+#
+#   So the report needs no EVENT: this run already exists, and a job of a run that
+#   exists is scheduled by `needs:`, not by a trigger. `scripts/vt-report.ts` is
+#   unchanged — same artifact-as-untrusted-input validation, same refusals, same
+#   create-never-update semantics.
+#
+#   THE TRUST BOUNDARY IS TIGHTER THAN IT WAS, not looser. The substrate split's
+#   purpose is that whatever EXECUTES THE DELIVERABLE'S COMMANDS holds no write. That
+#   is `verify`, and it keeps the read-only grant below. `checks: write` lives on
+#   `report` alone — a job that checks out only the product toolchain, runs no
+#   subject command, and reads the artifact as data. The retired workflow held that
+#   scope at WORKFLOW level.
+#
+#   ONE CONSEQUENCE, NAMED. This run's conclusion changes meaning. A report refusal
+#   (a commit that does not descend from the frozen tag, a superseded plan_ref, an
+#   unknown target id, a missing artifact) used to show as a red `vt-report` run
+#   beside a green `build-verify`; it now makes THIS run red, while
+#   `scripts/build-verify.ts` still deliberately exits 0 for a FAILING TARGET. So a
+#   green run means "verification could be performed AND its results were recorded",
+#   which is the honest reading. Recovery is unaffected: the no-input sweep keys on
+#   unmet MUST targets, never on a run's conclusion, so a merge whose report failed
+#   is picked up by the next sweep.
+#
 # HOW A TARGET IS EXECUTED. `VerificationTarget.run` (the executable form the operator
 # approved alongside the prose `check`) is one shell command whose exit status is the
 # verdict. A MUST-mapped target with no `run` is NOT REPORTED — it cannot be verified
@@ -54,14 +91,28 @@
 # reset before the next target runs — so no target can make a later one pass against
 # a tree the merge commit does not contain.
 #
+# A TARGET THAT PASSES WITHOUT ITS STEP WITNESSED NOTHING (GHI #230, the NEGATIVE
+# CONTROL). Every target that concludes `success` is re-executed against the tree the
+# deliverable landed ON — the merge commit's first parent, checked out at `base/`, which
+# by construction contains none of this deliverable's work. A target that passes THERE
+# TOO asserts something that was already true, so its green says nothing about the step
+# it maps to; it is recorded `action_required` naming the reason, and L3 fails closed on
+# it. Found live 2026-09-11: of 19 targets, three reported success against a tree that
+# had received none of the plan's 8 steps — one because a `;`-list reports only its LAST
+# command's status, one because `!` inverts grep's exit 2 (an ERROR, not "no match")
+# into a pass. No single lint of the command text catches both; asking the target to
+# discriminate does, and it reads no command text at all.
+#
 # THE COMMANDS RUN WITHOUT CREDENTIALS: GITHUB_TOKEN and the agent keys are stripped
 # from the child environment before any target executes. Operator-approved is not the
 # same as trusted with the repository's write scope.
 #
 # IT ALWAYS UPLOADS AN ARTIFACT, even with nothing to verify — `subject.txt` says which
-# commit was judged, or is empty. That is what lets `vt-report` tell "this push was not
+# commit was judged, or is empty. That is what lets the reporter tell "this push was not
 # a deliverable merge" (fine) from "the artifact is missing" (loud), instead of
-# treating both as nothing to do.
+# treating both as nothing to do. The upload survived the reporter becoming a job of
+# this run: jobs do not share a filesystem, so the artifact is still the channel — it
+# is simply read within the run that wrote it instead of across two runs.
 # cost ceiling: $0 per run (constitution: Cost & Observability)
 name: build-verify
 on:
@@ -86,6 +137,11 @@ on:
         description: "Frozen plan ref the commit is expected to deliver (plan/<slug>/v<N>). Optional cross-check only."
         type: string
         required: false
+# GOVERNS `verify`, WHICH DECLARES NO BLOCK OF ITS OWN — and that omission is load-
+# bearing. A job-level `permissions:` block REPLACES this one and sets every unlisted
+# scope to `none`, so giving `verify` a tidy-looking `contents: read` would silently
+# revoke the three reads below and break the run (it broke live once already, on
+# `issues`). `report` overrides deliberately, and lists what it needs.
 permissions:
   contents: read # read the frozen plan; the merged tree comes from the checkout
   pull-requests: read # find the deliverable pull request behind the commit
@@ -104,6 +160,17 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # NO `permissions:` BLOCK HERE — see the note above the workflow-level one.
+    #
+    # WHAT `report` BINDS TO. Both come from the deterministic subject step, which
+    # runs BEFORE the merged tree is checked out and before any verification target's
+    # command executes; a later step cannot alter an earlier step's outputs. So
+    # `subject_sha` is the commit this run judged, not `github.sha` — which on a
+    # `workflow_dispatch` is the default branch's head at dispatch time, and would
+    # name the LATER commit when two merges land seconds apart.
+    outputs:
+      subject_sha: ${{ steps.subject.outputs.sha }}
+      plan_ref: ${{ steps.subject.outputs.plan_ref }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -152,7 +219,7 @@ jobs:
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "plan_ref=$plan_ref" >> "$GITHUB_OUTPUT"
-      - name: prepare the results directory (always, so vt-report can tell absent from empty)
+      - name: prepare the results directory (always, so the report job can tell absent from empty)
         env:
           BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
           BV_SUBJECT_SHA: ${{ steps.subject.outputs.sha }}
@@ -171,6 +238,42 @@ jobs:
         with:
           ref: ${{ steps.subject.outputs.sha }}
           path: subject
+          # DEPTH 2, for the negative control below: the merge commit plus its parents.
+          # `build-merge` always merges with `merge_method: 'merge'`, so the subject is
+          # a merge commit and its FIRST PARENT is the default branch exactly as it was
+          # before this deliverable landed. Nothing deeper is needed, and nothing
+          # shallower would resolve the parent at all.
+          fetch-depth: 2
+          persist-credentials: false
+      # THE TREE THE DELIVERABLE LANDED ON — the negative control's second subject
+      # (GHI #230). A verification target is supposed to WITNESS the step it maps to, so
+      # it is asked to: a target that passes here as well as on the merge commit passed
+      # without the work present, and its green is not evidence about the step. Found
+      # live on 2026-09-11, where three of four green targets reproduced as success
+      # against a tree that had received none of the plan's steps.
+      #
+      # The first parent, not `git merge-base`: it is the exact tree the merge added to,
+      # it needs no extra history, and for a squash or rebase landing it is still the
+      # commit immediately before the deliverable.
+      - name: resolve the tree this deliverable landed on
+        id: base
+        if: steps.subject.outputs.plan_ref != ''
+        run: |
+          set -euo pipefail
+          # A root commit has no parent. Then there is no control to run: the step
+          # outputs nothing, the checkout below is skipped, and build-verify.ts says so
+          # in its summary rather than reporting greens nobody questioned.
+          if sha="$(git -C subject rev-parse --verify --quiet 'HEAD^1')"; then
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "the commit under verification has no first parent — no negative control is possible" >&2
+          fi
+      - name: check out the tree this deliverable landed on
+        if: steps.base.outputs.sha != ''
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.base.outputs.sha }}
+          path: base
           persist-credentials: false
       # PREFLIGHT B9 — the verified commit must DESCEND from the frozen plan tag
       # (FR-063). B8 asks the same family of question of a BUILD's dispatch ref; this
@@ -191,15 +294,85 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BV_PLAN_REF: ${{ steps.subject.outputs.plan_ref }}
-        run: >-
-          npx tsx scripts/build-verify.ts
-          --plan-ref "$BV_PLAN_REF"
-          --repo "$GITHUB_REPOSITORY"
-          --cwd "$GITHUB_WORKSPACE/subject"
-          --out "$RUNNER_TEMP/verify/vt-results.json"
-      - name: upload the verification results for vt-report
+          # Empty when the subject has no parent — build-verify.ts then skips the
+          # control and says so, rather than silently reporting unquestioned greens.
+          BV_BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          args=(--plan-ref "$BV_PLAN_REF" --repo "$GITHUB_REPOSITORY" --cwd "$GITHUB_WORKSPACE/subject")
+          if [ -n "$BV_BASE_SHA" ]; then args+=(--base-cwd "$GITHUB_WORKSPACE/base"); fi
+          npx tsx scripts/build-verify.ts "${args[@]}" --out "$RUNNER_TEMP/verify/vt-results.json"
+      - name: upload the verification results for the report job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: vt-results
           path: ${{ runner.temp }}/verify/
           if-no-files-found: error
+
+  # THE REPORTER (GHI #228) — the `vt-*` check runs, written on the commit the verify
+  # job actually judged. This job is their ONLY writer; it moved here verbatim from the
+  # retired `vt-report.yml`, whose `workflow_run` trigger never fired on the
+  # pre-authorized path (see WHO RECORDS THE RESULTS at the top of this file).
+  report:
+    needs: verify
+    # BOTH HALVES MATTER, and only one of them is visible unless written out.
+    #
+    # `success()` is what the retired workflow's `workflow_run.conclusion == 'success'`
+    # became. GitHub applies it implicitly to any job `if` with no status-check
+    # function — but `scripts/build-verify.ts` exits 0 ON A FAILING TARGET on purpose
+    # (a failing target is a real result that must be recorded), so the next reader who
+    # wants "report the failures too" will reach for `always()` or `!cancelled()` and
+    # delete the conclusion gate without noticing it was ever here. It is here: a
+    # verify job that could not perform the verification has nothing to report.
+    #
+    # The `plan_ref` half is new. An ordinary push with nothing to verify now SKIPS
+    # this job instead of producing a green no-op run.
+    if: success() && needs.verify.outputs.plan_ref != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # REPLACES the workflow-level block for this job only — every unlisted scope is
+    # `none`, which is the point: this job holds the one write in the file.
+    permissions:
+      checks: write # the vt-<id> check runs — this job is their ONLY writer (FR-042, FR-034)
+      contents: read # dereference the frozen plan tag, read plan.json at it, compare commits for descendancy
+      actions: read # the artifact download below. A SAME-RUN download is served by the
+      #   Actions runtime token and documents no permission requirement, unlike every
+      #   other download-artifact in this repo (all cross-run, all passing run-id +
+      #   github-token). The scope is kept anyway: it is a READ, so it costs the
+      #   substrate split — which is about writes — nothing, and the alternative was
+      #   letting the first live proof of GHI #228 fail for a reason unrelated to the
+      #   fix. Removable once a live run shows the download works without it.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # No git credentials in .git/config: every write here goes through
+          # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked). This checks
+          # out the PRODUCT TOOLCHAIN only — never the subject commit, and no
+          # operator-approved command runs in this job.
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+      - run: npm ci
+      - name: download this run's verification results
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          # SAME RUN — no `run-id`, no `github-token`. Named explicitly so a future
+          # second artifact in this workflow cannot silently join the download.
+          name: vt-results
+          path: ${{ runner.temp }}/vt-artifacts
+      - name: report vt-<id> check runs on the verified (merged deliverable) commit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The verify job's own answer to "which commit is this run about". Note
+          # `--expect-sha` is the FALLBACK, not the binding: vt-report.ts prefers the
+          # artifact's `verified-commit.txt` whenever it is non-empty, and the verify
+          # job writes that file from this same step output. Both channels therefore
+          # carry the same string; the flag is kept because it makes the binding
+          # visible here and leaves the CLI contract unchanged.
+          VT_SHA: ${{ needs.verify.outputs.subject_sha }}
+        run: >-
+          npx tsx scripts/vt-report.ts
+          --dir "$RUNNER_TEMP/vt-artifacts"
+          --expect-sha "$VT_SHA"
+          --repo "$GITHUB_REPOSITORY"

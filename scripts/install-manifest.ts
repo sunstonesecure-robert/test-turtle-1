@@ -46,6 +46,46 @@ export const TOOLCHAIN_FILES = [
 ] as const;
 
 /**
+ * TEMPLATES A TARGET MUST NO LONGER CARRY — the retirement list (GHI #228, 2026-09-12).
+ *
+ * `init` was ADDITION-ONLY by construction until this existed. `installOversightFiles`
+ * composes one `createTree` from `base_tree` plus blob entries, and nothing emitted the
+ * API's delete form (`sha: null`), so removing a file from `templates/workflows/` removed
+ * it from the PRODUCT and from nothing else: every already-initialised target kept a live
+ * copy of the workflow forever. Confirmed live on 2026-09-11 — the sandbox target's
+ * `.github/workflows/` and the product's `templates/workflows/` held the same 21 filenames.
+ *
+ * That is not merely untidy. A retired workflow is retired because its behaviour is WRONG,
+ * and a live wrong workflow keeps behaving. `vt-report.yml` is the first entry: its work
+ * became a job of `build-verify` (GHI #228), and a target that still carries the old file
+ * writes a SECOND, identical check run per target on the operator-checkpoint `push` path.
+ * Harmless to completion (L3 reads the latest run per name, and both agree) but noisy, and
+ * "harmless" is not a property a future retirement can be assumed to have.
+ *
+ * TARGET-SIDE PATHS, because deletion is asked of the target's tree — the same side
+ * `INSTALLED_TEMPLATE_DIRS` is on, and for the same reason.
+ *
+ * EVERY ENTRY CARRIES ITS DATE AND ITS REASON. This list only ever grows: a path stays
+ * here after the last target has been cleaned, because there is no way to know that the
+ * last target has been cleaned, and an entry removed too early silently resurrects
+ * nothing while an entry kept forever costs one 404 probe per `init`.
+ *
+ * A PATH HERE MUST NOT ALSO BE INSTALLED. `collectInstallFiles` refuses that outright —
+ * one `createTree` cannot both write and delete a path, and a manifest that tried to say
+ * both would resolve by whichever entry came last in the array.
+ */
+export const RETIRED_TEMPLATES: readonly { path: string; retired: string; reason: string }[] = [
+  {
+    path: '.github/workflows/vt-report.yml',
+    retired: '2026-09-12',
+    reason:
+      'GHI #228 — the reporter is now the `report` job of `build-verify`, because a `workflow_run` ' +
+      'on a run the built-in token dispatched never fires, so on the pre-authorized path this ' +
+      'workflow could not run at all. Left installed it double-reports on the `push` path.',
+  },
+];
+
+/**
  * THE SUBJECT-WORKFLOW NAMESPACE — `.github/workflows/<workload-slug>_<name>.yml`
  * (GHI #174 option C′, FR-069, T270; slug-scoped by operator decision 2026-09-01, T279).
  *

@@ -31,16 +31,19 @@ export { AGENT_BUILD_ENVIRONMENT, SUBJECT_DEPLOY_ENVIRONMENT, PRODUCT_ENVIRONMEN
 export const AGENTIC_WORKFLOWS = ['plan-propose', 'plan-revise', 'build-template'] as const;
 /** Deterministic single-writers/gates: plain Actions YAML — gh-aw has no non-LLM
  *  engine and its strict mode (rightly) forbids the direct writes these need. */
-// vt-report is required, not optional: it is the ONLY writer of the `vt-*` check
-// runs lifecycle-gate L3 reads, so a target missing it can never complete a
-// workload (FR-034) — and readiness reporting green while completion is
-// structurally impossible is exactly the false "ready" I5 exists to prevent.
-// confirm-record joins for the same reason: it is the ONLY writer of the
+// vt-report USED TO BE HERE, on the strength of being the only writer of the `vt-*`
+// check runs lifecycle-gate L3 reads. It is no longer a workflow at all: that writer
+// is now the `report` job of `build-verify` (GHI #228, 2026-09-12), which I7 already
+// asserts through DELIVERABLE_WORKFLOWS. Leaving the name here would make readiness
+// item I5 report a MISSING REQUIRED WORKFLOW on every freshly initialised target —
+// the false "not ready" that is the mirror of the false "ready" this list exists to
+// prevent, and just as misleading.
+// confirm-record is required, not optional: it is the ONLY writer of the
 // `confirmed:<authority>` labels the review panel and the board read. Its absence does
 // NOT let a high-stakes build through — B5 reads the record FILE, never the label — but
 // it makes every confirmation invisible, so a target missing it reports ready while the
 // operator can obtain sign-offs the board will never show.
-// plan-publish is the third, and the most consequential of the three: it is the ONLY
+// plan-publish is the second, and the more consequential of the two: it is the ONLY
 // writer of `plan/<slug>/v<N>`. The plan-propose agent is read-only by design — its safe
 // outputs cannot push a branch — so it raises the Andon break, uploads plan.json, and
 // stops. Without the publisher that artifact is never turned into a plan branch, so there
@@ -52,7 +55,6 @@ export const DETERMINISTIC_WORKFLOWS = [
   'plan-gate',
   'plan-post-merge',
   'workload-lifecycle',
-  'vt-report',
   'confirm-record',
   'plan-publish',
 ] as const;
@@ -71,8 +73,13 @@ export const DETERMINISTIC_WORKFLOWS = [
  * `build-merge`    the actor that merges a pre-authorized deliverable and moves its
  *                  label — without it the default path stalls one step before
  *                  verification, forever
- * `build-verify`   verification on the MERGED commit; without it no `vt-*` check run
- *                  is ever written, because vt-report triggers on this workflow
+ * `build-verify`   verification on the MERGED commit AND the reporter that records it.
+ *                  Without it no `vt-*` check run is ever written, so no workload can
+ *                  complete (FR-034). That reason used to be stated by chaining — "the
+ *                  vt-report workflow triggers on this one" — and it is now direct: the
+ *                  `report` job of this file is the sole writer of the check runs L3
+ *                  reads (GHI #228). It is the only I7 workflow whose absence is
+ *                  structurally fatal rather than merely stalling.
  */
 export const DELIVERABLE_WORKFLOWS = ['build-publish', 'deliverable-gate', 'build-merge', 'build-verify'] as const;
 
