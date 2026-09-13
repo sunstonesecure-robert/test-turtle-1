@@ -1,0 +1,32 @@
+schemaVersion: 1
+domains:
+  - domain: organization-cloudtrail
+    authoritativeOwner: control-tower
+  - domain: config-recorders
+    authoritativeOwner: control-tower
+  - domain: config-delivery-channels
+    authoritativeOwner: control-tower
+  - domain: config-aggregator
+    authoritativeOwner: control-tower
+  - domain: managed-service-control-policies
+    authoritativeOwner: control-tower
+  - domain: controls
+    authoritativeOwner: control-tower
+  - domain: control-tower-service-roles
+    authoritativeOwner: control-tower
+  - domain: baseline-resources
+    authoritativeOwner: control-tower
+  - domain: control-tower-stacksets
+    authoritativeOwner: control-tower
+  - domain: non-control-tower-service-logging
+    authoritativeOwner: lza
+    initialState: empty
+  - domain: iam-extensions
+    authoritativeOwner: lza
+    initialState: empty
+  - domain: network-extensions
+    authoritativeOwner: lza
+    initialState: empty
+  - domain: security-extensions
+    authoritativeOwner: lza
+    initialState: empty

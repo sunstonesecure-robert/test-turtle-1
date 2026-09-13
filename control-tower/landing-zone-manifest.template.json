@@ -1,0 +1,41 @@
+{
+  "accessManagement": {
+    "enabled": false
+  },
+  "backup": {
+    "enabled": false
+  },
+  "centralizedLogging": {
+    "enabled": true,
+    "accountId": "${LOG_ARCHIVE_ACCOUNT_ID}",
+    "configurations": {
+      "accessLoggingBucket": {
+        "retentionDays": 365
+      },
+      "loggingBucket": {
+        "retentionDays": 365
+      },
+      "kmsKeyArn": "${CONTROL_TOWER_KMS_KEY_ARN}"
+    }
+  },
+  "config": {
+    "enabled": true,
+    "accountId": "${AUDIT_ACCOUNT_ID}",
+    "configurations": {
+      "accessLoggingBucket": {
+        "retentionDays": 365
+      },
+      "loggingBucket": {
+        "retentionDays": 365
+      },
+      "kmsKeyArn": "${CONTROL_TOWER_KMS_KEY_ARN}"
+    }
+  },
+  "governedRegions": [
+    "us-gov-west-1"
+  ],
+  "securityRoles": {
+    "enabled": true,
+    "accountId": "${AUDIT_ACCOUNT_ID}"
+  }
+}
