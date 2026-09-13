@@ -183,7 +183,7 @@
       "id": "vt-config-six",
       "kind": "expected-output",
       "check": "config/ holds exactly the six mandatory LZA files and no customizations-config.yaml.",
-      "run": "bash -c 'test \"$(find config -maxdepth 1 -type f | wc -l)\" -eq 6; for n in accounts global iam network organization security; do test -f \"config/$n-config.yaml\"; done; test ! -e config/customizations-config.yaml'",
+      "run": "bash -c 'set -e; test -d config; test \"$(find config -maxdepth 1 -type f | wc -l)\" -eq 6; for n in accounts global iam network organization security; do test -f \"config/$n-config.yaml\"; done; test ! -e config/customizations-config.yaml'",
       "maps_to": [
         "step-config"
       ]
@@ -275,7 +275,7 @@
       "id": "vt-gitignore-covers",
       "kind": "expected-output",
       "check": "The root .gitignore covers the REP-008 LZA generated paths while preserving existing entries.",
-      "run": "bash -c 'for p in \"vendor/\" \"cdk.out/\" \".aws/\" \"deployment-evidence.json\" \".env\" \"build/\"; do grep -qF \"$p\" .gitignore; done'",
+      "run": "bash -c 'set -e; test -f .gitignore; for p in \"vendor/\" \"cdk.out/\" \".aws/\" \"deployment-evidence.json\" \".env\" \"build/\"; do grep -qF \"$p\" .gitignore; done'",
       "maps_to": [
         "step-meta"
       ]
@@ -311,7 +311,7 @@
       "id": "vt-workflow-pinned",
       "kind": "expected-output",
       "check": "Every third-party action in the workflow is pinned to a 40-character commit SHA (no @vN/@main/@master tags).",
-      "run": "bash -c '! grep -nE \"uses:[^@]*@(v[0-9]|main|master|latest)([^0-9a-f]|$)\" .github/workflows/lza-phase0-0_validate-offline.yml'",
+      "run": "bash -c 'set -e; test -f .github/workflows/lza-phase0-0_validate-offline.yml; ! grep -nE \"uses:[^@]*@(v[0-9]|main|master|latest)([^0-9a-f]|$)\" .github/workflows/lza-phase0-0_validate-offline.yml'",
       "maps_to": [
         "step-workflow"
       ]
