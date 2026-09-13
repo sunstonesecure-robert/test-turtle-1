@@ -93,6 +93,16 @@ export const PLAN_CATALOGUE: readonly DeclaredGate[] = [
   // existed — that exemption is the gate-set stamp's business (GHI #151).
   { id: 'G17', requirement: 'FR-017' },
   { id: 'G18', requirement: 'FR-063' },
+  // G19 — the verification-target SHELL LINT (FR-011; GHI #232, added 2026-09-13).
+  // G4 asks whether the prose `check` is one assertion and G18 whether a MUST-mapped
+  // target carries a `run` at all; nothing asked what the COMMAND's shape is, so an
+  // operator approving a target has been approving unlinted shell text. It reports
+  // `advisory` rather than `fail` by operator decision: GHI #230 staged an
+  // approval-time REFUSAL behind data about how often a legitimate regression-guard
+  // target trips a static rule, and that data does not exist yet. Declared here all
+  // the same — an advisory gate that is not declared is a finding nothing reconciles,
+  // and `absent` would still fail the report if the implementation went missing.
+  { id: 'G19', requirement: 'FR-011' },
 ];
 
 /**

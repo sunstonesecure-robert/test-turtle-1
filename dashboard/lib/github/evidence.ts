@@ -560,6 +560,9 @@ export async function recordEvidenceBatch(
       issue_number: issueNumber,
       body: [
         `<!-- evidence-append:v1 date:${input.date} source:${source} items:${fresh.length}` +
+          // Bare `by:@<login>` inside the HTML comment this line closes: never
+          // rendered on GitHub, so no mention is possible, and the shape is what the
+          // evidence parser matches on (GHI #245).
           `${input.actor ? ` by:@${input.actor}` : ''}${input.at ? ` at:${input.at}` : ''} -->`,
         `**Appended** ${fresh.length} observation(s) to \`${located.path}\` (${merged.items.length} in the batch now)` +
           `${skipped > 0 ? `; ${skipped} already in the record and not duplicated` : ''}:`,
@@ -701,16 +704,42 @@ export async function listEvidenceBatches(
 }
 
 /**
- * One batch record by its committed path (`EvidenceBatchRef.path`).
+ * A batch record and the ref it was actually found at.
+ *
+ * The ref is returned rather than assumed because the store has two live homes and
+ * a reader cannot tell them apart from the path: `readEvidenceFile` prefers the
+ * `evidence` branch and falls back to the default branch, where every record
+ * written before GHI #134 still lives. A surface that LINKS the committed record
+ * therefore has to link the ref it resolved at — one built from the branch we would
+ * write to 404s on exactly the oldest records, which are the ones hardest to find
+ * by hand. (The same reason `tryReadPlanAtRef` returns the plan's path instead of
+ * letting callers derive it.)
+ */
+export interface StoredEvidenceBatch {
+  batch: EvidenceBatch;
+  ref: StoredEvidenceFile['ref'];
+}
+
+/**
+ * One batch record by its committed path, WITH the ref it was found at.
  *
  * Path rather than date since GHI #136: a date no longer identifies a record.
  * The read prefers the `evidence` branch and falls back to the default branch,
  * so a batch recorded before GHI #134 keeps resolving from where it was written.
+ *
+ * Two entry points rather than one because only the surface that LINKS the record
+ * needs the ref, and every other caller — and every test — asks the same question
+ * they always asked. Neither costs a second read.
  */
-export async function readEvidenceBatch(gh: Octokit, repo: RepoRef, path: string): Promise<EvidenceBatch> {
+export async function readEvidenceBatchRecord(gh: Octokit, repo: RepoRef, path: string): Promise<StoredEvidenceBatch> {
   const stored = await readEvidenceFile(gh, repo, path);
   if (!stored) throw new Refusal(`${path} is not a recorded evidence batch`);
-  return parseBatch(path, stored.content);
+  return { batch: parseBatch(path, stored.content), ref: stored.ref };
+}
+
+/** The batch alone, for callers that only want the record's content. */
+export async function readEvidenceBatch(gh: Octokit, repo: RepoRef, path: string): Promise<EvidenceBatch> {
+  return (await readEvidenceBatchRecord(gh, repo, path)).batch;
 }
 
 export interface ReconcileResult {
@@ -718,6 +747,17 @@ export interface ReconcileResult {
   flagged: string[];
   /** the new in-review plan ref, or null when a proposal was already in flight */
   reopenedAs: string | null;
+  /**
+   * The re-opened review's own issue, whenever `reopenedAs` names a version.
+   *
+   * `reopenPlan` has always returned it and this seam has always dropped it, so the
+   * only thing the caller could say about the correction it had just started was its
+   * plan ref — and the operator was sent to a list to match a number against a ref
+   * they had to remember. Null exactly when `reopenedAs` is null: the two are set
+   * together or not at all, so a caller that redirects on one never has to guard the
+   * other separately.
+   */
+  reopenedAndonIssue: number | null;
   /**
    * Why the plan did NOT re-open, when it did not and a live review is not the reason
    * (Codex on PR #138). Non-null means the flags and the reconciliation comment
@@ -804,6 +844,8 @@ export async function markContradicted(
     ...repo,
     issue_number: input.batchIssue,
     body: [
+      // Marker-only comment — invisible on GitHub, so the bare login raises no
+      // mention, and its exact shape is what the reconcile reader parses (GHI #245).
       `<!-- reconcile:v1 plan:${input.planRef} by:@${input.actor} at:${input.at} -->`,
       `**Contradicted** (operator judgment): ${input.contradictedStepIds.join(', ')}`,
       `**Flagged closure** (deterministic, FR-022): ${flagged.join(', ')}`,
@@ -838,10 +880,12 @@ export async function markContradicted(
   // `reopenBlocked` carries the reason, so the caller can report both halves of what
   // truly happened: the flags landed, the re-open did not, and here is why.
   let reopenedAs: string | null = null;
+  let reopenedAndonIssue: number | null = null;
   let reopenBlocked: string | null = null;
   try {
     const reopened = await reopenPlan(gh, repo, { slug: input.workloadSlug, actor: input.actor, at: input.at });
     reopenedAs = reopened.planRef;
+    reopenedAndonIssue = reopened.andonIssue;
   } catch (error: unknown) {
     if (!(error instanceof Error)) throw error;
     // 'awaiting review' keeps its established meaning: a live review absorbs the
@@ -856,5 +900,5 @@ export async function markContradicted(
       throw error;
     }
   }
-  return { flagged, reopenedAs, reopenBlocked };
+  return { flagged, reopenedAs, reopenedAndonIssue, reopenBlocked };
 }

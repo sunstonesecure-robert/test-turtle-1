@@ -23,6 +23,7 @@ import { approvalPrMerged, closeOpenApprovalPr } from './approval';
 // taken from the taxonomy rather than re-spelled, so a query here can never disagree with
 // the break page about which labels mean "still waiting on you".
 import { isLiveAndon, LIVE_ANDON_LABELS } from './labels';
+import { inertLogin } from '../actor-identity';
 import {
   parseAndonHeader,
   parseCorrectionMarker,
@@ -308,7 +309,7 @@ export async function withdrawProposal(
     if (!version) return;
     await closeOpenApprovalPr(gh, repo, {
       ...version,
-      comment: `**Closed with the proposal**: Andon #${issueNumber} was withdrawn by @${input.by} at ${input.at} — this plan is not going to be approved.\n> ${cause.replace(/\n/g, '\n> ')}`,
+      comment: `**Closed with the proposal**: Andon #${issueNumber} was withdrawn by ${inertLogin(input.by)} at ${input.at} — this plan is not going to be approved.\n> ${cause.replace(/\n/g, '\n> ')}`,
     });
   };
   if (andon.labels.includes('andon:superseded')) {
@@ -352,7 +353,7 @@ export async function withdrawProposal(
     ...repo,
     issue_number: issueNumber,
     // Blockquote continuation so a multi-line cause renders fully on GitHub.
-    body: `**Proposal withdrawn** (superseded) by @${input.by} at ${input.at}\n> ${cause.replace(/\n/g, '\n> ')}`,
+    body: `**Proposal withdrawn** (superseded) by ${inertLogin(input.by)} at ${input.at}\n> ${cause.replace(/\n/g, '\n> ')}`,
   });
 
   // Add the terminal label BEFORE dropping the live ones: if the teardown fails

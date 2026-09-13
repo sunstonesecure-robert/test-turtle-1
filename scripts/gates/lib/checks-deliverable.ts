@@ -12,6 +12,7 @@ import { pathsOutside, isRepoRelative, normalizePath } from './globs';
 // `dashboard/lib/github/`, which gates import from rather than the other way round.
 import { resolveMergeAuthority, type MergeAuthorityInputs } from '../../../dashboard/lib/github/builds';
 import { reservedPathsTouched, reservedRefusalDetail, type ReservedPathOptions } from './reserved-paths';
+import { inertLogin } from '../../../dashboard/lib/actor-identity';
 import { ApiUnavailableError, type GateResult } from './runner';
 
 /**
@@ -123,7 +124,12 @@ export async function checkD1Provenance(
       status: 'fail',
       requirement: 'FR-060',
       detail:
-        `pull request #${pr.number} was opened by @${pr.authorLogin}, not by the deterministic writer. A deliverable ` +
+        // `inertLogin`, and this is the sharpest case for it: `isWriterIdentity` has
+        // already ruled out every bot, so this login is ALWAYS a person, and the gate
+        // is publicly saying they hand-made a deliverable. The detail is rendered as
+        // markdown in the check run's summary, so a bare at-sign would notify the
+        // person being accused (GHI #245).
+        `pull request #${pr.number} was opened by ${inertLogin(pr.authorLogin)}, not by the deterministic writer. A deliverable ` +
         'pull request is created by `build-publish` from a validated artifact — one opened by a person is a hand-made ' +
         'branch wearing a deliverable marker, and merging it would land work no approved plan authorized through a ' +
         'path no gate watched. Dispatch a build on the frozen tag instead.',
@@ -202,7 +208,11 @@ export async function checkD1Provenance(
     id: 'D1',
     status: 'pass',
     requirement: 'FR-060',
-    detail: `opened by @${pr.authorLogin} from build run ${marker.runId}; head descends from ${marker.planRef}`,
+    // Inert here too, although today's writer logins end in `[bot]`, which GitHub's
+    // mention pattern happens not to match. That is an accident of its grammar, not a
+    // guarantee, and `isWriterIdentity` also passes a bot-typed account whose login
+    // carries no `[bot]` suffix — which would linkify.
+    detail: `opened by ${inertLogin(pr.authorLogin)} from build run ${marker.runId}; head descends from ${marker.planRef}`,
     marker,
   };
 }

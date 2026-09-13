@@ -4,7 +4,11 @@ import type { PlanDoc } from '../../schemas/plan';
 import { buildPreflight } from '../../scripts/gates/build-preflight';
 import { blockingGates, phraseGate, type GateReport, type GateResult } from '../../scripts/gates/lib/runner';
 import { checkG2ExactlyOnePriority, checkG3MustCoverage, checkG4SinglePassFail } from '../../scripts/gates/lib/checks-scope';
-import { checkG17MustStepsTracked, checkG18MustTargetsExecutable } from '../../scripts/gates/lib/checks-approval';
+import {
+  checkG17MustStepsTracked,
+  checkG18MustTargetsExecutable,
+  checkG19RunsLintable,
+} from '../../scripts/gates/lib/checks-approval';
 
 /**
  * Scope-gate preview (T060, US2): G2/G3/G4 for the dashboard, REUSING the
@@ -38,7 +42,10 @@ import { checkG17MustStepsTracked, checkG18MustTargetsExecutable } from '../../s
 
 export interface ScopeGatePreview {
   pass: boolean;
-  /** stable order G2, G3, G4, G17, G18 — the same relative order plan-gate reports */
+  /** findings that do NOT block approval (GHI #232) — read by the operator at the
+   *  Andon break, where a bad command is still one edit away from being fixed */
+  advisories: string[];
+  /** stable order G2, G3, G4, G17, G18, G19 — the same relative order plan-gate reports */
   gates: GateResult[];
   /** failing gates phrased for the disabled-button title: "G3: <detail> (FR-012)" */
   failures: string[];
@@ -58,6 +65,13 @@ export function scopeGatePreview(
     checkG4SinglePassFail(plan),
     checkG17MustStepsTracked(plan, { pendingStepIds: opts.workItemsPendingFor }),
     checkG18MustTargetsExecutable(plan),
+    // G19 ADVISORY, and PARTIAL here on purpose (GHI #232). The gate folds in a
+    // `bash -n` syntax check this preview cannot run — `scopeGatePreview` is pure and
+    // synchronous by contract and a live review renders it on every load, so it must
+    // not spawn a shell. The preview therefore shows the SHAPE half; the gate shows
+    // both. Said in the review page's copy rather than left for a reader to discover
+    // when the gate reports a G19 clause the preview never showed.
+    checkG19RunsLintable(plan),
   ];
   // Deliberately NOT `refusalDetail`: this one appends `(FR-0NN)` for the
   // disabled-button title, which is a different string for a different reader.
@@ -65,9 +79,16 @@ export function scopeGatePreview(
   // checks are CALLED, not looked up in a catalogue, so the status the shared
   // formatter exists to stop dropping cannot arise on this path.
   const failures = gates
+    // STILL `fail` ONLY, now that `advisory` exists (GHI #232). This list drives the
+    // disabled-button title: an advisory gate does not disable the button and must
+    // not appear in the reason it is disabled, or the operator reads a blocker that
+    // is not blocking anything. It is rendered as its own chip instead.
     .filter((g) => g.status === 'fail')
     .map((g) => `${g.id}: ${g.detail ?? 'failed'} (${g.requirement})`);
-  return { pass: failures.length === 0, gates, failures };
+  const advisories = gates
+    .filter((g) => g.status === 'advisory')
+    .map((g) => `${g.id}: ${g.detail ?? 'advisory'} (${g.requirement})`);
+  return { pass: failures.length === 0, gates, failures, advisories };
 }
 
 /* ------------------------------------------------------------------------- *

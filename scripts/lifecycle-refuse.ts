@@ -4,6 +4,7 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { getWorkload } from '../dashboard/lib/github/workloads';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import { refusalDetail, blockingGates, type GateReport } from './gates/lib/runner';
+import { inertLogin } from '../dashboard/lib/actor-identity';
 
 /**
  * Lifecycle refusal reporter (GHI #127) — the failure half of the
@@ -105,7 +106,16 @@ function readGateReport(path: string): GateReport | null {
 export function refusalComment(input: { slug: string; action: string; actor: string; report: GateReport }): string {
   const items = blockingGates(input.report.gates).map((g) => `- **${g.id}** (${g.requirement}) — ${g.detail ?? 'failed'}`);
   return [
-    `**Workload lifecycle refused** — \`${input.action}\` requested by @${input.actor} was not performed.`,
+    // `inertLogin` — this body is posted as an issue comment, and `actor` comes off
+    // `github.actor` or the dispatch payload, so it can be anyone (GHI #245).
+    //
+    // SIDE EFFECT WORTH NAMING: `reportLifecycleRefusal` dedupes by EXACT body
+    // equality, so refusal comments written before this change no longer match the
+    // body composed now. A workload still standing on the same refusal can therefore
+    // get one duplicate comment — once. That is a behaviour change, not just a
+    // format one, and it is accepted because a permanent record must not mention a
+    // stranger; the duplicate is bounded and self-correcting from the next run on.
+    `**Workload lifecycle refused** — \`${input.action}\` requested by ${inertLogin(input.actor)} was not performed.`,
     '',
     ...items,
     '',

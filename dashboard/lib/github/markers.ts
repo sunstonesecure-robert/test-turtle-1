@@ -4,7 +4,20 @@
  *
  * Every marker is an HTML comment so it renders invisibly on GitHub while
  * remaining the authoritative machine linkage for dashboard and gates.
+ *
+ * THAT INVISIBILITY IS ALSO WHY THE MARKERS KEEP A BARE `by:@<login>` while every
+ * VISIBLE line here renders its login through `inertLogin` (GHI #245). Rendering a
+ * real dual-half body through GitHub's own markdown API proved the split: the
+ * visible half turned `@login` into a live user-mention anchor with a hovercard —
+ * which notifies — and the HTML comment produced no output at all, not even a
+ * comment node. Nothing unrendered can raise a mention, so the markers are already
+ * safe, and their exact shape is what every parser in this file matches on.
  */
+
+// `actor-identity` is the only import here, and it is itself a leaf with no
+// imports of its own — so this module stays reachable from the browser bundle,
+// from server components and from the gate scripts, exactly as before.
+import { inertLogin } from '../actor-identity';
 
 // ---------- Andon header: <!-- andon:v1 run:<run_id> plan:plan/<feature>/v<N> ----------
 
@@ -248,13 +261,17 @@ function unescapeCommentOpeners(value: string): string {
 }
 
 export function serializeWorkloadEvent(e: WorkloadEvent): string {
+  // The bare `by:@<login>` stays: EVENT_RE demands this exact shape, and an HTML
+  // comment renders nothing on GitHub, so it cannot become a mention (GHI #245).
   let marker = `<!-- workload-event:v1 action:${e.action} by:@${e.by} at:${e.at}`;
   if (e.reason !== undefined) marker += ` reason:"${escapeMarkerValue(e.reason)}"`;
   if (e.revisit !== undefined) marker += ` revisit:"${escapeMarkerValue(e.revisit)}"`;
   marker += ' -->';
   // Human-visible line first: a marker-only body renders as an EMPTY comment in
   // the GitHub UI, hiding the attributed event timeline from UI-driven operators.
-  let visible = `**Workload event**: \`${e.action}\` by @${e.by} at ${e.at}`;
+  // `inertLogin`, not a bare `@${e.by}`: this line IS rendered, and `by` can be a
+  // third party — `intake-normalize` records whoever filed the intake issue.
+  let visible = `**Workload event**: \`${e.action}\` by ${inertLogin(e.by)} at ${e.at}`;
   // escapeCommentOpeners on the VISIBLE copy (the marker's own copy is already
   // escapeMarkerValue'd): reason/revisit are operator free text, and the visible
   // block is rendered BEFORE the canonical marker. EVENT_RE takes the FIRST match,
@@ -292,11 +309,13 @@ const CORRECTION_EVENT_RE =
   /<!--\s*correction-event:v1\s+action:(\w+)\s+by:@(\S+)\s+at:(\S+?)(?:\s+cause:"([^"]*)")?\s*-->/;
 
 export function serializeCorrectionEvent(e: CorrectionEvent): string {
+  // Bare `by:@<login>` for the same two reasons as serializeWorkloadEvent:
+  // CORRECTION_EVENT_RE matches on it, and an HTML comment is never rendered.
   let marker = `<!-- correction-event:v1 action:${e.action} by:@${e.by} at:${e.at}`;
   if (e.cause !== undefined) marker += ` cause:"${escapeMarkerValue(e.cause)}"`;
   marker += ' -->';
   // Same dual rendering as workload events: visible line first, marker after.
-  let visible = `**Correction event**: \`${e.action}\` by @${e.by} at ${e.at}`;
+  let visible = `**Correction event**: \`${e.action}\` by ${inertLogin(e.by)} at ${e.at}`;
   // Same hijack, same escape as serializeWorkloadEvent: `cause` is operator free
   // text (a withdrawal reason) rendered before the marker, and
   // CORRECTION_EVENT_RE also takes the first match. Parsed from the MARKER, so no
@@ -325,6 +344,10 @@ export interface AnswerMarker {
 const ANSWER_RE = /<!--\s*answer:v1\s+andon:(\d+)\s+item:(q-[a-z0-9-]+)\s+by:@(\S+)\s+at:(\S+?)\s*-->/;
 
 export function serializeAnswer(a: AnswerMarker, text: string): string {
+  // The bare login here is not merely parseable, it is CHECKED: listAnswers
+  // compares this `by` to the comment's author as the anti-forgery test, so an
+  // inert spelling would discard every legitimate answer. Invisible, so it is also
+  // the one place the mention rule has nothing to say (GHI #245).
   const marker = `<!-- answer:v1 andon:${a.andonIssue} item:${a.itemId} by:@${a.by} at:${a.at} -->`;
   // Same dual rendering as workload/correction events: visible line first, answer
   // text as a blockquote, marker after. The marker itself carries no free text —
@@ -339,7 +362,9 @@ export function serializeAnswer(a: AnswerMarker, text: string): string {
   // Unlike the event serializers, this one needs the inverse in parseAnswerText:
   // the payload rides OUTSIDE the comment, so the text is read back from the
   // blockquote (parseXLinkResolution's arrangement).
-  const visible = `**Answer** to \`${a.itemId}\` by @${a.by} at ${a.at}\n> ${blockquote(escapeCommentOpeners(text))}`;
+  // Free of charge on this one: parseAnswerText reads only the `> `-prefixed
+  // lines, so nothing parses this header and making it inert costs no reader.
+  const visible = `**Answer** to \`${a.itemId}\` by ${inertLogin(a.by)} at ${a.at}\n> ${blockquote(escapeCommentOpeners(text))}`;
   return `${visible}\n\n${marker}`;
 }
 
@@ -466,6 +491,9 @@ export interface IntentConfirmed {
 const INTENT_CONFIRMED_RE = /<!--\s*intent-confirmed\s+by:@(\S+)\s+at:(\S+)\s+chunk:(\d+)\s*-->/;
 
 export function serializeIntentConfirmed(c: IntentConfirmed): string {
+  // Marker-only — this serializer has no visible half, so nothing it writes is
+  // ever rendered. The bare login is required by INTENT_CONFIRMED_RE and by the
+  // preflight gate that reads it before permitting an unattended run (GHI #245).
   return `<!-- intent-confirmed by:@${c.by} at:${c.at} chunk:${c.chunk} -->`;
 }
 

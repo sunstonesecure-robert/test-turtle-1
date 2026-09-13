@@ -8,6 +8,7 @@ import { confirmationPath, stepDigest } from '../gates/lib/checks-preflight';
 import { printReport, reportResult, type GateReport, type GateResult } from '../gates/lib/runner';
 import { buildPreflight } from '../gates/build-preflight';
 import { ConfirmationRecord } from '../../schemas/confirmation';
+import { plainLogin } from '../../dashboard/lib/actor-identity';
 import { proposeDemoPlan } from './propose-plan';
 
 /**
@@ -156,8 +157,9 @@ async function flagStep(
   // the merged-approval window, so this demo can never edit an official version.
   const updated = await commitPlanUpdate(gh, repo, {
     planRef: input.planRef,
+    // Commit message — see `plainLogin`: not GFM, so the at-sign itself goes.
     message: () =>
-      `plan: flag ${input.stepId} high-stakes (${input.authority}) by @${input.actor} at ${input.at} (FR-023)`,
+      `plan: flag ${input.stepId} high-stakes (${input.authority}) by ${plainLogin(input.actor)} at ${input.at} (FR-023)`,
     mutate: (plan) => ({
       ...plan,
       steps: plan.steps.map((s) =>
@@ -247,9 +249,16 @@ async function confirmStep(
         step_digest: stepDigest(step),
         by: {
           // Named as a stand-in when the demo has no real external authority to ask:
-          // "@operator standing in for customer" is attributable and honest; a bare
+          // "<operator> standing in for customer" is attributable and honest; a bare
           // placeholder is the unattributable record FR-024 refuses to accept.
-          name: input.confirmer ?? `@${input.actor} (demo stand-in for the ${authority} authority)`,
+          //
+          // NO AT-SIGN, and this is the only place the product ever MANUFACTURED one
+          // into a data field rather than into a template (GHI #245). The value is
+          // durable and it travels: the confirmation pull request's body prints it,
+          // and so do three preflight gate details — all markdown surfaces, none of
+          // which could see where the at-sign came from. The attribution survives
+          // without it; the mention does not survive with it.
+          name: input.confirmer ?? `${plainLogin(input.actor)} (demo stand-in for the ${authority} authority)`,
           contact: input.contact ?? `https://github.com/${input.actor}`,
         },
         at: input.at,
@@ -272,7 +281,8 @@ async function confirmStep(
     ...repo,
     path,
     branch,
-    message: `confirmation: ${step.id} confirmed by the ${authority} authority, committed by @${input.actor} at ${input.at} (FR-024)`,
+    // Commit message — see `plainLogin`: not GFM, so the at-sign itself goes.
+    message: `confirmation: ${step.id} confirmed by the ${authority} authority, committed by ${plainLogin(input.actor)} at ${input.at} (FR-024)`,
     content: Buffer.from(`${JSON.stringify(record, null, 2)}\n`).toString('base64'),
     ...(sha !== undefined ? { sha } : {}),
   });

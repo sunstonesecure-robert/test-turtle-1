@@ -219,32 +219,99 @@ export interface RunSummary {
   conclusion: string | null;
 }
 
+/** What ONE pass over the queued and in_progress run pages can answer. */
+export interface InFlightRuns {
+  /**
+   * Every run id GitHub currently reports as queued or in progress.
+   *
+   * A SET because the only question asked of it is membership, and because the
+   * distinction that matters to the caller is between an empty set (the runs were
+   * read, and this one is not among them) and NO set at all (nothing was read, so
+   * nothing can be claimed) — `BuildHistoryInputs.runsInFlight` treats an absent set
+   * as unknown and never says a build is running on it. Nothing is filtered by
+   * workflow: a work item is joined to its run through the run id the dispatch record
+   * carries, never through a run's name, so narrowing this to build workflows would
+   * only be a second chance to disagree with the record.
+   *
+   * THE SAME ANSWER THE RUN MONITOR'S SET GIVES for every run a dispatch record can
+   * name, by a different route. The portfolio derives its set from the monitor
+   * snapshot's `displayState` — queued, in progress and stalled, which are exactly the
+   * runs whose raw status is queued or in_progress (stalled IS in_progress; what
+   * stalled is the step log). That is what lets the workload card and the plan review
+   * answer "is a build of this item running right now?" alike, which is the whole
+   * reason the review is allowed to ask at all.
+   *
+   * THE TWO SETS ARE NOT IDENTICAL, AND THE DIFFERENCES ARE NAMED RATHER THAN IMPLIED —
+   * a comment that claimed "by construction" would be the kind of claim that rots into
+   * a disagreement nobody re-derived:
+   *
+   *   - WIDER HERE: no `event` filter. The monitor lists `event=workflow_dispatch`
+   *     (`runMonitorEvent()`); this lists everything. Harmless in this use and left
+   *     wide on purpose — the join is the dispatch record's own run id, and a build is
+   *     a workflow_dispatch run, so the extra push/schedule ids can never match a
+   *     record. Filtering here would add a second opinion for no gain.
+   *   - WIDER HERE: no recency cap. The monitor's snapshot keeps the newest MAX_RUNS
+   *     plus three rescues (Andon-referenced, `action_required`, newest-per-branch), so
+   *     a build still in flight that is past the cap AND is not its branch's newest —
+   *     the older of two overlapping builds of one work item, the case D3's
+   *     no-withholding rule creates — can be missing from the CARD's set while it is in
+   *     this one. This side is then the more correct of the two: the review says
+   *     "running", the card falls through to delivered/dispatched. A disagreement in
+   *     that direction is the monitor's documented cap showing through, not this
+   *     helper's, and it is the safe direction — the surface that WARNS before a repeat
+   *     is the one that stays right.
+   *   - NARROWER HERE: the REST `status` filter. A run parked in `waiting`, `requested`
+   *     or `pending` is returned by neither page, while the monitor's unfiltered list
+   *     carries it and `displayState` calls any unrecognised pre-terminal status "in
+   *     progress". Nothing this repository dispatches enters those states today (they
+   *     come from deployment-environment approvals), so it costs nothing now; it is
+   *     recorded because it is the arm that would make THIS side the silent one.
+   */
+  ids: Set<number>;
+  /**
+   * The plan-revise runs among them — the review page's "an agent is working right
+   * now" indicator (live finding, PB run 2026-08-16: the operator dispatched the
+   * revision agent and the page showed nothing). The dispatch INPUT (which review) is
+   * invisible to the runs API — the same payload blindness B8 documents — so this is
+   * honest about granularity: SOME revision run is in flight, watch the run monitor
+   * for it.
+   */
+  revisions: { id: number; status: string; startedAt: string | null }[];
+}
+
+/**
+ * The in-flight runs, read ONCE and answered TWICE (the decision of 2026-09-12, half
+ * one: the plan review may spend a read on page load).
+ *
+ * WHY ONE HELPER RATHER THAN TWO READS. The review already fetched these two pages to
+ * spot a revision agent at work, and it did so CONDITIONALLY — only while a correction
+ * was open — which made its cost unpredictable and gave it no way to say "a build of
+ * this work item is running right now", the one shape that matters most before a
+ * repeat. Folding both answers out of one pass means the review pays, unconditionally,
+ * at most what it sometimes already paid, and the two surfaces onto one work item stop
+ * disagreeing in exactly the case the warning exists for.
+ *
+ * The two LISTs are independent reads, so they are fetched concurrently — and a run
+ * that transitions queued → in_progress between them lands on BOTH pages. The id set
+ * dedupes by construction; the revision list dedupes through a Map keyed by id, whose
+ * LAST write wins, so a run caught in both is reported at its more advanced status
+ * rather than twice.
+ */
+export async function listInFlightRuns(gh: Octokit, repo: RepoRef): Promise<InFlightRuns> {
+  const pages = await Promise.all(IN_FLIGHT_STATUSES.map((status) => listRuns(gh, repo, { status })));
+  const runs = pages.flat();
+  const revisions = new Map<number, { id: number; status: string; startedAt: string | null }>();
+  for (const run of runs) {
+    if ((run.name ?? '').startsWith('plan-revise')) revisions.set(run.id, { id: run.id, status: run.status, startedAt: null });
+  }
+  return { ids: new Set(runs.map((r) => r.id)), revisions: [...revisions.values()] };
+}
+
 /**
  * List the repo's workflow runs, keyed to the monitor's workflow event
  * (GET /actions/runs?event=…). head_branch is the plan-ref session key callers
  * group by. Paginated so a growing run history is never silently truncated.
  */
-/**
- * In-flight plan-revise runs (queued or in_progress) — the review page's "an
- * agent is working right now" indicator (live finding, PB run 2026-08-16: the
- * operator dispatched the revision agent and the page showed nothing). The
- * dispatch INPUT (which review) is invisible to the runs API — the same
- * payload blindness B8 documents — so this is honest about granularity: SOME
- * revision run is in flight, watch the run monitor for it.
- */
-export async function listInFlightRevisionRuns(
-  gh: Octokit,
-  repo: RepoRef,
-): Promise<{ id: number; status: string; startedAt: string | null }[]> {
-  const pages = await Promise.all(
-    (['queued', 'in_progress'] as const).map((status) => listRuns(gh, repo, { status })),
-  );
-  return pages
-    .flat()
-    .filter((r) => (r.name ?? '').startsWith('plan-revise'))
-    .map((r) => ({ id: r.id, status: r.status, startedAt: null }));
-}
-
 export async function listRuns(
   gh: Octokit,
   repo: RepoRef,

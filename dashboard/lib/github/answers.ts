@@ -122,6 +122,8 @@ export async function recordAnswer(
   const existing = (await listAnswers(gh, repo, input.andonIssue)).find((a) => a.itemId === input.itemId);
   if (existing && existing.text !== rendered) {
     throw new Refusal(
+      // NOT A GITHUB MENTION — a Refusal, rendered by the dashboard beside the form.
+      // It is raised INSTEAD of writing anything, so it never reaches GitHub.
       `question ${input.itemId} already carries an answer by @${existing.by} at ${existing.at} — answers are permanent records; ` +
         `if the plan is wrong, flag the item ✗ with a correction instead (FR-055)`,
     );

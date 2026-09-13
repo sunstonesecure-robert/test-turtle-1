@@ -11,6 +11,7 @@ import {
   type Decision as DecisionEntry,
 } from '../../../schemas/confirmation';
 import { confirmationPath, stepDigest } from '../../../scripts/gates/lib/checks-preflight';
+import { inertLogin, plainLogin } from '../actor-identity';
 
 /**
  * Record a high-stakes confirmation from the review page and land it (GHI #194).
@@ -558,8 +559,16 @@ export async function recordConfirmation(
   await gh.repos.createOrUpdateFileContents({
     ...repo,
     path,
+    // `plainLogin`, not `inertLogin`: a COMMIT MESSAGE is not rendered as GFM, so
+    // the code span that makes a login inert in an issue comment would show up as
+    // literal backticks here while GitHub's web UI linkified the mention anyway.
+    // Dropping the at-sign is what actually stops the mention (GHI #245).
+    //
+    // `entry.by.name` is deliberately untouched: it is the external authority's
+    // name as the operator typed it into the confirmation form, not a login this
+    // product composed. See the note on the pull-request body below.
     message:
-      `confirmation: ${entry.decision} for ${step.id} (${workload}) by ${entry.by.name}, recorded by @${input.actor} at ${entry.at}`,
+      `confirmation: ${entry.decision} for ${step.id} (${workload}) by ${entry.by.name}, recorded by ${plainLogin(input.actor)} at ${entry.at}`,
     content: Buffer.from(`${JSON.stringify(ledger, null, 2)}\n`).toString('base64'),
     branch: head,
     ...(existing ? { sha: existing.sha } : {}),
@@ -575,13 +584,21 @@ export async function recordConfirmation(
     body:
       `Puts the ${ledger.authority} authority's answer about \`${step.id}\` on record at \`${path}\`.\n\n` +
       `- **Decision:** ${entry.decision}\n` +
+      // WHAT IS NOT GUARDED HERE, SAID PLAINLY (GHI #245). `by.name` is free text
+      // from the confirmation form, and this body renders as GFM — so a name typed
+      // as `@somebody` WOULD mention them, and confirmation authorities are external
+      // by design. The product no longer manufactures one (the demo script that used
+      // to write `@<actor> (demo stand-in …)` now writes the bare login), but it does
+      // not rewrite the operator's own words either: that is the same line already
+      // drawn where the runs page posts an operator-typed comment verbatim. Worth an
+      // explicit ruling rather than a silent sanitiser.
       `- **By:** ${entry.by.name} (${entry.by.contact}${entry.by.role ? `, ${entry.by.role}` : ''})\n` +
       `- **At:** ${entry.at}\n` +
       `- **Rationale:** ${entry.rationale}\n\n` +
       `${existing ? `Appends to the ${existing.ledger.decisions.length} earlier decision(s) already on \`${branch}\`.` : 'Starts the ledger for this step.'} ` +
       'Merging is what puts it on record: this pull request carries neither a plan nor a deliverable, so both required checks report ' +
       `skipped and you can merge it yourself. On merge, the confirmation workflow labels the step's tracking issue.\n\n` +
-      `Recorded from the review page by @${input.actor}.`,
+      `Recorded from the review page by ${inertLogin(input.actor)}.`,
   });
 
   return {

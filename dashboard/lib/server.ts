@@ -1,4 +1,5 @@
 import { createClient, type RepoRef } from './github/client';
+import { OPERATOR_PLACEHOLDER_LOGIN } from './actor-identity';
 import type { Octokit } from '@octokit/rest';
 
 /**
@@ -14,8 +15,18 @@ export function github(): { gh: Octokit; repo: RepoRef } {
   return { gh: createClient(), repo: { owner, repo } };
 }
 
+/**
+ * Who the dashboard attributes an operator action to.
+ *
+ * THE PLACEHOLDER IS SHARED WITH THE RENDERER RATHER THAN SPELLED TWICE. Unset,
+ * this writes a string that names nobody into records the product never deletes
+ * (a lifecycle-event or intent-confirmed marker is an issue comment, and there is
+ * no delete operation for one anywhere — FR-042). `ActorLogin` in app/flow.tsx has
+ * to recognise exactly what gets written here, so the literal lives in
+ * lib/actor-identity.ts and neither side can drift from the other.
+ */
 export function operatorLogin(): string {
-  return process.env.OPERATOR_LOGIN ?? 'operator';
+  return process.env.OPERATOR_LOGIN ?? OPERATOR_PLACEHOLDER_LOGIN;
 }
 
 /**
@@ -33,6 +44,13 @@ export function operatorLogin(): string {
  * a copy per target is a copy per target to keep current — an operator following a stale
  * guide would be told to write a record whose shape the gate no longer accepts. One
  * copy, configurable, so a deployment can point at its own fork or its own docs site.
+ *
+ * THE ONE github.com URL EXEMPT FROM lib/github/urls.ts, and it stays here. Every other
+ * link the dashboard hands the operator is built by a helper in that module; this one
+ * cannot be, for three reasons that all still hold: it addresses the FRAMEWORK's own
+ * repository rather than the repository being governed, it has no `RepoRef` to build
+ * from, and it is deliberately overridable by configuration — which is the whole point
+ * of it, and is not something a fixed helper expresses.
  */
 const DEFAULT_CONFIRMATION_GUIDE_BASE = 'https://github.com/SunStone-Secure-LLC/agentic-turtles/blob/HEAD/skills';
 

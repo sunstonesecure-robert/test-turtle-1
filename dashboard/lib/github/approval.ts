@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { APPROVAL_PR_LABEL } from './labels';
+import { UNREPORTED_APPROVER_LOGIN } from '../actor-identity';
 
 /**
  * Approval flow (T045 tracer surface): "Commit for approval" opens the PR from
@@ -115,7 +116,21 @@ export async function openApprovalPr(
   return { number: pr.number, url: pr.html_url };
 }
 
-/** Approval record (FR-026): merged_by + merged_at + merge SHA, straight from the PR. */
+/**
+ * Approval record (FR-026): merged_by + merged_at + merge SHA, straight from the PR.
+ *
+ * `merged_by` IS NULLABLE ON A MERGED PULL REQUEST, and the record survives it: the
+ * authority is the merge, which `merged_at` and `merge_commit_sha` both attest, so
+ * dropping the record over a missing name would discard a real approval. The
+ * sentinel that stands in is shared with the renderer (lib/actor-identity.ts) —
+ * `github.com/unknown` is a live personal account, so the archive must recognise
+ * this value and say it names nobody rather than link a stranger as the approver.
+ *
+ * A `string | null` approver would make that type-enforced rather than
+ * convention-enforced, and is the better shape; it is not done here because it
+ * touches every consumer including a CI gate script, which is a larger change than
+ * the rendering defect it would tidy.
+ */
 export async function getApprovalRecord(
   gh: Octokit,
   repo: RepoRef,
@@ -124,7 +139,7 @@ export async function getApprovalRecord(
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
   if (!pr.merged_at || !pr.merge_commit_sha) return null;
   return {
-    approver: pr.merged_by?.login ?? 'unknown',
+    approver: pr.merged_by?.login ?? UNREPORTED_APPROVER_LOGIN,
     approvedAt: pr.merged_at,
     mergeSha: pr.merge_commit_sha,
   };

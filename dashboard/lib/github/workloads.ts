@@ -14,6 +14,7 @@ import { reopenPlan, tagExists, type ReopenResult, maxPlanVersion, planBranch } 
 import { findOpenAndonByPlanRef } from './andon';
 import { instructionProblems, listOpenCorrections, sendCorrection } from './corrections';
 import { contextPathProblems, megabytes, CONTEXT_FOLDERS, type ContextPathProblem } from './context-paths';
+import { plainLogin } from '../actor-identity';
 
 /**
  * Workload module (T136 tracer surface): intake, listing, state derivation,
@@ -1033,7 +1034,16 @@ async function rewriteWorkloadContext(gh: Octokit, repo: RepoRef, issueNumber: n
 function metadataEditReason(field: string, summary: string, reclassified: boolean, actor: string): string {
   const head = `metadata-only edit of "${field}" (FR-037): ${summary}`;
   return reclassified
-    ? `${head}; classification was AMBIGUOUS and defaults to the re-plan path (FR-036) — @${actor} explicitly reclassified it as metadata-only, so it applied immediately with no new plan version and no fresh approval; this override is itself recorded here`
+    // `plainLogin` rather than `inertLogin`, and the reason is structural: ONE
+    // string, THREE destinations. This reason is written into the workload event's
+    // rendered `> reason:` blockquote (a live mention if the at-sign stayed), into
+    // the event MARKER's escaped `reason:` field (invisible, and read back verbatim),
+    // and into the dashboard archive, which renders it as plain React text. A code
+    // span would be inert on the first, meaningless in the second, and literal
+    // backticks in the third. Dropping the at-sign is the one spelling that is
+    // correct on all three, and it keeps the marker and the visible line agreeing —
+    // which splitting them into two strings would not (GHI #245).
+    ? `${head}; classification was AMBIGUOUS and defaults to the re-plan path (FR-036) — ${plainLogin(actor)} explicitly reclassified it as metadata-only, so it applied immediately with no new plan version and no fresh approval; this override is itself recorded here`
     : `${head}; applied immediately — no re-plan required`;
 }
 

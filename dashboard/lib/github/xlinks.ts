@@ -5,6 +5,7 @@ import { errorStatus, Refusal } from './errors';
 // portfolio.ts cannot drift apart from it or from each other (issue-tracker-contract.md).
 import { CONFLICT_LABEL } from './labels';
 import { parseXLink, parseXLinkResolution, serializeXLink, type XLinkMarker, type XLinkType } from './markers';
+import { parseBuildDispatchEvents, type BuildDispatchEvent } from './builds';
 import { listWorkloads, type Workload } from './workloads';
 
 /**
@@ -90,12 +91,19 @@ function sortLinks(links: XLink[]): XLink[] {
  * `conflict:open` on work the operator just said is not in dispute, permanently and with
  * no remedy. Flag reconciliation therefore uses the history, not the fold (see
  * propagateConflictFlags).
+ *
+ * `dispatches` is the SECOND record this page carries. The workload issue's timeline is
+ * where `dispatchBuild` writes its attributed account of every build ever started for
+ * this workload, and this pagination — once per workload card — was throwing all of it
+ * away along with every other non-xlink marker. Folding the parse in here is what lets
+ * a work-item row say what its last build did at zero additional reads; a reader with
+ * its own client would be a second pass over a page already in memory.
  */
 async function readIssueLinks(
   gh: Octokit,
   repo: RepoRef,
   workload: Workload,
-): Promise<{ current: XLink[]; everItems: number[] }> {
+): Promise<{ current: XLink[]; everItems: number[]; dispatches: BuildDispatchEvent[] }> {
   const comments = await gh.paginate(gh.issues.listComments, {
     ...repo,
     issue_number: workload.issueNumber,
@@ -116,7 +124,11 @@ async function readIssueLinks(
       ...(resolution !== '' ? { resolution } : {}),
     });
   }
-  return { current: [...current.values()], everItems };
+  // Comment order is write order, and the dispatch reader's contract is that the last
+  // entry is the newest dispatch — so the page order is passed through untouched, not
+  // re-sorted the way the links are (their order would leak write history into a value
+  // callers compare).
+  return { current: [...current.values()], everItems, dispatches: parseBuildDispatchEvents(comments.map((c) => c.body)) };
 }
 
 /** Current link state only — what the record/resolve paths compare against. */
@@ -138,14 +150,17 @@ interface LinkHistory {
   archived: boolean;
   links: XLink[];
   everItems: number[];
+  /** every build this workload's timeline records, oldest first — carried because the
+   *  same pagination produced it, and dropped by every caller that only wants links */
+  dispatches: BuildDispatchEvent[];
 }
 
 /** Reads are per workload issue and independent of each other (FR-046), hence concurrent. */
 async function readHistories(gh: Octokit, repo: RepoRef, workloads: Workload[]): Promise<LinkHistory[]> {
   return Promise.all(
     workloads.map(async (workload) => {
-      const { current, everItems } = await readIssueLinks(gh, repo, workload);
-      return { slug: workload.slug, archived: workload.state === 'archived', links: current, everItems };
+      const { current, everItems, dispatches } = await readIssueLinks(gh, repo, workload);
+      return { slug: workload.slug, archived: workload.state === 'archived', links: current, everItems, dispatches };
     }),
   );
 }
@@ -170,6 +185,42 @@ async function collectLinks(gh: Octokit, repo: RepoRef, slugs: string[]): Promis
  */
 export async function listXLinks(gh: Octokit, repo: RepoRef, slug: string): Promise<XLink[]> {
   return collectLinks(gh, repo, [slug]);
+}
+
+/** Both records one workload issue's timeline carries, from ONE pass over it. */
+export interface WorkloadIssueRecords {
+  /** exactly what `listXLinks` returns for this slug */
+  links: XLink[];
+  /** every build ever dispatched for this workload, in the order the comments were
+   *  written — so the last entry is the newest dispatch, and the newest dispatch of one
+   *  work item is the last whose `chunk` matches */
+  dispatches: BuildDispatchEvent[];
+}
+
+/**
+ * The cross-workload links AND the build dispatches on one workload's issue, read once.
+ *
+ * A SIBLING RATHER THAN A WIDER `listXLinks` because the two have different audiences:
+ * every other caller — the portfolio rollup, the conflict panels, the integration suites
+ * — wants links and nothing else, and would have to unwrap a pair to get them. The
+ * workload card is the one surface that wants both, because its work-item rows say what
+ * each item's last build did.
+ *
+ * WHY IT SHARES THE PAGINATION RATHER THAN ADDING A READ. The dispatch record has been
+ * written on every build since the feature shipped and read by nothing, and the reason
+ * it stayed unread is the render budget: /workloads already paginates this exact comment
+ * page once per card. A second pass to fold in a parse the first pass could have done
+ * would make the row's history cost a read per workload, which is the price the decision
+ * of 2026-09-12 refused to pay. Callers that want links alone pay nothing for this — the
+ * parse is over bodies already in memory.
+ */
+export async function listXLinksAndDispatches(gh: Octokit, repo: RepoRef, slug: string): Promise<WorkloadIssueRecords> {
+  const workloads = await loadWorkloads(gh, repo);
+  const histories = await readHistories(gh, repo, workloadsOf(workloads, [slug]));
+  return {
+    links: sortLinks(histories.flatMap((history) => history.links)),
+    dispatches: histories.flatMap((history) => history.dispatches),
+  };
 }
 
 /** Item refs are operator input: a zero, a negative, or a fractional issue number would be
@@ -488,7 +539,10 @@ export async function propagateConflictFlags(
   const jurisdiction = new Set(scoped.flatMap((history) => history.everItems));
   // Nothing these slugs' history names means nothing here can be added or removed — skip
   // both the portfolio read and the repo-wide label scan rather than paginating every issue
-  // to conclude "no change" (the reconciliation loop calls this on every dispatch).
+  // to conclude "no change". The callers are `recordXLink` and `resolveXLink` and nothing
+  // else, so this runs on a cross-workload link write rather than on any hot path; the
+  // early return is still worth it because the scan it skips is repo-wide and this is the
+  // common case — most link writes name a pair whose history has flagged nothing.
   if (jurisdiction.size === 0) return { added: [], removed: [] };
 
   const namedSlugs = new Set(named.map((workload) => workload.slug));

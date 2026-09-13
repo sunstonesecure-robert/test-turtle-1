@@ -5,6 +5,7 @@ import type { RepoRef } from './client';
 // itself is always DERIVED by the caller with commitmentScope() — this module
 // never re-derives it (checks-scope.ts's one-derivation invariant, FR-010).
 import type { CommitmentScope } from '../../../scripts/gates/lib/checks-scope';
+import type { PlanDoc } from '../../../schemas/plan';
 
 /**
  * Verification-target results & the completion verdict (FR-034, SC-002).
@@ -31,10 +32,35 @@ export interface VtCheckRun {
   status: string;
   /** null until the run reaches a conclusion */
   conclusion: string | null;
+  /**
+   * Where the operator reads what this check actually reported.
+   *
+   * A failing target is where a completion refusal ends, so the name and the word
+   * `failure` are not enough — the next question is always "failed how". GitHub
+   * offers two links and either answers it: `html_url` is the check's own page,
+   * `details_url` is wherever the reporting app points (for an Actions-reported
+   * check, its job). The page is preferred because it is the check itself; the
+   * app's link is the fallback. Null when the payload carried neither, which is
+   * the only case a caller has to render as text.
+   */
+  detailsUrl: string | null;
 }
 
-/** Per-target verdict; `unverified` means no result was ever reported. */
-export type VtStatus = 'passing' | 'failing' | 'unverified';
+/**
+ * Per-target verdict.
+ *
+ * `unverified` means no result was ever reported and the step it maps to HAS been
+ * delivered — something should have reported and did not. `not-built` means no result
+ * was reported because the step has no merged deliverable yet, which is not a problem
+ * with the target at all (GHI #231). Both are unmet and both keep completion refused;
+ * they are separated because their remedies are opposites — one is "find out why the
+ * verification did not report", the other is "build the step".
+ *
+ * They were one word until 2026-09-13, and the cost of that was an 8-step plan
+ * stamping ~15 red check runs on its first deliverable, each telling the operator to
+ * "fix the step and re-run the build" for a step nobody had dispatched.
+ */
+export type VtStatus = 'passing' | 'failing' | 'unverified' | 'not-built';
 
 export interface VtTargetStatus {
   vtId: string;
@@ -43,6 +69,42 @@ export interface VtTargetStatus {
   status: VtStatus;
   /** the latest run's conclusion; null when unverified or not yet concluded */
   conclusion: string | null;
+  /**
+   * The latest run's own page, carried through so the table that renders this
+   * verdict can offer a way in. Null on an `unverified` target, which has no run
+   * to open by definition — not a degraded link, an absent one.
+   */
+  detailsUrl: string | null;
+}
+
+/**
+ * What has been BUILT, for the remedy sentence — not for the verdict, which is
+ * unchanged by it (GHI #231).
+ *
+ * Every field here comes from reads the callers already perform:
+ * `resolveVerifiedCommit` carries `deliveredStepIds` out of the deliverable listing it
+ * fetches anyway, and the tracking issue is on the plan document the caller has
+ * already parsed. So this costs no API call on any of the three paths that derive a
+ * completion verdict — the panel, lifecycle gate L3, and the subject verifier — which
+ * is what lets all three carry the SAME sentence instead of the panel alone getting
+ * the good one.
+ */
+export interface DeliveryContext {
+  /** steps with a merged deliverable, under any version of this workload's plan */
+  deliveredStepIds: ReadonlySet<string>;
+  /** stepId → the work item that tracks it (plan `tracking_issue`), so the remedy can
+   *  name the thing the operator dispatches rather than the step id alone */
+  trackingIssueByStepId: ReadonlyMap<string, number>;
+}
+
+/** Build a `DeliveryContext` from a plan and the delivered step ids — the one place
+ *  the `tracking_issue` mapping is formed, so three callers cannot form it three ways. */
+export function deliveryContext(plan: PlanDoc, deliveredStepIds: readonly string[]): DeliveryContext {
+  const trackingIssueByStepId = new Map<string, number>();
+  for (const step of plan.steps) {
+    if (typeof step.tracking_issue === 'number') trackingIssueByStepId.set(step.id, step.tracking_issue);
+  }
+  return { deliveredStepIds: new Set(deliveredStepIds), trackingIssueByStepId };
 }
 
 export interface CompletionVerdict {
@@ -101,7 +163,12 @@ export async function listVtCheckRuns(gh: Octokit, repo: RepoRef, sha: string): 
     if (!VT_NAME_RE.test(raw.name)) return;
     const startedMs = raw.started_at ? Date.parse(raw.started_at) : Number.NaN;
     const candidate: RankedRun = {
-      run: { name: raw.name, status: raw.status, conclusion: raw.conclusion ?? null },
+      run: {
+        name: raw.name,
+        status: raw.status,
+        conclusion: raw.conclusion ?? null,
+        detailsUrl: raw.html_url ?? raw.details_url ?? null,
+      },
       startedMs: Number.isNaN(startedMs) ? null : startedMs,
       id: typeof raw.id === 'number' ? raw.id : null,
       index,
@@ -115,6 +182,18 @@ export async function listVtCheckRuns(gh: Octokit, repo: RepoRef, sha: string): 
 /** How a non-success run reads in a refusal: the conclusion, or why there is none. */
 function conclusionLabel(run: VtCheckRun): string {
   return run.conclusion ?? `${run.status} (no conclusion yet)`;
+}
+
+/** The work items an operator dispatches for these steps, or the steps themselves when
+ *  the plan binds no tracking issue (G17 makes that impossible on a frozen plan, but a
+ *  sentence that says `undefined` is worse than one that names the step). */
+function workItemsPhrase(stepIds: string[], delivery: DeliveryContext): string {
+  return stepIds
+    .map((id) => {
+      const issue = delivery.trackingIssueByStepId.get(id);
+      return issue === undefined ? `step '${id}'` : `work item #${issue} (${id})`;
+    })
+    .join(', ');
 }
 
 function stepsPhrase(mustStepIds: string[]): string {
@@ -133,6 +212,10 @@ export function deriveCompletionStatus(
   slug: string,
   scope: CommitmentScope | null,
   runs: ReadonlyMap<string, VtCheckRun>,
+  /** which steps have been built, for the REMEDY only (GHI #231). Omitted, every
+   *  target with no check run gets the older sentence, which is weaker but never
+   *  wrong — the verdict itself does not depend on this argument at all. */
+  delivery?: DeliveryContext,
 ): CompletionVerdict {
   if (scope === null) {
     return {
@@ -162,9 +245,25 @@ export function deriveCompletionStatus(
   for (const [vtId, mustStepIds] of mustStepsByVt) {
     const run = runs.get(vtId);
     if (!run) {
-      targets.push({ vtId, mustStepIds, status: 'unverified', conclusion: null });
+      // WHY there is no check run decides the remedy, and until 2026-09-13 the only
+      // sentence available assumed a build had already run. `build-verify` does not
+      // report a target whose step has no merged deliverable (GHI #231), so on a
+      // part-delivered plan this is the ORDINARY case, not an anomaly.
+      const notBuilt = delivery === undefined ? [] : mustStepIds.filter((id) => !delivery.deliveredStepIds.has(id));
+      if (notBuilt.length > 0) {
+        targets.push({ vtId, mustStepIds, status: 'not-built', conclusion: null, detailsUrl: null });
+        unmet.push(
+          `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) has not been verified because ` +
+            `${stepsPhrase(notBuilt)} ${notBuilt.length > 1 ? 'have' : 'has'} not been delivered yet — ` +
+            `dispatch the build for ${workItemsPhrase(notBuilt, delivery!)}. This is not a failing target`,
+        );
+        continue;
+      }
+      targets.push({ vtId, mustStepIds, status: 'unverified', conclusion: null, detailsUrl: null });
       unmet.push(
-        `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) is unverified — no ${vtId} check run exists on the frozen plan SHA; run the build for the frozen plan so its result is reported`,
+        `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) is unverified — its ${stepsPhrase(mustStepIds)} ` +
+          `${mustStepIds.length > 1 ? 'have' : 'has'} been delivered but no ${vtId} check run exists on the commit ` +
+          'these results are read on; re-run the build so its result is reported',
       );
       continue;
     }
@@ -172,12 +271,17 @@ export function deriveCompletionStatus(
     // neutral/skipped run included. Completion never passes open (the same
     // fail-closed stance as the gates' exit 3).
     if (run.conclusion === 'success') {
-      targets.push({ vtId, mustStepIds, status: 'passing', conclusion: run.conclusion });
+      targets.push({ vtId, mustStepIds, status: 'passing', conclusion: run.conclusion, detailsUrl: run.detailsUrl });
       continue;
     }
-    targets.push({ vtId, mustStepIds, status: 'failing', conclusion: run.conclusion });
+    targets.push({ vtId, mustStepIds, status: 'failing', conclusion: run.conclusion, detailsUrl: run.detailsUrl });
     unmet.push(
-      `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) concluded '${conclusionLabel(run)}', not success — fix the step and re-run the build so a passing result lands on the frozen plan SHA`,
+      // NOT "the frozen plan SHA" (GHI #231). Results are read on the MERGED
+      // DELIVERABLE COMMIT since US18 — a different commit from the frozen tag's on
+      // any plan that has produced a deliverable — and this sentence named the wrong
+      // one while `resolveVerifiedCommit` had already moved the read. A remedy that
+      // points at the wrong commit is a remedy an operator cannot follow.
+      `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) concluded '${conclusionLabel(run)}', not success — fix the step and re-run the build so a passing result lands on the commit these results are read on`,
     );
   }
 

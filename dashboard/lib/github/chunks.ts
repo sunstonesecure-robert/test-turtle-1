@@ -13,6 +13,7 @@ import {
 import { CONTRADICTION_LABEL } from './labels';
 import { parsePlanRef, tryReadPlanAtRef, workItemsOf } from './plans';
 import { mergeRecheck } from './read-after-write';
+import { inertLogin } from '../actor-identity';
 
 export { parseDerivationMarker, serializeDerivationMarker, type DerivationMarker } from './markers';
 
@@ -105,7 +106,7 @@ export function renderChunkBody(
   const provenance = derivedFrom
     ? [
         serializeDerivationMarker({ planRef: derivedFrom.planRef, stepId: derivedFrom.stepId, digest: requirementDigest(fields) }),
-        `_Derived from step \`${derivedFrom.stepId}\` of \`${derivedFrom.planRef}\` by @${derivedFrom.actor} at ${derivedFrom.at}._`,
+        `_Derived from step \`${derivedFrom.stepId}\` of \`${derivedFrom.planRef}\` by ${inertLogin(derivedFrom.actor)} at ${derivedFrom.at}._`,
         '',
       ]
     : [];
@@ -842,7 +843,7 @@ export async function reconcileDerivedChunk(
       ...repo,
       issue_number: input.issueNumber,
       body:
-        `**Title updated from step \`${input.step.id}\` of \`${input.planRef}\`** by @${input.actor} at ${input.at} — ` +
+        `**Title updated from step \`${input.step.id}\` of \`${input.planRef}\`** by ${inertLogin(input.actor)} at ${input.at} — ` +
         `the step was renamed and its requirement is unchanged, so the intent confirmation on record still stands.`,
     });
     await gh.issues.update({ ...repo, issue_number: input.issueNumber, title: derived.title });
@@ -854,7 +855,7 @@ export async function reconcileDerivedChunk(
     ...repo,
     issue_number: input.issueNumber,
     body:
-      `**Requirement rewritten from step \`${input.step.id}\` of \`${input.planRef}\`** by @${input.actor} at ${input.at} — ` +
+      `**Requirement rewritten from step \`${input.step.id}\` of \`${input.planRef}\`** by ${inertLogin(input.actor)} at ${input.at} — ` +
       `the step changed since this work item was derived, so the item now says what the plan says.` +
       (confirmationCleared
         ? ' The intent confirmation on record was given to the previous text and no longer authorizes an unattended build: confirm intent again on the row.'
@@ -866,7 +867,7 @@ export async function reconcileDerivedChunk(
     title: derived.title,
     body: [
       serializeDerivationMarker({ planRef: input.planRef, stepId: input.step.id, digest }),
-      `_Derived from step \`${input.step.id}\` of \`${input.planRef}\` by @${input.actor} at ${input.at}._`,
+      `_Derived from step \`${input.step.id}\` of \`${input.planRef}\` by ${inertLogin(input.actor)} at ${input.at}._`,
       '',
       renderChunkBody(expected),
     ].join('\n'),
@@ -936,7 +937,7 @@ export async function closeDerivedChunks(
       // Blockquote continuation so a multi-line reason renders fully on GitHub.
       body:
         `**Work item closed**: the proposal it was derived from (\`${derivedFrom.planRef}\`, step \`${derivedFrom.stepId}\`) ` +
-        `was withdrawn by @${input.actor} at ${input.at}, and no approved plan tracks this item.\n> ${reason.replace(/\n/g, '\n> ')}`,
+        `was withdrawn by ${inertLogin(input.actor)} at ${input.at}, and no approved plan tracks this item.\n> ${reason.replace(/\n/g, '\n> ')}`,
     });
     await gh.issues.update({ ...repo, issue_number: chunk.issueNumber, state: 'closed' });
     closed.push({ issueNumber: chunk.issueNumber, planRef: derivedFrom.planRef, stepId: derivedFrom.stepId });

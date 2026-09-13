@@ -3,7 +3,8 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
-import { readPlanAtRef } from '../dashboard/lib/github/plans';
+import { readPlanAtRef, slugFromPlanRef } from '../dashboard/lib/github/plans';
+import { listDeliverablePrs } from '../dashboard/lib/github/builds';
 import { parseDeliverableMarker } from '../dashboard/lib/github/markers';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import type { PlanDoc } from '../schemas/plan';
@@ -75,10 +76,56 @@ import type { CheckConclusion } from './vt-report';
  * work however many deliverables have landed, and B9 has already proved the subject
  * descends from it, so the two trees sit on one line of history by construction.
  *
- * THE RESIDUAL, NAMED RATHER THAN HIDDEN. A plan RE-OPENED and re-frozen (FR-008) after
- * some of its steps had already landed carries that work in the new tag's tree, so those
- * steps' targets pass on the base and are demoted. Real, narrower than the first-parent
- * defect, and tracked on GHI #234 — not silently accepted here.
+ * THE RESIDUAL, CLOSED (GHI #234, option 2; 2026-09-13). A plan RE-OPENED and re-frozen
+ * (FR-008) after some of its steps had already landed carries that work in the new tag's
+ * tree, so those steps' targets passed on the base and were falsely demoted — and there
+ * was no exit, because no command can fail on a tree that contains the step, and
+ * re-opening again only enlarges the baseline. The control now SKIPS a target any of
+ * whose mapped steps merged BEFORE the frozen tag was cut: its work is in the baseline
+ * by construction, so a comparison against that baseline answers nothing about it. This
+ * needed no new mechanism — every deliverable pull request already carries `planRef` +
+ * `stepId` in its `deliverable:v1` marker with an immutable `mergedAt`, and the tag's own
+ * commit date comes from the base checkout.
+ *
+ * ANY mapped step in the baseline skips the control, not ALL of them. A target mapping to
+ * one delivered and one undelivered step might still discriminate, or might not, and this
+ * runner cannot tell which without reading the command. The two errors are not
+ * symmetrical: a FALSE DEMOTION blocks completion permanently with no operator remedy
+ * except retracting the commitment, while a MISSED demotion leaves that one target
+ * un-controlled — which is exactly where every target stood before GHI #230 — and is
+ * printed. So it fails toward not demoting, loudly.
+ *
+ * WHAT THIS STILL DOES NOT COVER, named so it is not rediscovered as a surprise. The
+ * frozen tag's tree is the default branch at approval, not an empty tree, so work that
+ * reached the default branch by a NON-DELIVERABLE route — `npm run init` writing
+ * `.github/workflows/**`, another workload's deliverable merging, an operator's hand
+ * edit — is in the baseline too and leaves no marker to read. Such a target can still be
+ * demoted with no re-open having happened. The log line for a demotion names both causes
+ * and their opposite remedies for exactly this reason.
+ *
+ * ONLY A DELIVERED STEP'S TARGET IS REPORTED AT ALL (GHI #231; operator decision
+ * 2026-09-13). `targetsToVerify` returns every target of the plan, so an 8-MUST-step plan
+ * with one delivered step used to stamp 4 success / 15 failure onto its first deliverable
+ * — and the 15 were targets for steps that had never been dispatched, each carrying the
+ * remedy *"fix the step and re-run the build"* for a step there was nothing wrong with.
+ * Roughly 105 red check runs across a plan delivered one item at a time, consumed by
+ * nothing: L3 reads only the newest merge commit, so an intermediate red has no
+ * mechanical effect at all (that one-commit read is GHI #250, and closing it is what would
+ * revive ADR-0004's option (c)). Fifteen instructions naming a nonexistent remedy is how an
+ * operator is trained to stop reading red.
+ *
+ * So a target is executed and reported only when EVERY step it maps to has a merged
+ * deliverable. The rest are recorded as not-yet-delivered and given no check run, which
+ * the completion panel already has the vocabulary for: an absent check run is
+ * `unverified`, and L3 fails closed on an unverified MUST target exactly as it does on a
+ * red one (`checks.ts` pushes an `unmet` entry either way). THIS CANNOT CREATE A FALSE
+ * COMPLETION — it was checked against `deriveCompletionStatus` rather than assumed — and
+ * it makes the panel's sentence true: the remedy for a step nobody built is to build it.
+ *
+ * ALL VERSIONS OF THE WORKLOAD'S PLAN COUNT AS DELIVERY, not only this one. The question
+ * is "is this step's work on the default branch?", and a step delivered under `v2` is
+ * still in the tree after a re-open to `v3`. Keying on the current `planRef` would
+ * un-deliver every earlier step at every re-open and put the reds straight back.
  *
  * WHY THIS AND NOT A LINT OF THE COMMAND TEXT. Found live on 2026-09-11: of 19 targets
  * on `plan/lza-phase0-0/v2`, three reported `success` against merge base `2847f881`, a
@@ -151,6 +198,77 @@ export interface VerifyOutcome {
   /** targets that passed on the subject AND on the tree the deliverable landed on, so
    *  they witnessed nothing and were recorded `action_required` (GHI #230) */
   nonDiscriminating: string[];
+  /** targets NOT executed and NOT reported because a step they map to has no merged
+   *  deliverable yet, with the step ids still outstanding (GHI #231) */
+  notYetDelivered: { id: string; pendingStepIds: string[] }[];
+  /** targets whose green stands WITHOUT a negative control, because a step they map to
+   *  was already in the frozen tag's tree when it was cut (GHI #234) */
+  controlSkipped: { id: string; baselineStepIds: string[] }[];
+}
+
+/** One merged deliverable, reduced to what delivery scope needs. */
+export interface MergedDelivery {
+  /** the step its `deliverable:v1` marker names */
+  stepId: string;
+  /** GitHub's immutable `merged_at` */
+  mergedAt: string;
+}
+
+/**
+ * What has actually landed, as the two questions this runner asks of it.
+ *
+ * Derived ONCE per run and passed in, rather than re-asked per target: the two
+ * questions are about the same set of facts, and a runner that re-read them could
+ * report a target against one answer and control it against another.
+ */
+export interface DeliveryRecord {
+  /** steps with a merged deliverable under ANY version of this workload's plan —
+   *  "is this step's work on the default branch?" (GHI #231) */
+  delivered: ReadonlySet<string>;
+  /** steps whose deliverable merged BEFORE the frozen tag was cut, so the negative
+   *  control's baseline already contains their work (GHI #234) */
+  inBaseline: ReadonlySet<string>;
+}
+
+/**
+ * PURE: the delivery record, from the merged deliverables and the moment the frozen
+ * tag's own commit was made.
+ *
+ * `baselineCommittedAt` null means the baseline's date could not be read — every step
+ * is then treated as NOT in the baseline, so the control still runs. That is the
+ * fail-open direction, and it is the right one here: an un-skipped control can only
+ * produce a demotion the operator can read and argue with, whereas skipping on an
+ * unknown date would silently switch the GHI #230 control off for the whole plan.
+ */
+export function deriveDeliveryRecord(
+  deliveries: readonly MergedDelivery[],
+  baselineCommittedAt: string | null,
+): DeliveryRecord {
+  const delivered = new Set<string>();
+  const inBaseline = new Set<string>();
+  const baselineMs = baselineCommittedAt === null ? null : Date.parse(baselineCommittedAt);
+  for (const { stepId, mergedAt } of deliveries) {
+    delivered.add(stepId);
+    const mergedMs = Date.parse(mergedAt);
+    // STRICTLY BEFORE. A deliverable that merged at the same instant the approval
+    // commit was made is not in that commit's tree — the tag is cut from a merge that
+    // had already happened, so equality means "not included".
+    if (baselineMs !== null && !Number.isNaN(mergedMs) && !Number.isNaN(baselineMs) && mergedMs < baselineMs) {
+      inBaseline.add(stepId);
+    }
+  }
+  return { delivered, inBaseline };
+}
+
+/** When the frozen tag's own commit was made, read from the control's checkout — no
+ *  API call, because the base checkout IS that commit. Null when it cannot be read,
+ *  which `deriveDeliveryRecord` treats as "nothing is in the baseline". */
+export function baselineCommittedAt(baseCwd: string): string | null {
+  try {
+    return git(baseCwd, ['log', '-1', '--format=%cI', 'HEAD']).trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 /** One target's execution in one checkout — the verdict plus what the tree looked like
@@ -176,6 +294,31 @@ interface TargetRun {
 function executeTarget(run: string, cwd: string, env: NodeJS.ProcessEnv): TargetRun {
   const before = snapshotCheckout(cwd);
   const started = Date.now();
+  // THE `-euo pipefail` BELOW IS INERT FOR THE SHAPE EVERY LIVE TARGET HAS, and saying
+  // so here is GHI #232's third complement — it reads as hardening and is not, and a
+  // reader who assumes otherwise will trust a green this flag did nothing to earn.
+  //
+  //   bash -euo pipefail -c 'false; true'             # exit 1 — the outer -e works
+  //   bash -euo pipefail -c "bash -c 'false; true'"   # exit 0 — and this was all 19
+  //                                                   #   targets on the live plan
+  //
+  // Every target re-enters a fresh `bash -c` / `sh -c` / `python3 -c`, so the outer
+  // errexit only ever observes ONE child process's status: the inner shell's, which is
+  // its own last command's. The flags are kept because they cost nothing and do bind a
+  // target written as a flat command — they simply are not the protection they look
+  // like for the nested form.
+  //
+  // THE ALTERNATIVE IS A DECISION, NOT A REFACTOR, and it is not taken here. Wrapping
+  // the target's BODY rather than the invocation (`bash -c "set -euo pipefail; $run"`)
+  // would make it real — and would change the MEANING of every `run` already frozen
+  // into a plan tag, which is a Frozen-Artifact Compatibility question (GHI #151's
+  // family) rather than an implementation choice, and it is filed as GHI #249. G19 now
+  // lints the outer shape at approval instead, where a command is still editable without
+  // a re-open, and the negative control catches what no lint can. GHI #232.
+  //
+  // `tests/unit/build-verify.test.ts` reproduces `vt-config-six` with the nested
+  // `bash -c` deliberately, with this contrast in its comment, because a flat
+  // reproduction passes for the wrong reason.
   const proc = spawnSync('bash', ['-euo', 'pipefail', '-c', run], {
     cwd,
     env,
@@ -303,8 +446,19 @@ export function mustMappedTargetIds(plan: PlanDoc): string[] {
  *                 for the negative control. Omitted, the control does not run and the
  *                 runner says so loudly: a green with no control behind it is exactly
  *                 what GHI #230 is about, and it must not pass unremarked.
+ * @param delivery which steps have landed, and which were already in the baseline
+ *                 (GHI #231 and #234). Omitted, EVERY target is reported and every green
+ *                 is controlled — the pre-2026-09-13 behaviour, kept so the CLI stays
+ *                 runnable by hand against two checkouts with no repository access, and
+ *                 said out loud in the summary because both defects come back with it.
  */
-export function runVerification(plan: PlanDoc, planRef: string, cwd: string, baseCwd?: string): VerifyOutcome {
+export function runVerification(
+  plan: PlanDoc,
+  planRef: string,
+  cwd: string,
+  baseCwd?: string,
+  delivery?: DeliveryRecord,
+): VerifyOutcome {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const key of CREDENTIAL_ENV) delete env[key];
 
@@ -312,6 +466,8 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
   const unexecutable: string[] = [];
   const mutated: { id: string; changes: string[] }[] = [];
   const nonDiscriminating: string[] = [];
+  const notYetDelivered: { id: string; pendingStepIds: string[] }[] = [];
+  const controlSkipped: { id: string; baselineStepIds: string[] }[] = [];
   const mustIds = new Set(mustMappedTargetIds(plan));
 
   // The control's tree, or `undefined` for "no control". Resolved ONCE, before any
@@ -333,6 +489,23 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
   }
 
   for (const target of targetsToVerify(plan)) {
+    // DELIVERY SCOPE FIRST (GHI #231), before anything is executed or classified. A
+    // target whose step has not been built is not a failing target, not an
+    // unexecutable one, and not this run's business — it is a target whose subject
+    // does not exist yet. Asked before the `run` check so a MUST target with no `run`
+    // whose step is also unbuilt is reported as the one thing the operator can act on.
+    if (delivery !== undefined) {
+      const pendingStepIds = target.maps_to.filter((id) => !delivery.delivered.has(id));
+      if (pendingStepIds.length > 0) {
+        notYetDelivered.push({ id: target.id, pendingStepIds });
+        console.log(
+          `– ${target.id}: not reported — step${pendingStepIds.length > 1 ? 's' : ''} ${pendingStepIds.join(', ')} ` +
+            'ha' + (pendingStepIds.length > 1 ? 've' : 's') + ' no merged deliverable yet, so this target has nothing ' +
+            'to judge. No check run is created; completion (L3) reads it as unverified and stays refused. GHI #231',
+        );
+        continue;
+      }
+    }
     if (!target.run) {
       if (mustIds.has(target.id)) unexecutable.push(target.id);
       console.log(`– ${target.id}: no \`run\` — not executable deterministically, NOT reported`);
@@ -345,8 +518,16 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
     // THE NEGATIVE CONTROL (GHI #230). Only a green needs one: a target that already
     // failed on the subject is not a false green, and re-running it would cost a second
     // execution to learn nothing.
+    // THE BASELINE ALREADY HOLDS THIS STEP (GHI #234). A control run against a tree
+    // that contains the work cannot discriminate, and its inevitable pass would demote
+    // a legitimately delivered step with no remedy left but retracting the commitment.
+    // Skipped rather than run-and-ignored so the cost is not paid either.
+    const baselineStepIds =
+      delivery === undefined ? [] : target.maps_to.filter((id) => delivery.inBaseline.has(id));
     let base: TargetRun | null = null;
-    if (conclusion === 'success' && control !== undefined) {
+    if (conclusion === 'success' && control !== undefined && baselineStepIds.length > 0) {
+      controlSkipped.push({ id: target.id, baselineStepIds });
+    } else if (conclusion === 'success' && control !== undefined) {
       base = executeTarget(target.run, control, env);
       // ONLY exit 0 demotes. A spawn error, a timeout or a mutation on the base tree
       // means the control could not be performed — and "could not ask" must never read
@@ -368,6 +549,15 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
           'result about a tree the merge commit does not contain is not a result about the commit; checkout reset before the next target',
       );
       resetCheckout(cwd, subject.before.head);
+    }
+    if (base === null && baselineStepIds.length > 0 && conclusion === 'success' && control !== undefined) {
+      console.log(
+        `  NO NEGATIVE CONTROL for this target (GHI #234): step${baselineStepIds.length > 1 ? 's' : ''} ` +
+          `${baselineStepIds.join(', ')} already merged BEFORE ${planRef} was cut, so the frozen tree contains ` +
+          'that work and a control against it could only pass — which would demote a step that was legitimately ' +
+          'delivered and legitimately verified. The green stands UNCONTROLLED: it is evidence the target passed on ' +
+          'the merged commit, and not evidence that it would have failed without the work.',
+      );
     }
     if (base !== null) {
       if (nonDiscriminating.includes(target.id)) {
@@ -402,7 +592,59 @@ export function runVerification(plan: PlanDoc, planRef: string, cwd: string, bas
     }
     results.push({ id: target.id, conclusion });
   }
-  return { planRef, results, unexecutable, mutated, nonDiscriminating };
+  return { planRef, results, unexecutable, mutated, nonDiscriminating, notYetDelivered, controlSkipped };
+}
+
+/**
+ * What this workload has delivered, and what of it was already in the baseline
+ * (GHI #231 and #234) — ONE read, serving both questions.
+ *
+ * Every deliverable pull request carries `planRef` + `stepId` in its `deliverable:v1`
+ * marker, written by the deterministic `build-publish` and never taken from a caller,
+ * and `listDeliverablePrs` surfaces the marker alongside GitHub's immutable
+ * `merged_at`. So neither of these facts needed a new mechanism or a new record at
+ * freeze time — that is what made option 2 the answer on #234 and what lets #231's
+ * scoping cost nothing extra.
+ *
+ * A FAILED READ THROWS. If this runner cannot learn what has been delivered it cannot
+ * know which targets to report, and both ways of guessing are bad: report everything
+ * and the plan is back to stamping ~15 reds whose remedy does not exist; report
+ * nothing and a verify run produces no check runs at all while looking like it ran —
+ * the absent-≠-success shape, in the one pipeline that must never have it. "Could not
+ * ask" is not an answer here either.
+ */
+export async function readDeliveryRecord(
+  gh: Octokit,
+  repo: RepoRef,
+  planRef: string,
+  baseCwd?: string,
+): Promise<DeliveryRecord> {
+  const slug = slugFromPlanRef(planRef);
+  if (slug === null) {
+    throw new Error(
+      `cannot determine delivery scope: "${planRef}" is not a frozen plan ref (plan/<slug>/v<N>), so there is no ` +
+        'workload to ask which steps have merged (GHI #231)',
+    );
+  }
+  const prs = await listDeliverablePrs(gh, repo, slug);
+  // ANY version of this workload's plan counts (see the module docblock): the question
+  // is whether the step's work is on the default branch, and a re-open does not remove
+  // an earlier version's merged deliverable from the tree.
+  const deliveries: MergedDelivery[] = prs
+    .filter((pr) => pr.merged && pr.mergedAt !== null && pr.marker !== null)
+    .map((pr) => ({ stepId: pr.marker!.stepId, mergedAt: pr.mergedAt! }));
+  const record = deriveDeliveryRecord(deliveries, baseCwd === undefined ? null : baselineCommittedAt(baseCwd));
+  if (record.delivered.size === 0) {
+    // The read SUCCEEDED and the answer is none — a different thing from the throw
+    // above, and it must not look like it. Every target is out of scope and no check
+    // run will be created, which is correct and would otherwise be indistinguishable
+    // from a broken run.
+    console.log(
+      `no merged deliverable exists for workload "${slug}" — every verification target is out of scope for this run ` +
+        'and NO check run will be created. This is the read succeeding with an empty answer, not a failure to read.',
+    );
+  }
+  return record;
 }
 
 export async function buildVerify(
@@ -413,7 +655,8 @@ export async function buildVerify(
   baseCwd?: string,
 ): Promise<VerifyOutcome> {
   const plan = await readPlanAtRef(gh, repo, planRef);
-  return runVerification(plan, planRef, cwd, baseCwd);
+  const delivery = await readDeliveryRecord(gh, repo, planRef, baseCwd);
+  return runVerification(plan, planRef, cwd, baseCwd, delivery);
 }
 
 /**
@@ -503,6 +746,31 @@ if (isMain) {
           `NOT VERIFIED (no \`run\` on a MUST-mapped target): ${outcome.unexecutable.join(', ')} — no check run will ` +
             'be recorded for these, so completion (L3) stays refused until the plan is re-opened to add an ' +
             'executable form or a conformant executor interprets them in verify mode.',
+        );
+      }
+      if (outcome.notYetDelivered.length > 0) {
+        // Loud, and NOT a failure: these targets were deliberately not executed. Said
+        // in the run log because the alternative reading of "no check run" is that the
+        // reporter broke, and this is the line that tells the two apart.
+        console.log(
+          `NOT REPORTED (their step has no merged deliverable yet, GHI #231): ${outcome.notYetDelivered
+            .map((t) => `${t.id} → ${t.pendingStepIds.join(', ')}`)
+            .join(' | ')}. No check run is created for these, so completion (L3) reads each as UNVERIFIED and stays ` +
+            'refused — which is the same refusal a red would produce, with the remedy that is actually true: build ' +
+            'the step. They are not failing targets.',
+        );
+      }
+      if (outcome.controlSkipped.length > 0) {
+        // Loud because it is a WEAKENING of the GHI #230 control, correctly applied. An
+        // operator auditing one of these greens must be able to see that nothing
+        // challenged it.
+        console.log(
+          `GREEN WITHOUT A NEGATIVE CONTROL (GHI #234): ${outcome.controlSkipped
+            .map((t) => `${t.id} → ${t.baselineStepIds.join(', ')}`)
+            .join(' | ')}. Each of these maps to a step that merged BEFORE this plan version was frozen, so the ` +
+            'frozen tree already contains the work and a control against it could only pass — demoting a step that ' +
+            'was legitimately delivered. The control is skipped rather than ignored; these greens say the target ' +
+            'passed on the merged commit and nothing more.',
         );
       }
       if (outcome.nonDiscriminating.length > 0) {

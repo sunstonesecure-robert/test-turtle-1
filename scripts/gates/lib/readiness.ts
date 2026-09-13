@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { ALL_LABELS } from '../../../dashboard/lib/github/labels';
+import { REQUIRED_CHECK_CONTEXTS } from '../../../dashboard/lib/github/required-checks';
 import { EVIDENCE_BRANCH } from '../../../dashboard/lib/github/evidence-store';
 import type { GateResult } from './runner';
 import { apiMessage, errorStatus } from '../../../dashboard/lib/github/errors';
@@ -87,12 +88,82 @@ export const DETERMINISTIC_WORKFLOWS = [
  */
 export const DELIVERABLE_WORKFLOWS = ['build-publish', 'deliverable-gate', 'build-merge', 'build-verify'] as const;
 
+/**
+ * STRUCTURAL FACTS a capability needs from an INSTALLED workflow (GHI #235, option 4).
+ *
+ * WHY THIS EXISTS. I5 and I7 ask whether a workflow FILE resolves. They have never
+ * looked at what is in it — so a target whose workflows are STALE (present, but from an
+ * older version of the product) reports **ready** while a capability it advertises is
+ * structurally broken, and the operator finds out by hitting the broken behaviour.
+ *
+ * PR #233 closed the instance that existed then by a different route: `RETIRED_TEMPLATES`
+ * already had to exist so `init` could DELETE `vt-report.yml`, and a target still
+ * carrying a retired path is by construction pre-migration. That works because that
+ * migration happened to retire a file. **A migration that only changes a file's contents
+ * leaves no such trace**, and this PR ships two of exactly that kind — which is what
+ * moved #235 from "someday" to "now".
+ *
+ * WHY OPTION 4 AND NOT A VERSION MARKER. A per-template marker (#235 option 1) touches
+ * all twenty templates and creates a thing that must be bumped and will be forgotten. A
+ * content digest (option 2) fails on ANY drift including an operator's deliberate local
+ * edit, which may be entirely legitimate. A single "installed at product commit X"
+ * record (option 3) says *something* is stale and not what. This table says exactly what
+ * is missing and exactly what breaks without it, costs one clause per migration, and is
+ * written at the moment the author knows the answer. It grows; that is the design, not a
+ * defect. Options 1–3 stay open for the day this list gets long.
+ *
+ * MEMBERSHIP RULE, so this does not become a second copy of the templates: a clause
+ * belongs here only when the structure is LOAD-BEARING for a capability that fails
+ * SILENTLY without it. Not "this file changed" — "without this line, the product
+ * advertises something it cannot do, and no surface says so".
+ */
+export interface StructuralClause {
+  /** the installed file, relative to `.github/workflows/` */
+  file: string;
+  /** what must appear in it */
+  pattern: RegExp;
+  /** what breaks, in the operator's terms — this becomes the unmet item's sentence */
+  breaks: string;
+}
+
+export const INSTALLED_STRUCTURE: readonly StructuralClause[] = [
+  {
+    // GHI #228: the reporter moved INTO build-verify as a second job, because a
+    // `workflow_run` caused by the built-in token does not fire onward and the
+    // standalone `vt-report.yml` therefore never started for an unattended merge.
+    file: 'build-verify.yml',
+    pattern: /^\s{2}report:/m,
+    breaks:
+      'no `vt-*` check run can reach a merge commit on the unattended path, so no pre-authorized deliverable can ' +
+      'ever be completed — the verification results exist only inside a run artifact',
+  },
+  {
+    // GHI #236: without this trigger the merge sweep is started only by the SWEEP copy
+    // of deliverable-gate, never by the `pull_request` copy concluding — which is the
+    // event that makes a raced merge merge-able. A pre-authorized deliverable then
+    // stalls behind a green run with no surface reporting it.
+    file: 'build-merge.yml',
+    pattern: /^\s{2}check_suite:/m,
+    breaks:
+      'a pre-authorized deliverable that loses the race with its own required check is never retried — it sits ' +
+      'open behind a green build-merge run until an operator dispatches the sweep by hand',
+  },
+];
+
 /** The required-status-check contexts the default-branch ruleset must carry.
  *  `plan-gate` blocks an unapproved plan from freezing; `deliverable-gate` blocks an
  *  ungated deliverable from landing. Registered together by `setup-repo.ts`, and
  *  asserted here — because a gate that runs without being REQUIRED reports its
- *  verdict and blocks nothing. */
-export const REQUIRED_CHECK_CONTEXTS = ['plan-gate', 'deliverable-gate'] as const;
+ *  verdict and blocks nothing.
+ *
+ *  DEFINED IN `required-checks.ts` and re-exported here (GHI #236). `build-merge` now
+ *  waits for these contexts to CONCLUDE before it asks GitHub to merge, and the Builds
+ *  page reads them to tell an in-flight deliverable from one that should have merged
+ *  and did not — both on the dashboard's side of the bundle boundary, which this
+ *  module is not. Re-exported rather than duplicated so the ruleset `setup-repo.ts`
+ *  registers, the names the gates publish under, and the contexts the merger waits on
+ *  remain one list. */
+export { REQUIRED_CHECK_CONTEXTS };
 /**
  * Templates `install.ts` vendors that I5 deliberately does NOT verify, each with
  * the reason. Membership here is a STATED choice; absence from both this map and
@@ -432,14 +503,37 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   // is invisible from every surface, which is exactly why readiness asserts it rather
   // than an operator eyeballing the Actions tab.
   const missingDeliverable: string[] = [];
+  // The installed text of each deliverable workflow, kept from the read that was
+  // already happening so the structural clauses below cost NO extra API call.
+  const installedText = new Map<string, string>();
   for (const workflow of DELIVERABLE_WORKFLOWS) {
+    const file = `${workflow}.yml`;
     try {
-      await gh.repos.getContent({ ...repo, path: `.github/workflows/${workflow}.yml` });
+      const { data } = await gh.repos.getContent({ ...repo, path: `.github/workflows/${file}` });
+      // `getContent` answers with a directory listing for a directory and omits
+      // `content` for a file too large to inline. Neither can happen for a workflow
+      // file, and neither is treated as "the structure is missing": a clause is only
+      // reported when the text was actually read and did not match.
+      if (!Array.isArray(data) && 'content' in data && typeof data.content === 'string') {
+        installedText.set(file, Buffer.from(data.content, 'base64').toString('utf8'));
+      }
     } catch (error: unknown) {
-      if (errorStatus(error) === 404) missingDeliverable.push(`${workflow}.yml`);
+      if (errorStatus(error) === 404) missingDeliverable.push(file);
       else throw error;
     }
   }
+  // STALE, NOT ABSENT (GHI #235). The file resolved; what is in it is from an older
+  // version of the product and the capability it advertises cannot work. Only checked
+  // for a file that was read — a missing file already has its own clause above, and
+  // reporting it twice would give one fault two remedies.
+  const staleStructure = INSTALLED_STRUCTURE.filter((clause) => {
+    const text = installedText.get(clause.file);
+    return text !== undefined && !clause.pattern.test(text);
+  }).map(
+    (clause) =>
+      `.github/workflows/${clause.file} is installed but STALE — it is missing the structure this product version ` +
+      `depends on, so ${clause.breaks}. Re-run \`npm run init\` against this target to install the current workflows`,
+  );
   // A RETIRED WORKFLOW STILL INSTALLED IS A STALE TARGET (Codex P2 on PR #233,
   // 2026-09-12). I7 asks whether the deliverable-path workflow FILES are present, and a
   // target initialized before a migration satisfies that with the OLD file — so
@@ -514,6 +608,10 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
   const recordedOn = canOpenPrs.source === 'recorded' && canOpenPrs.at ? ` on ${canOpenPrs.at}` : '';
   const deliverableUnmet = [
     ...(missingDeliverable.length ? [`missing deliverable-path workflows: ${missingDeliverable.join(', ')}`] : []),
+    // The general staleness answer (GHI #235), beside the one-file retired-path probe
+    // below it. The probe catches a migration that DELETED something; these catch one
+    // that only changed a file's contents, which leaves no trace to probe for.
+    ...staleStructure,
     ...(retiredStillInstalled.length
       ? [
           `this target still carries retired workflow(s): ${retiredStillInstalled.join(', ')} — it was initialized before ` +

@@ -2,7 +2,7 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import { planRefForMergedCommit } from './build-verify';
 import { listDeliverablePrs } from '../dashboard/lib/github/builds';
-import { deriveCompletionStatus, listVtCheckRuns } from '../dashboard/lib/github/checks';
+import { deriveCompletionStatus, deliveryContext, listVtCheckRuns } from '../dashboard/lib/github/checks';
 import { readPlanAtRef, slugFromPlanRef } from '../dashboard/lib/github/plans';
 import { commitmentScope } from './gates/lib/checks-scope';
 import type { Octokit } from '@octokit/rest';
@@ -80,7 +80,21 @@ export async function sweepUnverifiedMerge(
     if (slug === null) continue;
     // Asked of the check runs themselves, not of a label or a stored flag: the check
     // runs ARE the record completion reads, so they are the only honest answer.
-    const verdict = deriveCompletionStatus(slug, commitmentScope(await readPlanAtRef(gh, repo, planRef)), await listVtCheckRuns(gh, repo, sha));
+    const plan = await readPlanAtRef(gh, repo, planRef);
+    // Same derivation, same delivery context as L3 and the completion panel (GHI #231)
+    // — derived from the listing THIS function already holds rather than by calling
+    // `resolveVerifiedCommit`, which would re-read the same pull requests once per
+    // merged deliverable in the loop. Every version of the workload's plan counts: the
+    // question is whether the step's work is on the default branch.
+    const deliveredStepIds = merged
+      .filter((p) => slugFromPlanRef(p.marker!.planRef) === slug)
+      .map((p) => p.marker!.stepId);
+    const verdict = deriveCompletionStatus(
+      slug,
+      commitmentScope(plan),
+      await listVtCheckRuns(gh, repo, sha),
+      deliveryContext(plan, deliveredStepIds),
+    );
     if (!verdict.complete) return { sha, planRef };
   }
   return null;

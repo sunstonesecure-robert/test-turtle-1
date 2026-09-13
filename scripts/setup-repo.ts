@@ -474,6 +474,9 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
       else if (needsPolicy) changed.push(`deployment branch policy on environment ${environment}`);
       if (addedReviewer !== null) {
         changed.push(
+          // NOT A GITHUB MENTION — `changed[]` is printed to the terminal at the end of
+          // the run and written nowhere else; this file makes no content-writing call.
+          // The login is the operator's own, addressed as "you" in the same sentence.
           `environment ${environment}: @${addedReviewer} added as its first required reviewer (you — add teammates under Settings → Environments)`,
         );
       }

@@ -10,6 +10,7 @@ import { CONTRADICTION_LABEL } from './labels';
 // one moment a version becomes official, so the items that mirror its steps are brought
 // into line HERE, not at Commit for approval (GHI #212).
 import { reconcileFrozenPlanItems, type ReconciledChunk } from './chunks';
+import { plainLogin } from '../actor-identity';
 
 /**
  * Plan module (T033 tracer surface): read the plan document from a ref, resolve
@@ -534,7 +535,13 @@ export async function freezeApprovedPlan(
     const { data: tag } = await gh.git.createTag({
       ...repo,
       tag: tagRef,
-      message: `Frozen plan ${tagRef} approved by @${input.approver} at ${input.approvedAt}`,
+      // An ANNOTATED TAG message, shown on the tags and releases pages. Like a
+      // commit message it is not GFM, so a code span would not suppress a mention
+      // there — `plainLogin` drops the at-sign instead, which is what linkification
+      // needs (GHI #245). The approver is the highest-risk login this product
+      // writes: it is `pr.merged_by.login` straight from the API, and its fallback
+      // used to spell a real private individual's account.
+      message: `Frozen plan ${tagRef} approved by ${plainLogin(input.approver)} at ${input.approvedAt}`,
       object: input.mergeSha,
       type: 'commit',
     });
@@ -922,7 +929,8 @@ export async function reopenPlan(
   await gh.repos.createOrUpdateFileContents({
     ...repo,
     path,
-    message: `plan: re-open ${current} as ${planRef} by @${input.actor} at ${input.at}`,
+    // Commit message — not GFM, so the at-sign goes rather than getting fenced.
+    message: `plan: re-open ${current} as ${planRef} by ${plainLogin(input.actor)} at ${input.at}`,
     content: Buffer.from(JSON.stringify(plan, null, 2)).toString('base64'),
     branch: planRef,
     ...(inherited ? { sha: inherited.sha } : {}),

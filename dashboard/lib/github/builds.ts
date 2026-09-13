@@ -1,6 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { credentialRemedy, errorMessage, errorStatus, githubSaid, isPermissionDenied, Refusal } from './errors';
+import { listRequiredCheckRuns, pendingRequiredChecks } from './required-checks';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
 import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha, freezeCompletion, freezeIncompleteSentence } from './plans';
 import { findIntentConfirmation, getChunk } from './chunks';
@@ -11,6 +12,7 @@ import { checkpointPathsTouched, type CheckpointPath } from '../../../scripts/ga
 import { checkB5ConfirmationRecorded, checkB6NotFlagged } from '../../../scripts/gates/lib/checks-preflight';
 import { AGENTIC_WORKFLOWS } from '../../../scripts/gates/lib/readiness';
 import { readCheckpointPaths } from './checkpoint-config';
+import { inertLogin, UNREPORTED_APPROVER_LOGIN } from '../actor-identity';
 
 /**
  * Deliverable pull requests as a lifecycle object (US18 — FR-064, FR-065, and the
@@ -189,6 +191,24 @@ export interface DeliverablePrView {
   branch: string;
   state: BuildState;
   merged: boolean;
+  /**
+   * The pull request is still OPEN — neither merged nor closed, read off the listing
+   * GitHub already returned. Two decisions hang on it and both are wrong when they are
+   * taken from `state`, which is LABEL-derived and can be stale in either direction:
+   *
+   *  - whether a repeat REWRITES this pull request or opens a SECOND one. The publisher
+   *    reuses only an OPEN pull request on the deliverable branch (`findDeliverablePr`
+   *    lists `state:'open'`), and the labels are written on the close event and never
+   *    rewritten — so a refused pull request someone RE-OPENED is labelled refused and
+   *    open, and a closed one can still carry `build:awaiting-merge`.
+   *  - whether the branch may be LINKED. While a pull request is open the publisher
+   *    resumes that same branch and rewrites that same pull request, so head and pull
+   *    request cannot diverge; and GitHub closes a pull request when its head branch is
+   *    deleted, so an open row's ref is there.
+   *
+   * Costs no read: `isOpen` was already derived below and thrown away.
+   */
+  open: boolean;
   /** the merge commit — the code verification runs against and completion is earned from */
   mergeCommitSha: string | null;
   /** WHEN it merged — immutable, unlike `updatedAt` (Codex on PR #145). This is the
@@ -201,6 +221,23 @@ export interface DeliverablePrView {
    *  surfaces as action-required (FR-064). A pre-authorized PR awaiting the
    *  deterministic merger is not the operator's problem and is not flagged. */
   actionRequired: boolean;
+  /**
+   * A PRE-AUTHORIZED deliverable whose required checks have ALL CONCLUDED and which is
+   * still open — one that should have merged and did not (GHI #236, complement 4).
+   *
+   * `null` is every other case, and the distinction it draws is the one no surface
+   * made before: a pre-authorized PR whose gate is STILL RUNNING is in flight and
+   * nothing is wrong with it, while one whose gate finished and which is still sitting
+   * open means the merger did not land it. Live on 2026-09-12 the second state existed
+   * for 101 minutes behind a green `build-merge` run, with the Builds page reporting
+   * merge authority and saying nothing at all about the stall (PB-017 finding 14).
+   *
+   * Only populated when the caller asks (`detectMergeStalls`): it costs one check-run
+   * read per open pre-authorized deliverable, which the Builds page can afford and
+   * `resolveVerifiedCommit` — which asks only about MERGED pull requests, on every
+   * workload card — must not pay for.
+   */
+  stalledPreAuthorized: string | null;
   mergeAuthority: 'pre-authorized' | 'operator-merge-required' | 'unknown';
   /** WHY, in the rule's own plain words (`resolveMergeAuthority`), for the Builds page
    *  to show under an operator-required row — which path waits, or which setting asked.
@@ -313,7 +350,48 @@ export async function readOperatorMergeCheckpoint(gh: Octokit, repo: RepoRef): P
   }
 }
 
-export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: string): Promise<DeliverablePrView[]> {
+/**
+ * Why a pre-authorized deliverable is still open — or `null` when it is legitimately
+ * in flight (GHI #236, complement 4).
+ *
+ * FAILS QUIET, ON PURPOSE. A check-read that errors returns `null` rather than
+ * throwing: this decorates one row of a listing, and taking the Builds page down
+ * because one check read 403'd would be a worse outcome than the annotation it was
+ * fetching — the same stance `readOperatorMergeCheckpoint` takes one function away.
+ * What it must never do is claim a stall it could not observe.
+ */
+async function describeMergeStall(gh: Octokit, repo: RepoRef, headSha: string): Promise<string | null> {
+  let pending;
+  try {
+    pending = pendingRequiredChecks(await listRequiredCheckRuns(gh, repo, headSha));
+  } catch {
+    return null;
+  }
+  // Still running = in flight. This is the distinction the whole field exists to draw,
+  // and getting it backwards would flag every healthy deliverable in the seconds
+  // between its gate starting and the merger landing it.
+  if (pending.length > 0) return null;
+  return (
+    'this deliverable is pre-authorized and its required checks have all concluded, but it has not merged — ' +
+    'the deterministic merger did not land it. Recover with Actions → build-merge → Run workflow (no inputs); ' +
+    'a sweep will find it. GHI #236'
+  );
+}
+
+/** What a caller wants beyond the listing itself. */
+export interface ListDeliverablePrsOptions {
+  /** read each OPEN pre-authorized deliverable's required check runs, so a stalled one
+   *  can be named (GHI #236). Off by default: `resolveVerifiedCommit` runs this listing
+   *  on every workload card and cares only about merged pull requests. */
+  detectMergeStalls?: boolean;
+}
+
+export async function listDeliverablePrs(
+  gh: Octokit,
+  repo: RepoRef,
+  slug?: string,
+  options: ListDeliverablePrsOptions = {},
+): Promise<DeliverablePrView[]> {
   const prs = await gh.paginate(gh.pulls.list, { ...repo, state: 'all', sort: 'updated', direction: 'desc', per_page: 100 });
   // Read ONCE for the whole listing: the checkpoint is a repository-wide setting, and
   // re-reading it per pull request would let one page report two different answers.
@@ -456,6 +534,7 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
       branch: pr.head.ref,
       state,
       merged,
+      open: isOpen,
       mergeCommitSha: pr.merge_commit_sha ?? null,
       mergedAt: pr.merged_at ?? null,
       marker,
@@ -470,6 +549,13 @@ export async function listDeliverablePrs(gh: Octokit, repo: RepoRef, slug?: stri
       // arriving one layer up. Asking a human to look at a deliverable that might be
       // stalled is the cheap error; leaving it silent is the expensive one.
       actionRequired: state === 'awaiting-merge' && authority !== 'pre-authorized',
+      // Read only for the row that could BE stalled, and only when the caller asked:
+      // open, awaiting the deterministic merger, and pre-authorized. Everything else is
+      // `null` because the question does not apply to it, not because it passed.
+      stalledPreAuthorized:
+        options.detectMergeStalls === true && isOpen && state === 'awaiting-merge' && authority === 'pre-authorized'
+          ? await describeMergeStall(gh, repo, pr.head.sha)
+          : null,
       mergeAuthority: authority,
       mergeReason,
       updatedAt: pr.updated_at,
@@ -504,10 +590,31 @@ export async function resolveVerifiedCommit(
   repo: RepoRef,
   planRef: string,
   frozenSha: string,
-): Promise<{ sha: string; source: 'merged-deliverable' | 'frozen-plan'; prNumber?: number }> {
+): Promise<{
+  sha: string;
+  source: 'merged-deliverable' | 'frozen-plan';
+  prNumber?: number;
+  /**
+   * Every step with a merged deliverable, under ANY version of this workload's plan
+   * (GHI #231) — carried out of the listing this function ALREADY fetched rather than
+   * re-read, so the completion panel can tell a target whose step nobody built from
+   * one that was built and failed without spending a second repo-wide pull-request
+   * read (the budget question GHI #241 is about).
+   *
+   * All versions, not just `planRef`: the question is whether the step's work is on
+   * the default branch, and a re-open does not remove an earlier version's merged
+   * deliverable from the tree. Empty when the ref is unparseable — the callers then
+   * fall back to the sentence they printed before this existed, which is weaker but
+   * never wrong.
+   */
+  deliveredStepIds: string[];
+}> {
   const slug = slugFromPlanRef(planRef);
-  if (slug === null) return { sha: frozenSha, source: 'frozen-plan' };
+  if (slug === null) return { sha: frozenSha, source: 'frozen-plan', deliveredStepIds: [] };
   const prs = await listDeliverablePrs(gh, repo, slug);
+  const deliveredStepIds = [
+    ...new Set(prs.filter((p) => p.merged && p.marker !== null).map((p) => p.marker!.stepId)),
+  ];
   const merged = prs
     .filter((p) => p.merged && p.mergeCommitSha && p.marker?.planRef === planRef)
     // BY MERGE TIME, which is immutable (Codex on PR #145). Sorting by `updatedAt`
@@ -519,8 +626,8 @@ export async function resolveVerifiedCommit(
     .sort((a, b) => (a.mergedAt ?? '').localeCompare(b.mergedAt ?? '') * -1);
   const newest = merged[0];
   return newest?.mergeCommitSha
-    ? { sha: newest.mergeCommitSha, source: 'merged-deliverable', prNumber: newest.number }
-    : { sha: frozenSha, source: 'frozen-plan' };
+    ? { sha: newest.mergeCommitSha, source: 'merged-deliverable', prNumber: newest.number, deliveredStepIds }
+    : { sha: frozenSha, source: 'frozen-plan', deliveredStepIds };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -604,6 +711,124 @@ export function wrongAssumptionSentence(issueNumber: number): string {
 }
 
 /**
+ * What the row already knows about this work item's earlier builds, in the one shape the
+ * confirm dialog needs: the single most consequential thing that has happened to it.
+ *
+ * A running build outranks a delivered one and a delivered one outranks a bare dispatch,
+ * because that is the order in which they change what the next click costs. The caller
+ * picks; this module words it.
+ */
+export type PriorBuild =
+  /** a build of this work item is running now */
+  | { kind: 'running'; runId: number }
+  /** its deliverable is open and waiting to be merged */
+  | { kind: 'awaiting-merge'; pullNumber: number }
+  /** its deliverable merged */
+  | { kind: 'merged'; pullNumber: number }
+  /** its deliverable was closed unmerged; `reopened` when that pull request is open
+   *  again — the label is written on close and never rewritten, so refused-and-open is
+   *  a real state, and it is the one where the repeat rewrites rather than adds */
+  | { kind: 'refused'; pullNumber: number; reopened?: boolean }
+  /** a dispatch is on record and nothing was ever delivered for it */
+  | { kind: 'dispatched'; by: string; at: string };
+
+/**
+ * The sentence the confirm dialog adds when this work item has been built before — the
+ * repeat, named BEFORE the click, on both the workload card and the plan review.
+ *
+ * ONE WORDING FOR BOTH SURFACES is the whole reason it lives here, beside the two
+ * sentences above: the card and the review each compose their own dialog text, and a
+ * repeat described two ways is a repeat the operator learns to skim. It is appended to
+ * that text, never a replacement for it — the dialog still has to say what the click
+ * does before it says what it does again.
+ *
+ * NOTHING HERE WITHHOLDS ANYTHING. Re-dispatch is the only retry route in the product —
+ * a failed, cancelled, lost or refused build has no other door — so the dialog states
+ * the cost and lets the operator decide. Facts only: every clause below is something the
+ * record says, and a surface that could not read the history adds no sentence at all
+ * rather than guessing at one.
+ *
+ * WHY A REPEAT SOMETIMES OPENS A SECOND PULL REQUEST. The deliverable branch is per
+ * work item and per plan version, and the publisher reuses only an OPEN pull request
+ * on it (`findDeliverablePr` lists `state:'open'`). A merged deliverable's pull
+ * request is closed and a refused one is closed, so BOTH send the repeat to
+ * `pulls.create`. The difference is what it starts from: a merged commit is already
+ * in `base`, while a refused one is still the branch's head, so the repeat's tree is
+ * built on it (`base_tree` = that commit's tree) and the new pull request carries the
+ * refused work along with the new. That is the half an operator cannot see coming
+ * from the button, and why the refused wording says more than the merged one.
+ *
+ * WHY `refused` CARRIES `reopened`. The label is written once, on the close event,
+ * and nothing writes it back when someone re-opens the pull request — so a reopened
+ * deliverable is labelled refused and OPEN, and the publisher would reuse it. The
+ * flag is the listing's own `open`, already computed there, so the sentence stays
+ * true in that state at no read cost.
+ */
+export function repeatDispatchSentence(prior: PriorBuild): string {
+  const repeat = 'A repeat is another paid agent run';
+  switch (prior.kind) {
+    case 'running':
+      return `A build of this work item is running right now (run ${prior.runId}). ${repeat}.`;
+    case 'awaiting-merge':
+      return (
+        `This work item was built before: pull request #${prior.pullNumber} is open and waiting to be merged. ` +
+        `${repeat}; it lands on the same deliverable branch and rewrites that pull request rather than opening a second one.`
+      );
+    case 'merged':
+      return (
+        `This work item was built before: pull request #${prior.pullNumber} is merged. ` +
+        `${repeat}, and because the previous deliverable already merged it will open a SECOND pull request from the same branch.`
+      );
+    case 'refused':
+      return prior.reopened
+        ? `This work item was built before: its deliverable (pull request #${prior.pullNumber}) was refused, and that pull request is open again. ` +
+          `${repeat}; it lands on the same deliverable branch and rewrites that pull request rather than opening a second one — on top of the refused commit, which is still that branch's head.`
+        : `This work item was built before: its deliverable (pull request #${prior.pullNumber}) was refused — closed without being merged. ` +
+          `${repeat}; it lands on the same deliverable branch, and because that pull request is closed the build opens a SECOND pull request rather than rewriting that one. ` +
+          `Unless the branch was deleted, the refused commit is still its head, so the repeat builds on top of the work that was refused.`;
+    case 'dispatched':
+      return (
+        // NOT A GITHUB MENTION — this sentence is the `repeat` prop that ends up in
+        // the browser's confirm() dialog on the dispatch row. It is never written to
+        // GitHub, so the at-sign renders as an at-sign and notifies nobody.
+        `This work item was dispatched before, by @${prior.by} at ${prior.at}, and nothing has been delivered for it yet. ` +
+        `${repeat}.`
+      );
+  }
+}
+
+/**
+ * Why this deliverable's branch is NAMED and not linked — or null while the pull
+ * request is still open and the branch is exactly the delivered tree.
+ *
+ * Two independent reasons, either alone sufficient. `deliverableBranch` is
+ * deterministic in plan version and step, so a repeat dispatch of the same step at the
+ * same version resumes THIS branch and advances it — after this pull request settled,
+ * the link would serve a later build's tree while the card describes this one. And the
+ * branch of a closed pull request may simply be gone: nothing here deletes it, but the
+ * repository's own delete-head-branch setting and GitHub's Delete branch button both
+ * do, and neither is ours to assert.
+ *
+ * Worded on the BRANCH and on "no longer open", never on "settled": a pull request
+ * closed without merging can still carry `build:awaiting-merge`, and that row's own
+ * header two lines above says "awaiting merge".
+ *
+ * It lives here rather than inline in the page's JSX for the reason `repeatDispatchSentence`
+ * does: there is no component-render harness in this repo, and a decision worded inside
+ * a `.tsx` return is a decision no test can read.
+ */
+export function branchNotLinkedSentence(pr: DeliverablePrView): string | null {
+  if (pr.open) return null;
+  // Deliberately the SAME condition as the card's "Verified against" render guard, so
+  // the sentence never points at a row that is not there.
+  const tail =
+    pr.merged && pr.mergeCommitSha
+      ? 'the merged commit below is the tree this one landed.'
+      : 'the pull request above still holds the diff it proposed.';
+  return `The next build of this step writes to this same branch name, and the branch may have been deleted since this pull request closed — ${tail}`;
+}
+
+/**
  * Dispatch a build of ONE work item of a workload's official frozen plan, on the frozen
  * tag by construction.
  *
@@ -625,9 +850,10 @@ export function wrongAssumptionSentence(issueNumber: number): string {
  * sentences carry no gate ids — they reach the operator's page verbatim (house rule).
  *
  * Nothing is written on any refusal. The dispatch is the first write, the event comment
- * on the workload issue the second; the run lookup after them is read-only and may
- * fail without undoing either. A failed event comment is reported in `recordWarning`
- * rather than thrown, for the same reason the lookup is: the build has started.
+ * on the workload issue the second, and the edit that adds the run id to that comment
+ * the third — each one able to fail without undoing the ones before it. A failed event
+ * comment is reported in `recordWarning` rather than thrown, for the same reason the
+ * lookup is: the build has started.
  */
 export async function dispatchBuild(
   gh: Octokit,
@@ -815,8 +1041,10 @@ export async function dispatchBuild(
     throw error;
   }
 
-  // THE RECORD, before the lookup: who started what is the durable fact; the run id is
-  // a convenience the Runs page can supply if this comment has to stand without it.
+  // THE RECORD, before the lookup: who started what is the durable fact, and it must not
+  // depend on a read that may fail. The run id is added to this same comment once the
+  // lookup answers (below) — an edit, so the attribution is never held back waiting for
+  // it and a record whose lookup answered nothing is still complete.
   //
   // A FAILED RECORD IS A WARNING, NOT A THROW. The dispatch above is the one write
   // that cannot be taken back — GitHub has the run — so a fault here must not reach
@@ -825,32 +1053,66 @@ export async function dispatchBuild(
   // running, and the warning carries the exact fact that went unrecorded so it can be
   // added by hand. A fault BEFORE the dispatch still throws — nothing has happened yet.
   let recordWarning: string | null = null;
+  // Held as a value because the same record is serialized twice — once here without the
+  // run, once below with it — so the edit that adds the run id cannot word the record
+  // differently from the write that created it.
+  const record = {
+    slug,
+    chunk,
+    planRef,
+    stepId: step.id,
+    frozenSha,
+    unattended: input.unattended,
+    confirmation,
+    by: input.actor,
+    at: input.at,
+  };
+  let recordCommentId: number | null = null;
   try {
-    await gh.issues.createComment({
+    const { data } = await gh.issues.createComment({
       ...repo,
       issue_number: workload.issueNumber,
-      body: serializeBuildDispatchEvent({
-        slug,
-        chunk,
-        planRef,
-        stepId: step.id,
-        frozenSha,
-        unattended: input.unattended,
-        confirmation,
-        by: input.actor,
-        at: input.at,
-      }),
+      body: serializeBuildDispatchEvent(record),
     });
+    recordCommentId = data.id;
   } catch (error: unknown) {
     recordWarning =
       `the dispatch record could not be written on workload issue #${workload.issueNumber} ` +
       `(${errorStatus(error) ?? 'no status'}: ${errorMessage(error)}). Unrecorded fact: ` +
       `build of work item #${chunk} (step ${step.id}) on ${planRef}, ${input.unattended ? 'unattended' : 'attended'}, ` +
+      // NOT A GITHUB MENTION — this warning exists BECAUSE the GitHub write failed.
+      // It goes to the dashboard and to console.warn, never into issue content.
       `dispatched by @${input.actor} at ${input.at}`;
     console.warn(`build dispatched on ${planRef}, but ${recordWarning}`);
   }
 
   const runId = await findNewRun(gh, repo, workflow.id, planRef, before, opts);
+
+  // THE RUN, added to the record the ordering above would not let it wait for. The run
+  // is the one thing a dispatch leaves behind that no later read can recover — a run
+  // carries only its plan ref, so nothing links it back to the work item it built — and
+  // adding it as an EDIT is what lets the record be written first and still carry it.
+  //
+  // A FAILED EDIT IS NOT `recordWarning`, and that is the deliberate part. `recordWarning`
+  // names a fact only the operator can put back by hand; this names nothing they could
+  // add — the run id is returned to the caller and the Runs page lists the run either
+  // way. Reporting it would read as a dispatch that went wrong, and the operator's
+  // remedy for that is a retry, which is a second paid build of the same work item
+  // (PR #204 review). The marker simply stands without its run field, which every
+  // reader of it already handles: a lookup that answered nothing produces the same
+  // record.
+  if (runId !== null && recordCommentId !== null) {
+    try {
+      await gh.issues.updateComment({ ...repo, comment_id: recordCommentId, body: serializeBuildDispatchEvent({ ...record, runId }) });
+    } catch (error: unknown) {
+      console.warn(
+        `build dispatched on ${planRef} as run ${runId}, but the run could not be added to its dispatch record on ` +
+          `issue #${workload.issueNumber} (${errorStatus(error) ?? 'no status'}: ${errorMessage(error)}) — the record ` +
+          'stands without it',
+      );
+    }
+  }
+
   return { runId, ref, inputs, planRef, workloadIssue: workload.issueNumber, recordWarning };
 }
 
@@ -917,16 +1179,46 @@ async function findNewRun(
 
 // ---------- the dispatch event comment ----------
 
+/**
+ * One dispatch, as the workload issue records it.
+ *
+ * `stepId`, `frozenSha` and `runId` are nullable because a `v1` comment carried none of
+ * them and a governed repository has `v1` comments already — a reader that treated their
+ * absence as a fault would break on the first issue it opened. `runId` is nullable on a
+ * `v2` record too: the run lookup runs after the record is written and may answer
+ * nothing (see `dispatchBuild`).
+ */
 export interface BuildDispatchEvent {
   slug: string;
   chunk: number;
   planRef: string;
+  /** the plan step this build delivers — `null` on a `v1` record */
+  stepId: string | null;
+  /** the commit of the frozen tag the build ran against — `null` on a `v1` record */
+  frozenSha: string | null;
   unattended: boolean;
   by: string;
   at: string;
+  /** the run this dispatch started — `null` on a `v1` record, and on a `v2` record
+   *  whose run had not appeared by the time the dispatch returned */
+  runId: number | null;
 }
 
-const BUILD_DISPATCH_RE =
+/**
+ * `v2` carries in the marker what the comment's visible half has always printed — the
+ * step and the frozen commit — plus the run, which nothing printed anywhere.
+ *
+ * `run:` is OPTIONAL in the pattern rather than a second version, because its absence is
+ * an ordinary outcome and not an older grammar: the record is written before the run
+ * lookup on purpose, so a record whose lookup answered nothing is complete and correct
+ * without it.
+ */
+const BUILD_DISPATCH_V2_RE =
+  /<!--\s*build-dispatch:v2\s+workload:(\S+)\s+chunk:(\d+)\s+plan:(\S+)\s+step:(\S+)\s+sha:(\S+)\s+unattended:(true|false)\s+by:@(\S+)\s+at:(\S+?)(?:\s+run:(\d+))?\s*-->/;
+
+/** The `v1` grammar, kept because comments written under it are already on the record
+ *  and are the only account of those builds there will ever be. */
+const BUILD_DISPATCH_V1_RE =
   /<!--\s*build-dispatch:v1\s+workload:(\S+)\s+chunk:(\d+)\s+plan:(\S+)\s+unattended:(true|false)\s+by:@(\S+)\s+at:(\S+?)\s*-->/;
 
 /**
@@ -935,6 +1227,9 @@ const BUILD_DISPATCH_RE =
  * event comment here uses — a marker-only body renders as an EMPTY comment on GitHub).
  * Attribution is the point: the run's own actor is the dashboard's token, so without
  * this line the record would say a robot started the build.
+ *
+ * Called twice for one dispatch — once without the run, once with it — so the edit that
+ * adds the run id cannot word the record differently from the write that created it.
  */
 function serializeBuildDispatchEvent(e: {
   slug: string;
@@ -946,21 +1241,89 @@ function serializeBuildDispatchEvent(e: {
   confirmation: { by: string; at: string } | null;
   by: string;
   at: string;
+  /** the run this dispatch started, once the lookup has answered; absent on the first
+   *  write, which happens before the lookup */
+  runId?: number | null;
 }): string {
+  // TWO FALLBACKS ON THE NEXT LINE AND THEY ARE NOT THE SAME THING. The first is a
+  // missing LOGIN, so it takes the named constant and goes through `inertLogin` —
+  // written bare, `@unknown` linkified to github.com/unknown, a real private
+  // individual, which is the mention GHI #245 was filed about. The second is a
+  // missing TIMESTAMP: `unknown` there is a word, not a login, and swapping it for
+  // the login constant would write an identity where a date belongs.
   const mode = e.unattended
-    ? `unattended — nobody watching, authorized by the intent confirmation of @${e.confirmation?.by ?? 'unknown'} at ${e.confirmation?.at ?? 'unknown'}`
+    ? `unattended — nobody watching, authorized by the intent confirmation of ${inertLogin(e.confirmation?.by ?? UNREPORTED_APPROVER_LOGIN)} at ${e.confirmation?.at ?? 'unknown'}`
     : 'attended';
   const visible =
-    `**Build dispatched** for work item #${e.chunk} on \`${e.planRef}\` by @${e.by} at ${e.at}\n` +
+    `**Build dispatched** for work item #${e.chunk} on \`${e.planRef}\` by ${inertLogin(e.by)} at ${e.at}\n` +
     `> step: ${e.stepId} · mode: ${mode}\n` +
     `> ref: \`refs/tags/${e.planRef}\` (commit ${e.frozenSha})`;
-  const marker = `<!-- build-dispatch:v1 workload:${e.slug} chunk:${e.chunk} plan:${e.planRef} unattended:${e.unattended} by:@${e.by} at:${e.at} -->`;
+  const run = e.runId === null || e.runId === undefined ? '' : ` run:${e.runId}`;
+  // Bare `by:@<login>` inside the HTML comment, and it stays that way: the comment
+  // renders as nothing at all on GitHub — no mention is possible — while both
+  // BUILD_DISPATCH_V2_RE and the v1 fallback match on this exact shape (GHI #245).
+  const marker =
+    `<!-- build-dispatch:v2 workload:${e.slug} chunk:${e.chunk} plan:${e.planRef} step:${e.stepId} ` +
+    `sha:${e.frozenSha} unattended:${e.unattended} by:@${e.by} at:${e.at}${run} -->`;
   return `${visible}\n\n${marker}`;
 }
 
 /** The dispatch event a comment records, or null when the comment is not one. */
 export function parseBuildDispatchEvent(body: string): BuildDispatchEvent | null {
-  const m = BUILD_DISPATCH_RE.exec(body);
-  if (!m) return null;
-  return { slug: m[1]!, chunk: Number(m[2]), planRef: m[3]!, unattended: m[4] === 'true', by: m[5]!, at: m[6]! };
+  const v2 = BUILD_DISPATCH_V2_RE.exec(body);
+  if (v2) {
+    return {
+      slug: v2[1]!,
+      chunk: Number(v2[2]),
+      planRef: v2[3]!,
+      stepId: v2[4]!,
+      frozenSha: v2[5]!,
+      unattended: v2[6] === 'true',
+      by: v2[7]!,
+      at: v2[8]!,
+      runId: v2[9] === undefined ? null : Number(v2[9]),
+    };
+  }
+  const v1 = BUILD_DISPATCH_V1_RE.exec(body);
+  if (!v1) return null;
+  // A `v1` record genuinely does not know these. Null is the honest answer, and the
+  // surfaces that read it are the ones that must say "nothing recorded" rather than
+  // print a blank where a step or a run belongs.
+  return {
+    slug: v1[1]!,
+    chunk: Number(v1[2]),
+    planRef: v1[3]!,
+    stepId: null,
+    frozenSha: null,
+    unattended: v1[4] === 'true',
+    by: v1[5]!,
+    at: v1[6]!,
+    runId: null,
+  };
+}
+
+/**
+ * Every dispatch one workload issue's comments record, in the order they were written —
+ * so the last entry is the newest dispatch, and the newest dispatch of one work item is
+ * the last whose `chunk` matches.
+ *
+ * TAKES BODIES, NOT AN OCTOKIT, because the caller already has them: `listXLinks`
+ * paginates this exact comment page once per workload card and discards every marker
+ * that is not an xlink. A reader with its own client here would be a second read of a
+ * page already in memory, on a render whose budget is the reason this record went
+ * unread for so long. Pure and synchronous for the same reason — it folds into that
+ * pass rather than becoming a step of its own.
+ *
+ * Bodies that are not dispatch records are skipped, and so are absent ones: GitHub
+ * serves a deleted comment's body as null, and a listing that threw on it would take a
+ * workload card down over a comment nobody needs.
+ */
+export function parseBuildDispatchEvents(bodies: readonly (string | null | undefined)[]): BuildDispatchEvent[] {
+  const events: BuildDispatchEvent[] = [];
+  for (const body of bodies) {
+    if (!body) continue;
+    const event = parseBuildDispatchEvent(body);
+    if (event) events.push(event);
+  }
+  return events;
 }

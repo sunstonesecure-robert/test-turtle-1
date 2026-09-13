@@ -145,6 +145,34 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
      "maps_to": ["step-greeting"] }
    ```
 
+
+   **THE COMMAND MUST FAIL ON A TREE THAT LACKS THE STEP'S WORK.** This is the property
+   that makes a verification target evidence rather than decoration, and it is the one
+   most easily lost. Before you write a `run`, ask: *if the step had not been built,
+   would this command exit non-zero?* If the answer is no, the target asserts something
+   that was already true and its green says nothing about the step it maps to. Live on
+   2026-09-11 three of one plan's nineteen targets passed against a tree that had
+   received none of its work, and `build-verify` now re-runs every green against the
+   frozen plan tree and records `action_required` for any that passes there too — so a
+   target with this defect does not merely fail to help, it BLOCKS completion until the
+   plan is re-opened.
+
+   Two shapes cause almost all of it, and the approval gate G19 reports both as an
+   advisory the operator will read:
+
+   - **A `;`-list or a `for` loop reports only its LAST command's status.** Every
+     assertion before the last one is discarded. `test -f a; test -f b; test -f c` passes
+     whenever `c` exists, whatever happened to `a` and `b`. Chain them with `&&`, or begin
+     the command with `set -e`.
+   - **`! grep … <path>` launders an ERROR into a pass.** If the file is missing, grep
+     exits 2 — not "no match" — and `!` inverts that into success, and a `!`-negated
+     command is exempt from `set -e` so nothing catches it. Assert the file exists first
+     (`test -f <path> && ! grep -q … <path>`).
+
+   Also: `run` must be valid shell. G19 parses every command with `bash -n`, because one
+   that does not parse can never report anything — it concludes `failure` on every build
+   with an error that looks like the step's fault.
+
    A MUST target with no `run` is refused at approval and would leave the workload uncompletable, so if you
    genuinely cannot express a check as a command, say so as a `q-` question rather than leaving it
    silently unverifiable. The plan's `feature` field MUST be exactly `${{ inputs.workload }}` —

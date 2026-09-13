@@ -28,7 +28,35 @@ import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors'
  * Only the first three can appear in a healthy run. `absent` exists so that the
  * one condition nobody could previously see has a name in the artifact.
  */
-export type GateStatus = 'pass' | 'fail' | 'not-applicable' | 'absent';
+/**
+ * `advisory` REPORTS BUT DOES NOT BLOCK (GHI #232, operator decision 2026-09-13).
+ *
+ * Added for G19, the verification-target shell lint. The shape it catches is real —
+ * four live targets on `plan/lza-phase0-0/v2` discard the failures they appear to
+ * check — but GHI #230 staged an approval-time REFUSAL behind data this product does
+ * not have yet: a target legitimately guarding a pre-existing invariant looks the same
+ * to a static rule, and nobody has measured how often that is. Refusing on an
+ * unmeasured shape would block approvals for a population nobody has seen; reporting
+ * on it is what produces the measurement.
+ *
+ * It is NOT a fourth flavour of pass. An advisory gate carries a detail an operator is
+ * meant to read and act on, and it is printed in every report with its own mark. What
+ * it does not do is make `reportResult` red, which is the whole of the difference.
+ */
+export type GateStatus = 'pass' | 'fail' | 'not-applicable' | 'absent' | 'advisory';
+
+/**
+ * THE ONE PREDICATE both halves of the blocking pair are stated from.
+ *
+ * `blockingGates` and `reportResult` used to enumerate statuses separately, and the
+ * docblock on `blockingGates` already recorded that the two copies had diverged once
+ * — a status one blocks on and the other omits is a refusal with nothing to say. When
+ * `advisory` was added they would have had to be edited in lockstep in two files'
+ * worth of reasoning, so the rule now exists once and both read it.
+ */
+export function gateIsPermitted(status: GateStatus): boolean {
+  return status === 'pass' || status === 'not-applicable' || status === 'advisory';
+}
 
 export interface GateResult {
   id: string;
@@ -113,7 +141,7 @@ export interface GateReport {
  * and silence remains impossible.
  */
 export function blockingGates(gates: GateResult[]): GateResult[] {
-  return gates.filter((g) => g.status !== 'pass' && g.status !== 'not-applicable');
+  return gates.filter((g) => !gateIsPermitted(g.status));
 }
 
 /**
@@ -164,11 +192,13 @@ export async function runGates(subject: string, checks: GateCheck[]): Promise<Ga
  * The verdict over a gate list. `absent` fails as hard as `fail` (GHI #108): a gate
  * the catalogue declares and the running code does not implement is a build nobody
  * can say was gated, and passing it through would be the absent-≠-success mistake
- * this project refuses everywhere else. `not-applicable` is the only status that
- * neither passes nor blocks — it is a deliberate skip, recorded.
+ * this project refuses everywhere else. `not-applicable` and `advisory` are the two
+ * statuses that neither pass nor block: the first is a deliberate skip, recorded; the
+ * second is a finding the operator should read that was deliberately not given the
+ * power to refuse (GHI #232).
  */
 export function reportResult(gates: GateResult[]): 'pass' | 'fail' {
-  return gates.every((g) => g.status === 'pass' || g.status === 'not-applicable') ? 'pass' : 'fail';
+  return gates.every((g) => gateIsPermitted(g.status)) ? 'pass' : 'fail';
 }
 
 /**
@@ -244,7 +274,7 @@ export function printReport(report: GateReport, json: boolean): void {
   // A distinct mark per status, because the whole point is that a reader can tell
   // them apart at a glance (GHI #108): `–` did not apply, `?` should have been here
   // and was not.
-  const MARK: Record<GateStatus, string> = { pass: '✓', fail: '✗', 'not-applicable': '–', absent: '?' };
+  const MARK: Record<GateStatus, string> = { pass: '✓', fail: '✗', 'not-applicable': '–', absent: '?', advisory: '⚠' };
   for (const gate of report.gates) {
     console.log(`${MARK[gate.status]} ${gate.id} (${gate.requirement})${gate.detail ? ` — ${gate.detail}` : ''}`);
   }
@@ -278,7 +308,7 @@ export function printReport(report: GateReport, json: boolean): void {
  * filesystem; the caller does the append.
  */
 export function stepSummary(report: GateReport): string {
-  const MARK: Record<GateStatus, string> = { pass: '✅', fail: '❌', 'not-applicable': '➖', absent: '⚠️' };
+  const MARK: Record<GateStatus, string> = { pass: '✅', fail: '❌', 'not-applicable': '➖', absent: '⚠️', advisory: '🟡' };
   const subject = report.plan ?? report.subject ?? '(no subject)';
   const absent = report.gates.filter((g) => g.status === 'absent').map((g) => g.id);
   const lines = [

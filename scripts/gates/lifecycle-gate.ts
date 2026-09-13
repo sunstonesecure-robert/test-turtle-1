@@ -5,7 +5,7 @@ import { scanDeferralContradictions } from '../../dashboard/lib/github/evidence'
 import { WORKLOAD_TRANSITIONS } from '../../dashboard/lib/github/labels';
 import { findLiveAndonsBySlug } from '../../dashboard/lib/github/andon';
 import { resolveCurrent, tagTargetSha, tryReadPlanAtRef } from '../../dashboard/lib/github/plans';
-import { deriveCompletionStatus, listVtCheckRuns } from '../../dashboard/lib/github/checks';
+import { deriveCompletionStatus, deliveryContext, listVtCheckRuns } from '../../dashboard/lib/github/checks';
 import { resolveVerifiedCommit } from '../../dashboard/lib/github/builds';
 import { commitmentScope } from './lib/checks-scope';
 import { cliMain, runGateCatalogue, UsageError, type GateReport, type GateResult } from './lib/runner';
@@ -80,7 +80,17 @@ async function checkL3Completion(gh: Octokit, repo: RepoRef, slug: string): Prom
   // deliverable, results on the frozen commit describe code the repository has never
   // contained, which is a completion earned on a lie (GHI #141).
   const verified = await resolveVerifiedCommit(gh, repo, current, frozenSha);
-  const verdict = deriveCompletionStatus(slug, commitmentScope(plan), await listVtCheckRuns(gh, repo, verified.sha));
+  // The SAME delivery context the completion panel feeds its copy of this derivation
+  // (GHI #231). It changes no verdict — an unverified MUST target is unmet either way
+  // — but the gate's refusal sentence is the one the operator reads on the workload
+  // card, and a gate and a preview that word the same refusal differently is exactly
+  // the drift this repository forbids.
+  const verdict = deriveCompletionStatus(
+    slug,
+    commitmentScope(plan),
+    await listVtCheckRuns(gh, repo, verified.sha),
+    deliveryContext(plan, verified.deliveredStepIds),
+  );
   const where =
     verified.source === 'merged-deliverable'
       ? `verified on the merged deliverable commit ${verified.sha.slice(0, 8)} (PR #${verified.prNumber})`

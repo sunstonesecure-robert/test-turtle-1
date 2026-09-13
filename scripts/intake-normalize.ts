@@ -10,6 +10,7 @@ import {
 import { getWorkload, SLUG_RE } from '../dashboard/lib/github/workloads';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import { CONTEXT_FOLDERS, contextMaxFileBytes, violatesSpecialFolderRules } from '../dashboard/lib/github/context-paths';
+import { UNREPORTED_APPROVER_LOGIN } from '../dashboard/lib/actor-identity';
 
 // The FR-053 rules themselves live in `context-paths.ts` (dependency-free, so the
 // dashboard's Introduce writer can share them without a cycle through this
@@ -170,7 +171,16 @@ export async function normalizeIntake(
   await gh.issues.createComment({
     ...repo,
     issue_number: issueNumber,
-    body: serializeWorkloadEvent({ action: 'introduced', by: issue.user?.login ?? 'unknown', at: new Date().toISOString() }),
+    // THE ONE WRITER WHOSE LOGIN IS A GENUINE THIRD PARTY: whoever filed the intake
+    // issue, who need not be in the org at all. `serializeWorkloadEvent` renders the
+    // visible half through `inertLogin`, so this no longer @-mentions them (GHI #245).
+    //
+    // The fallback is the named constant, not a bare `'unknown'` literal: written
+    // bare it was a real private individual's github.com account. Residual worth
+    // knowing — the constant's prose reads "an unidentified approver", which is not
+    // what an intake filer is; the sentinel vocabulary is a separate question from
+    // the mention rule, and this at least makes the value deliberate.
+    body: serializeWorkloadEvent({ action: 'introduced', by: issue.user?.login ?? UNREPORTED_APPROVER_LOGIN, at: new Date().toISOString() }),
   });
   return { outcome: 'normalized', slug };
 }

@@ -71,6 +71,26 @@ on: # zizmor: ignore[dangerous-triggers]
   # No inputs, deliberately: the sweep decides its own subjects from repository state, so
   # there is nothing for an operator to point at the wrong thing.
   workflow_dispatch:
+  # THE BACKSTOP (GHI #236, option 3; operator decision 2026-09-13). `deliverable-gate`
+  # runs TWICE on a deliverable pull request — on `pull_request` against the PR head,
+  # and in the sweep — and only the SWEEP copy's completion reaches the `workflow_run`
+  # trigger above. So the `pull_request` copy concluding, which is the event that makes
+  # a refused merge merge-able, started nothing. Live on 2026-09-12 that cost a
+  # pre-authorized deliverable 101 minutes behind a green run (PB-017 finding 14).
+  #
+  # `build-merge.ts` now WAITS for the required contexts in-run, which merges the
+  # ordinary case with no extra runs at all; this trigger is what catches a wait that
+  # expired, or a stall this race does not describe. Both, because the chain has
+  # produced three distinct silent stalls (T245, GHI #228, this one) and the fourth
+  # will not be any of them.
+  #
+  # THE COST IS NAMED: this starts a sweep on EVERY check-suite completion in the
+  # repository. A sweep with nothing to do prints "no open deliverable pull requests"
+  # and exits in seconds, and the concurrency group below collapses a burst into one
+  # run — but they are real runs against the Actions allowance, which is the price of
+  # the backstop and not a hidden one.
+  check_suite:
+    types: [completed]
 # PERMISSIONS ARE DECLARED PER JOB, NOT PER WORKFLOW (zizmor excessive-permissions,
 # 2026-08-27). This workflow has TWO jobs whose authority genuinely differs, and a
 # workflow-level grant hands each of them the union of both: `transition` only moves a
@@ -90,7 +110,7 @@ jobs:
     # `build/**`. Asking "which pre-authorized deliverables are green and unmerged?"
     # needs no event archaeology and is self-healing: a merge whose run was lost is
     # picked up on the next sweep.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'check_suite' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
     permissions:
       contents: write # pulls.merge writes the merge commit onto the base branch
       pull-requests: write # pulls.list finds the candidates, pulls.merge performs the merge

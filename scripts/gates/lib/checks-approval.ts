@@ -192,3 +192,144 @@ export function checkG18MustTargetsExecutable(plan: PlanDoc): GateResult {
           .join('; '),
       };
 }
+
+/* ------------------------------------------------------------------------- *
+ * G19 — the verification-target SHELL LINT (FR-011; GHI #232, complement 1).
+ *
+ * WHAT IT IS FOR. `schemas/plan.ts` types `run` as `z.string().min(1).optional()`, so
+ * an operator approving a verification target at the Andon break is approving UNLINTED
+ * SHELL TEXT. G4 asks whether the prose `check` is a single pass/fail assertion — these
+ * are. G18 asks whether a MUST-mapped target carries a `run` at all — these do. Nothing
+ * has ever looked at the command's shape, and live on 2026-09-11 three of 19 targets on
+ * `plan/lza-phase0-0/v2` reported `success` against a tree that had received none of
+ * the plan's work, two of them by the shape this lint catches (PB-017 finding 13).
+ *
+ * IT IS ADVISORY, NOT A REFUSAL, AND THAT IS THE POINT OF SHIPPING IT NOW (operator
+ * decision 2026-09-13). GHI #230 staged an approval-time refusal behind data that does
+ * not exist: a target legitimately guarding a PRE-EXISTING invariant is indistinguishable
+ * to a static rule from a vacuous one, and nobody has measured how often that shape
+ * occurs. Refusing on it would block approvals for a population nobody has seen.
+ * Reporting on it is what produces the measurement — and the operator still meets the
+ * finding at the Andon break, which is the earliest and cheapest place to fix it. The
+ * refusal decision is revisited when the negative control has fired enough times to say
+ * how common a genuine regression-guard is (ADR-0004's revisit trigger; the escape hatch and the
+ * surface that would let its frequency be measured are GHI #251, which is the named precondition
+ * for this gate ever refusing).
+ *
+ * WHAT IT CANNOT CATCH, STATED SO THE GATE IS NOT OVERSOLD. `vt-workflow-pinned` is
+ * `! grep -nE "…" <path>` — a single, well-formed command. `!` inverts grep's exit 2
+ * (an ERROR, not "no match") into a pass, and a `!`-negated command is EXEMPT from
+ * errexit, so neither half of this lint touches it. Only the negative control
+ * (`scripts/build-verify.ts`, GHI #230) catches that one. This gate is a complement to
+ * that control, never a substitute for it.
+ *
+ * TWO HALVES, AND ONLY ONE OF THEM IS PURE. The shape rule below reads text and is
+ * shared with the review page's preview, exactly as G17's and G18's pure checks are.
+ * The `bash -n` half spawns a process, so it lives in `checks-shell.ts` and runs in the
+ * wired gate only — the same split G17 already makes with `verifyTrackedWorkItems`, and
+ * for the same reason: a preview rendered on every load of a live review cannot shell
+ * out. The preview therefore shows the half it can compute, and says so.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * PURE: does this `run` discard the status of its own commands?
+ *
+ * Returns the reason when it does, null when it does not. The rule is #232's: a
+ * MULTI-COMMAND `run` must begin `set -e` or chain its commands with `&&`, because a
+ * `;`-list and a `for` loop report only their LAST command's status and every earlier
+ * assertion is silently thrown away.
+ *
+ * `vt-config-six` was decided solely by its trailing `test ! -e …` and `vt-gitignore-covers`
+ * solely by its loop's last pattern — a false green with four of its own six assertions
+ * FALSE on the commit it judged, which is worse than merely vacuous.
+ *
+ * CONSERVATIVE BY CONSTRUCTION. This is a lint over shell text with no shell parser
+ * behind it, so it only fires on a separator it can see OUTSIDE quotes: a `;` or a
+ * newline that is not inside a single- or double-quoted string and not escaped. A
+ * command whose separators are all hidden inside quotes — the nested `bash -c '…'` shape
+ * every live target has — reads as ONE command and is not flagged, which is correct:
+ * this rule is about the OUTER command's structure, and the inner one's is the negative
+ * control's business (see the `bash -euo pipefail` note in `scripts/build-verify.ts`).
+ */
+export function lintRunShape(run: string): string | null {
+  const command = run.trim();
+  if (command.length === 0) return null; // G18's business, not this gate's
+  if (/^set\s+-[a-z]*e/.test(command)) return null; // begins with errexit — the sanctioned form
+  const separators = topLevelSeparators(command);
+  if (separators === 0) return null; // one command: nothing to discard
+  return (
+    `\`run\` is ${separators + 1} commands joined by ${separators === 1 ? 'a separator' : 'separators'} that ` +
+    'DISCARD every earlier status — a `;`-list or a `for` loop reports only its LAST command\'s exit code, so the ' +
+    'assertions before it cannot fail the target. Chain them with `&&`, or begin the command with `set -e`'
+  );
+}
+
+/**
+ * How many command separators (`;` or a newline) sit OUTSIDE quotes in this text.
+ *
+ * A hand scanner rather than a regex because the thing that matters is quote state, and
+ * a regex that ignored it would flag every `bash -c 'a; b'` — which is the shape of
+ * every target this codebase has ever seen, and flagging all of them would make the
+ * gate noise an operator learns to dismiss.
+ */
+function topLevelSeparators(command: string): number {
+  let count = 0;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    if (quote === null && (ch === "'" || ch === '"')) {
+      quote = ch;
+      continue;
+    }
+    if (quote !== null) {
+      // Inside double quotes a backslash escapes the next character; inside single
+      // quotes it does not, and nothing but `'` ends the string.
+      if (quote === '"' && ch === '\\') i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '\\') {
+      i += 1; // an escaped separator is not a separator
+      continue;
+    }
+    // `;;` is a case-statement terminator, not two separators.
+    if (ch === ';') {
+      if (command[i + 1] === ';') i += 1;
+      count += 1;
+      continue;
+    }
+    if (ch === '\n' && command.slice(i + 1).trim().length > 0) count += 1;
+  }
+  // A trailing separator joins nothing.
+  return /[;\n]\s*$/.test(command) ? Math.max(0, count - 1) : count;
+}
+
+/** Every target whose `run` discards its own commands' status, in plan order. */
+export function unlintableRuns(plan: PlanDoc): { vtId: string; reason: string }[] {
+  const out: { vtId: string; reason: string }[] = [];
+  for (const vt of plan.verification_targets) {
+    if (!vt.run) continue;
+    const reason = lintRunShape(vt.run);
+    if (reason !== null) out.push({ vtId: vt.id, reason });
+  }
+  return out;
+}
+
+/**
+ * G19 — a verification target's `run` does not discard its own assertions (FR-011).
+ *
+ * ADVISORY: a finding, never a refusal (see the section header). `extraProblems` is how
+ * the wired gate folds in the `bash -n` half it alone can run, so the operator reads ONE
+ * G19 row rather than two gates for one remedy.
+ */
+export function checkG19RunsLintable(plan: PlanDoc, extraProblems: readonly string[] = []): GateResult {
+  const problems = [...unlintableRuns(plan).map(({ vtId, reason }) => `${vtId}: ${reason}`), ...extraProblems];
+  return problems.length === 0
+    ? { id: 'G19', status: 'pass', requirement: 'FR-011' }
+    : {
+        id: 'G19',
+        status: 'advisory',
+        requirement: 'FR-011',
+        detail: `${problems.join('; ')} — this does not block approval, and it is not a guarantee either way: a target that passes this lint can still assert nothing (GHI #232)`,
+      };
+}

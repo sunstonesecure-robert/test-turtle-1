@@ -18,6 +18,7 @@ import { errorStatus, Refusal } from './errors';
 import { reconcileHighStakesRouting } from './high-stakes';
 import { commitPlanUpdate, parsePlanRef, tryReadPlanAtRef } from './plans';
 import { inexecutableMustTargets } from '../../../scripts/gates/lib/checks-approval';
+import { plainLogin } from '../actor-identity';
 
 /**
  * Commit for approval — the one click that turns a judged plan into work items, links
@@ -331,8 +332,9 @@ export async function commitForApproval(gh: Octokit, repo: RepoRef, input: Commi
   if (touched.length > 0) {
     bound = await commitPlanUpdate(gh, repo, {
       planRef,
+      // Commit message — see `plainLogin`: not GFM, so the at-sign itself goes.
       message: () =>
-        `plan: bind work items at commit for approval (${linked.map((l) => `${l.stepId} → #${l.issueNumber}`).join(', ') || 'unbind optional steps'}) by @${input.actor} at ${input.at} (FR-017)`,
+        `plan: bind work items at commit for approval (${linked.map((l) => `${l.stepId} → #${l.issueNumber}`).join(', ') || 'unbind optional steps'}) by ${plainLogin(input.actor)} at ${input.at} (FR-017)`,
       mutate: (current) => ({
         ...current,
         steps: current.steps.map((s) => (wanted.has(s.id) ? { ...s, tracking_issue: wanted.get(s.id) ?? null } : s)),

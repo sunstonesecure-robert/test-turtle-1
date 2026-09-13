@@ -258,7 +258,11 @@ export async function checkB4IntentConfirmed(gh: Octokit, repo: RepoRef, chunkIs
   }
   const confirmation = await findIntentConfirmation(gh, repo, chunkIssue);
   if (!confirmation) {
-    return { id: 'B4', status: 'fail', requirement: 'FR-018', detail: `chunk #${chunkIssue} carries intent:confirmed but no well-formed confirmation comment (by:@login at:ISO8601) — the label without the record does not authorize an unattended run` };
+    // The marker grammar in a code span, like every other literal in this file's
+    // details. `login` names no account today, but `@actor` and `@approver` both
+    // resolve to real ones — a placeholder-looking word is not safe by inspection,
+    // and this detail is rendered as markdown in the step summary (GHI #245).
+    return { id: 'B4', status: 'fail', requirement: 'FR-018', detail: `chunk #${chunkIssue} carries intent:confirmed but no well-formed confirmation comment (\`by:@login at:ISO8601\`) — the label without the record does not authorize an unattended run` };
   }
   return { id: 'B4', status: 'pass', requirement: 'FR-018' };
 }

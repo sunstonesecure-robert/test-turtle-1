@@ -57,6 +57,8 @@ async function main(): Promise<void> {
     approver: record.approver,
     approvedAt: record.approvedAt,
   });
+  // NOT A GITHUB MENTION — a console line in the CLI's main(), captured only as job-log
+  // text. The frozen TAG MESSAGE this reports is a separate write, guarded in plans.ts.
   console.log(`frozen ${tagRef} — approver @${record.approver} at ${record.approvedAt}`);
   // The items this version tracks now mirror ITS steps (GHI #212) — say which moved.
   for (const r of reconciled) {

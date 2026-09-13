@@ -119,6 +119,17 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    every id stable unless a correction requires changing what an id describes. Change NOTHING
    a correction (or recorded answer) does not call for: the operator re-judges only the flagged
    items, so an unasked-for change would ship unreviewed.
+   **ANY `run` YOU WRITE OR CHANGE MUST FAIL ON A TREE THAT LACKS ITS STEP'S WORK.** A
+   verification target whose command would pass with or without the step asserts something
+   that was already true, so its green is not evidence about the step — and `build-verify`
+   re-runs every green against the frozen plan tree and records `action_required` for one
+   that passes there too, which BLOCKS completion until the plan is re-opened again. Two
+   shapes cause nearly all of it, and the approval gate G19 reports both as an advisory:
+   a `;`-list or a `for` loop reports only its LAST command's status (chain with `&&`, or
+   begin with `set -e`), and `! grep … <path>` turns grep's exit 2 on a MISSING FILE into
+   a pass (assert the file exists first). `run` must also be valid shell: G19 parses every
+   command with `bash -n`, because one that does not parse concludes `failure` on every
+   build with an error that reads like the step's fault.
    **`tracking_issue` is inherited, never created.** It names the work item (a `chunk:*`
    issue) a step delivers, and the operator is the only writer of it: they bind every step on
    the review page, under **Work items**, at **Commit for approval** — so do not "help" by
