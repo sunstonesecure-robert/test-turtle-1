@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/deploymentState",
+  "$defs": {
+    "accountId": {"type": "string", "pattern": "^[0-9]{12}$"},
+    "accountInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "email"],
+      "properties": {
+        "name": {"enum": ["Management", "LogArchive", "Audit"]},
+        "email": {"type": "string", "format": "email"}
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "github", "aws", "accounts", "organization", "controlTower", "lza"],
+      "properties": {
+        "schemaVersion": {"const": 2},
+        "github": {
+          "type": "object", "additionalProperties": false,
+          "required": ["owner", "repository", "defaultBranch", "validationEnvironment", "deploymentEnvironment"],
+          "properties": {
+            "owner": {"type": "string", "minLength": 1}, "repository": {"type": "string", "minLength": 1},
+            "defaultBranch": {"type": "string", "minLength": 1}, "validationEnvironment": {"type": "string", "minLength": 1},
+            "deploymentEnvironment": {"type": "string", "minLength": 1}
+          }
+        },
+        "aws": {
+          "type": "object", "additionalProperties": false,
+          "required": ["commercialManagementAccountId", "commercialRegion", "govCloudManagementAccountId", "govCloudHomeRegion", "organizationAccessRoleName"],
+          "properties": {
+            "commercialManagementAccountId": {"$ref": "#/$defs/accountId"}, "commercialRegion": {"type": "string"},
+            "govCloudManagementAccountId": {"anyOf": [{"const": ""}, {"$ref": "#/$defs/accountId"}]},
+            "govCloudHomeRegion": {"type": "string"}, "organizationAccessRoleName": {"type": "string", "minLength": 1}
+          }
+        },
+        "accounts": {
+          "type": "object", "additionalProperties": false, "required": ["management", "logArchive", "audit"],
+          "properties": {"management": {"$ref": "#/$defs/accountInput"}, "logArchive": {"$ref": "#/$defs/accountInput"}, "audit": {"$ref": "#/$defs/accountInput"}}
+        },
+        "organization": {
+          "type": "object", "additionalProperties": false, "required": ["securityOuName", "infrastructureOuName"],
+          "properties": {"securityOuName": {"const": "Security"}, "infrastructureOuName": {"const": "Infrastructure"}}
+        },
+        "controlTower": {
+          "type": "object", "additionalProperties": false,
+          "required": ["landingZoneVersion", "governedRegions", "remediationTypes", "accountAutoEnrollment", "accessManagementEnabled", "backupEnabled", "centralizedLoggingEnabled", "configEnabled", "securityRolesEnabled", "accessLogRetentionDays", "loggingRetentionDays", "kmsAlias", "infrastructureBaselineVersion", "manageLandingZoneRegionDeny"],
+          "properties": {
+            "landingZoneVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+            "governedRegions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+            "remediationTypes": {"const": ["INHERITANCE_DRIFT"]}, "accountAutoEnrollment": {"const": true},
+            "accessManagementEnabled": {"const": false}, "backupEnabled": {"const": false},
+            "centralizedLoggingEnabled": {"const": true}, "configEnabled": {"const": true}, "securityRolesEnabled": {"const": true},
+            "accessLogRetentionDays": {"type": "integer", "minimum": 1}, "loggingRetentionDays": {"type": "integer", "minimum": 1},
+            "kmsAlias": {"type": "string", "pattern": "^alias/.+"}, "infrastructureBaselineVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+            "manageLandingZoneRegionDeny": {"const": false}
+          }
+        },
+        "lza": {
+          "type": "object", "additionalProperties": false,
+          "required": ["version", "commit", "acceleratorPrefix", "controlTowerEnabled", "configurationLocation", "configurationObjectKey", "sourceBucketPrefix", "sourceObjectPrefix"],
+          "properties": {
+            "version": {"type": "string", "minLength": 1}, "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "acceleratorPrefix": {"type": "string", "minLength": 1}, "controlTowerEnabled": {"const": true}, "configurationLocation": {"const": "s3"},
+            "configurationObjectKey": {"type": "string", "minLength": 1}, "sourceBucketPrefix": {"type": "string", "minLength": 1}, "sourceObjectPrefix": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "renderMap": {
+      "type": "object", "additionalProperties": false, "required": ["schemaVersion", "values"],
+      "properties": {
+        "schemaVersion": {"const": 2},
+        "values": {
+          "type": "object", "additionalProperties": false, "required": ["LOG_ARCHIVE_ACCOUNT_ID", "AUDIT_ACCOUNT_ID", "CONTROL_TOWER_KMS_KEY_ARN"],
+          "properties": {"LOG_ARCHIVE_ACCOUNT_ID": {"$ref": "#/$defs/accountId"}, "AUDIT_ACCOUNT_ID": {"$ref": "#/$defs/accountId"}, "CONTROL_TOWER_KMS_KEY_ARN": {"type": "string", "pattern": "^arn:aws-us-gov:kms:.+"}}
+        }
+      }
+    },
+    "phaseState": {
+      "type": "object", "additionalProperties": false, "required": ["schemaVersion", "phase", "status", "evidencePath"],
+      "properties": {"schemaVersion": {"const": 2}, "phase": {"type": "integer", "minimum": 0, "maximum": 4}, "status": {"enum": ["PENDING", "SUCCEEDED", "FAILED"]}, "evidencePath": {"type": "string", "minLength": 1}}
+    },
+    "deploymentState": {
+      "type": "object", "additionalProperties": false, "required": ["schemaVersion", "phases"],
+      "properties": {
+        "schemaVersion": {"const": 2},
+        "phases": {"type": "object", "additionalProperties": {"type": "object", "additionalProperties": false, "required": ["status", "evidencePath"], "properties": {"status": {"enum": ["PENDING", "SUCCEEDED", "FAILED"]}, "evidencePath": {"type": "string", "minLength": 1}}}}
+      }
+    }
+  }
+}

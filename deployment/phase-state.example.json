@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 2,
+  "phase": 0,
+  "status": "SUCCEEDED",
+  "evidencePath": "build/deployment-evidence.json"
+}
