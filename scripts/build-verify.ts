@@ -204,6 +204,10 @@ export interface VerifyOutcome {
   /** targets whose green stands WITHOUT a negative control, because a step they map to
    *  was already in the frozen tag's tree when it was cut (GHI #234) */
   controlSkipped: { id: string; baselineStepIds: string[] }[];
+  /** MUST-mapped targets executed even though an OPTIONAL step they also map to has not
+   *  been delivered — reported because suppressing them would make the workload
+   *  uncompletable, and flagged because their result is weaker than it looks */
+  reportedWithPendingOptional: { id: string; optionalStepIds: string[] }[];
 }
 
 /** One merged deliverable, reduced to what delivery scope needs. */
@@ -212,6 +216,9 @@ export interface MergedDelivery {
   stepId: string;
   /** GitHub's immutable `merged_at` */
   mergedAt: string;
+  /** the commit this deliverable landed as — how the subject recognises ITSELF, which a
+   *  timestamp comparison cannot do at one-second resolution (see `asOf` below) */
+  mergeCommitSha: string | null;
 }
 
 /**
@@ -243,17 +250,66 @@ export interface DeliveryRecord {
 export function deriveDeliveryRecord(
   deliveries: readonly MergedDelivery[],
   baselineCommittedAt: string | null,
+  /** merge shas the caller resolved as ANCESTORS of the baseline commit — the same
+   *  one-second-resolution problem `asOf` has, on the other boundary (Codex on PR #252,
+   *  third review). A plan re-frozen in the same second as a deliverable merge would
+   *  otherwise exclude that step from `inBaseline`, its target would be controlled
+   *  against a tree that DOES contain it, and the demotion would make the workload
+   *  permanently uncompletable — the exact GHI #234 defect, returning by the clock. */
+  baselineAncestors: ReadonlySet<string> = new Set(),
+  /**
+   * AS OF WHICH COMMIT (Codex on PR #252). Omitted, the record describes the repository
+   * at READ time — which is wrong for every commit but the last one a sweep merged.
+   *
+   * `build-merge` merges every candidate first and only then dispatches a verification
+   * run per resulting sha, so when one sweep merges steps A and B, A's verification reads
+   * a record in which B is already delivered and executes B's targets against a tree that
+   * cannot contain B. Deterministic, not a race — and it manufactures exactly the false
+   * red GHI #231 exists to suppress, on every earlier merge of a multi-merge sweep.
+   *
+   * The subject recognises ITSELF by sha, not by time: its own deliverable merged at the
+   * same instant the commit was made, and `mergedAt < subject` would exclude it.
+   */
+  asOf: { sha: string; mergedAt: string; ancestors?: ReadonlySet<string> } | null = null,
 ): DeliveryRecord {
   const delivered = new Set<string>();
   const inBaseline = new Set<string>();
   const baselineMs = baselineCommittedAt === null ? null : Date.parse(baselineCommittedAt);
-  for (const { stepId, mergedAt } of deliveries) {
+  const asOfMs = asOf === null ? null : Date.parse(asOf.mergedAt);
+  // Filtered BEFORE the loop so `delivered` and `inBaseline` are built from one input and
+  // cannot disagree about which deliverables existed.
+  const asOfDeliveries =
+    asOf === null || asOfMs === null || Number.isNaN(asOfMs)
+      ? deliveries
+      : deliveries.filter((d) => {
+          // The subject's own deliverable, by identity — never by clock.
+          if (d.mergeCommitSha !== null && d.mergeCommitSha === asOf.sha) return true;
+          // A TIE IS RESOLVED BY ANCESTRY, NOT BY THE CLOCK (Codex on PR #252, second
+          // review — this filter's first version got it exactly backwards).
+          //
+          // `merged_at` has one-second resolution, and a sweep merges candidates back to
+          // back. So A and B can share a timestamp while A is genuinely a PARENT of B.
+          // Strict `<` then excluded A while verifying B — and since L3 reads only the
+          // newest merge commit, A's targets were never reported anywhere that counts:
+          // completion saw them unverified, and re-verifying reproduced it exactly.
+          // Loosening to `<=` is not the answer either, since it would re-admit a
+          // same-second sibling that merged AFTER the subject. Only ancestry separates
+          // the two, and the caller resolves it per tie.
+          if (asOf.ancestors !== undefined && d.mergeCommitSha !== null && asOf.ancestors.has(d.mergeCommitSha)) {
+            return true;
+          }
+          const ms = Date.parse(d.mergedAt);
+          return Number.isNaN(ms) ? false : ms < asOfMs;
+        });
+  for (const { stepId, mergedAt } of asOfDeliveries) {
     delivered.add(stepId);
     const mergedMs = Date.parse(mergedAt);
     // STRICTLY BEFORE. A deliverable that merged at the same instant the approval
     // commit was made is not in that commit's tree — the tag is cut from a merge that
     // had already happened, so equality means "not included".
-    if (baselineMs !== null && !Number.isNaN(mergedMs) && !Number.isNaN(baselineMs) && mergedMs < baselineMs) {
+    const sha = asOfDeliveries.find((d) => d.stepId === stepId && d.mergedAt === mergedAt)?.mergeCommitSha ?? null;
+    const byAncestry = sha !== null && baselineAncestors.has(sha);
+    if (byAncestry || (baselineMs !== null && !Number.isNaN(mergedMs) && !Number.isNaN(baselineMs) && mergedMs < baselineMs)) {
       inBaseline.add(stepId);
     }
   }
@@ -468,7 +524,12 @@ export function runVerification(
   const nonDiscriminating: string[] = [];
   const notYetDelivered: { id: string; pendingStepIds: string[] }[] = [];
   const controlSkipped: { id: string; baselineStepIds: string[] }[] = [];
+  const reportedWithPendingOptional: { id: string; optionalStepIds: string[] }[] = [];
   const mustIds = new Set(mustMappedTargetIds(plan));
+  // The MUST STEPS themselves, not the targets that map to them — derived from the same
+  // plan read so the ANY (target is mandatory) and the per-step ALL (its subject exists)
+  // predicates cannot drift apart again.
+  const mustStepIds = new Set(plan.steps.filter((s) => s.priority === 'MUST').map((s) => s.id));
 
   // The control's tree, or `undefined` for "no control". Resolved ONCE, before any
   // target runs: a base that is the subject itself compares a tree with itself, which
@@ -496,14 +557,42 @@ export function runVerification(
     // whose step is also unbuilt is reported as the one thing the operator can act on.
     if (delivery !== undefined) {
       const pendingStepIds = target.maps_to.filter((id) => !delivery.delivered.has(id));
-      if (pendingStepIds.length > 0) {
-        notYetDelivered.push({ id: target.id, pendingStepIds });
+      // AN OPTIONAL STEP MUST NEVER GATE A MUST-MAPPED TARGET (Codex on PR #252).
+      //
+      // A target is MANDATORY for completion when ANY step it maps to is MUST
+      // (`mustMappedTargetIds`), but this filter suppressed it until EVERY mapped step
+      // had merged — ALL semantics guarding an ANY commitment. So a target mapping to a
+      // MUST step and a COULD step was suppressed forever the moment the operator
+      // decided not to build the optional one, L3 read it as unverified, and the
+      // workload became permanently uncompletable with a remedy that loops: "build the
+      // step" for a step nobody is obliged to build.
+      //
+      // The MUST steps are what the plan committed to, so they alone decide whether this
+      // target has a subject. An undelivered OPTIONAL step is carried instead as a
+      // qualifier on the result: the command runs against a tree that lacks that step's
+      // work, which is worth saying out loud beside a red, and is not a reason to report
+      // nothing at all.
+      const blockingStepIds = mustIds.has(target.id)
+        ? pendingStepIds.filter((id) => mustStepIds.has(id))
+        : pendingStepIds;
+      if (blockingStepIds.length > 0) {
+        notYetDelivered.push({ id: target.id, pendingStepIds: blockingStepIds });
         console.log(
-          `– ${target.id}: not reported — step${pendingStepIds.length > 1 ? 's' : ''} ${pendingStepIds.join(', ')} ` +
-            'ha' + (pendingStepIds.length > 1 ? 've' : 's') + ' no merged deliverable yet, so this target has nothing ' +
+          `– ${target.id}: not reported — step${blockingStepIds.length > 1 ? 's' : ''} ${blockingStepIds.join(', ')} ` +
+            'ha' + (blockingStepIds.length > 1 ? 've' : 's') + ' no merged deliverable yet, so this target has nothing ' +
             'to judge. No check run is created; completion (L3) reads it as unverified and stays refused. GHI #231',
         );
         continue;
+      }
+      const optionalPending = pendingStepIds.filter((id) => !mustStepIds.has(id));
+      if (optionalPending.length > 0) {
+        reportedWithPendingOptional.push({ id: target.id, optionalStepIds: optionalPending });
+        console.log(
+          `  NOTE ${target.id}: reported although optional step${optionalPending.length > 1 ? 's' : ''} ` +
+            `${optionalPending.join(', ')} ha${optionalPending.length > 1 ? 've' : 's'} no merged deliverable. It is ` +
+            'MUST-mapped, so suppressing it would make this workload uncompletable; a red here may be caused by the ' +
+            'absent optional work rather than by a defect in the delivered step.',
+        );
       }
     }
     if (!target.run) {
@@ -592,7 +681,7 @@ export function runVerification(
     }
     results.push({ id: target.id, conclusion });
   }
-  return { planRef, results, unexecutable, mutated, nonDiscriminating, notYetDelivered, controlSkipped };
+  return { planRef, results, unexecutable, mutated, nonDiscriminating, notYetDelivered, controlSkipped, reportedWithPendingOptional };
 }
 
 /**
@@ -613,11 +702,38 @@ export function runVerification(
  * the absent-≠-success shape, in the one pipeline that must never have it. "Could not
  * ask" is not an answer here either.
  */
+/**
+ * What a step PROMISES, as one comparable string (Codex on PR #252, third review).
+ *
+ * Deliberately excludes `tracking_issue` and `depends_on`: re-binding a work item or
+ * re-ordering the plan does not change what was built, and treating either as a
+ * redefinition would un-deliver steps on an ordinary re-open. Includes everything that
+ * describes the WORK — what it is, what it must achieve, how wide it may reach, and
+ * whether it was promised at all.
+ */
+export function stepDefinitionDigest(step: PlanDoc['steps'][number]): string {
+  return JSON.stringify([
+    step.title,
+    step.intent,
+    step.acceptance,
+    step.priority,
+    step.evidence_tag,
+    step.high_stakes,
+    step.authority ?? null,
+    [...(step.scope ?? [])].sort(),
+  ]);
+}
+
 export async function readDeliveryRecord(
   gh: Octokit,
   repo: RepoRef,
   planRef: string,
+  /** the CURRENT plan, to compare an earlier version's step definition against */
+  plan: PlanDoc,
   baseCwd?: string,
+  /** the commit under verification — the record is taken AS OF this merge, not as of
+   *  read time. Omitted only by the by-hand CLI path, which says so in its summary. */
+  subjectSha?: string,
 ): Promise<DeliveryRecord> {
   const slug = slugFromPlanRef(planRef);
   if (slug === null) {
@@ -630,10 +746,140 @@ export async function readDeliveryRecord(
   // ANY version of this workload's plan counts (see the module docblock): the question
   // is whether the step's work is on the default branch, and a re-open does not remove
   // an earlier version's merged deliverable from the tree.
-  const deliveries: MergedDelivery[] = prs
+  const candidates = prs
     .filter((pr) => pr.merged && pr.mergedAt !== null && pr.marker !== null)
-    .map((pr) => ({ stepId: pr.marker!.stepId, mergedAt: pr.mergedAt! }));
-  const record = deriveDeliveryRecord(deliveries, baseCwd === undefined ? null : baselineCommittedAt(baseCwd));
+    .map((pr) => ({
+      stepId: pr.marker!.stepId,
+      mergedAt: pr.mergedAt!,
+      mergeCommitSha: pr.mergeCommitSha,
+      deliveredUnder: pr.marker!.planRef,
+    }));
+  // A STEP ID IS NOT A PROMISE — THE STEP DEFINITION IS (Codex on PR #252, third review).
+  //
+  // "Any version of this workload's plan counts" is right when a re-open leaves a step
+  // alone, and wrong when it redefines one. A step id is stable across versions by
+  // design, so a v2 delivery of `step-config` would otherwise be counted as delivery of a
+  // v3 `step-config` that means materially different work: the target for the REVISED
+  // step gets executed and reported although that work was never built, and the older
+  // merge also puts the id in `inBaseline`, disabling the negative control that would
+  // have caught it. A target that happens to pass then satisfies completion for absent
+  // work — GHI #141's shape through a door #231 opened.
+  //
+  // So an earlier version's delivery counts only while the step's DEFINITION is
+  // unchanged. Compared on the fields that say what the step promises; `tracking_issue`
+  // and `depends_on` are excluded deliberately — re-binding a work item or re-ordering
+  // does not change what was built.
+  const planCache = new Map<string, Promise<PlanDoc | null>>();
+  const planAt = (ref: string): Promise<PlanDoc | null> => {
+    const hit = planCache.get(ref);
+    if (hit) return hit;
+    const read = readPlanAtRef(gh, repo, ref).catch(() => null);
+    planCache.set(ref, read);
+    return read;
+  };
+  const deliveries: MergedDelivery[] = [];
+  for (const c of candidates) {
+    if (c.deliveredUnder !== planRef) {
+      const older = await planAt(c.deliveredUnder);
+      const then = older?.steps.find((st) => st.id === c.stepId) ?? null;
+      const now = plan.steps.find((st) => st.id === c.stepId) ?? null;
+      if (then === null || now === null || stepDefinitionDigest(then) !== stepDefinitionDigest(now)) {
+        console.log(
+          `step ${c.stepId} was delivered under ${c.deliveredUnder}, but its definition ` +
+            `${then === null || now === null ? 'cannot be compared with' : 'DIFFERS from'} ${planRef} — NOT counted as ` +
+            'delivered for this version. Its target will read "not built yet" until the revised step is built. ' +
+            '(A step id is stable across versions; what it promises is not.)',
+        );
+        continue;
+      }
+    }
+    deliveries.push({ stepId: c.stepId, mergedAt: c.mergedAt, mergeCommitSha: c.mergeCommitSha });
+  }
+  // The subject's own merge, found by sha among the deliverables just listed — its
+  // `mergedAt` is the instant this commit came into being, and everything that merged
+  // after it is not in its tree however recently the listing was read.
+  const subject = subjectSha === undefined ? undefined : deliveries.find((d) => d.mergeCommitSha === subjectSha);
+  if (subjectSha !== undefined && subject === undefined) {
+    // Not fatal and not silent. The commit is a deliverable merge (the caller resolved a
+    // plan ref from its marker) but is not in THIS workload's listing — a slug mismatch,
+    // or a listing that lost it. Fall back to read-time scope and say so, rather than
+    // filtering against a date we do not have.
+    console.log(
+      `could not locate the subject commit ${subjectSha.slice(0, 8)} among workload "${slug}"'s merged deliverables — ` +
+        'the delivery record is taken as of READ TIME, so a deliverable that merged after this commit may be counted ' +
+        'as delivered for it (GHI #231 follow-up).',
+    );
+  }
+  /** Is `candidate` an ancestor of `head`? `ahead` means head descends from it, so its
+   *  work is present. A failed comparison answers NO and says so — excluding is the
+   *  conservative direction on both boundaries this is used for. */
+  const isAncestor = async (candidate: string, head: string, why: string): Promise<boolean> => {
+    try {
+      const { data } = await gh.repos.compareCommits({ ...repo, base: candidate, head });
+      return data.status === 'ahead';
+    } catch (error: unknown) {
+      console.log(`could not compare ${candidate.slice(0, 8)} against ${head.slice(0, 8)} (${errorMessage(error)}) — ${why}`);
+      return false;
+    }
+  };
+
+  // THE BASELINE BOUNDARY, same one-second problem (Codex on PR #252, third review). A
+  // plan re-frozen in the same second as a deliverable merge would be excluded from
+  // `inBaseline` by a strict `<`, its target controlled against a tree that contains it,
+  // and the demotion would be permanent — GHI #234 returning by the clock.
+  const baselineAncestors = new Set<string>();
+  if (baseCwd !== undefined) {
+    const baselineAt = baselineCommittedAt(baseCwd);
+    const baselineHead = (() => {
+      try {
+        return snapshotCheckout(baseCwd).head;
+      } catch {
+        return null;
+      }
+    })();
+    // INSTANTS, NEVER THE STRINGS. `git log -1 --format=%cI` renders a NUMERIC offset
+    // (`2026-09-14T09:16:18-07:00`) and never `Z`, while GitHub's `merged_at` is always
+    // `Z`. A string equality between them can never be true — so this loop ran zero
+    // times on live data, `baselineAncestors` was always empty, and R2's fix was inert:
+    // GHI #234's permanent false demotion returned by the clock, silently. Caught only
+    // because the pure derivation was tested with a hand-built ancestor set while the
+    // LOADER that fills it had no test at all.
+    const baselineMs = baselineAt === null ? Number.NaN : Date.parse(baselineAt);
+    if (!Number.isNaN(baselineMs) && baselineHead !== null) {
+      for (const d of deliveries) {
+        const mergedMs = Date.parse(d.mergedAt);
+        if (d.mergeCommitSha === null || Number.isNaN(mergedMs) || mergedMs !== baselineMs) continue;
+        if (await isAncestor(d.mergeCommitSha, baselineHead, `treating step ${d.stepId} as NOT in the baseline`)) {
+          baselineAncestors.add(d.mergeCommitSha);
+        }
+      }
+    }
+  }
+
+  // SAME-SECOND TIES, ASKED OF GIT RATHER THAN OF THE CLOCK. Only candidates sharing the
+  // subject's `merged_at` need this — everything strictly earlier or later is already
+  // decided — so it costs one comparison per tie and usually none at all.
+  let ancestors: Set<string> | undefined;
+  if (subject !== undefined) {
+    const tied = deliveries.filter(
+      (d) => d.mergeCommitSha !== null && d.mergeCommitSha !== subject.mergeCommitSha && d.mergedAt === subject.mergedAt,
+    );
+    if (tied.length > 0) {
+      ancestors = new Set<string>();
+      for (const candidate of tied) {
+        const why = `treating step ${candidate.stepId} as NOT delivered as of this commit`;
+        if (await isAncestor(candidate.mergeCommitSha!, subject.mergeCommitSha!, why)) {
+          ancestors.add(candidate.mergeCommitSha!);
+        }
+      }
+    }
+  }
+  const record = deriveDeliveryRecord(
+    deliveries,
+    baseCwd === undefined ? null : baselineCommittedAt(baseCwd),
+    baselineAncestors,
+    subject === undefined ? null : { sha: subject.mergeCommitSha!, mergedAt: subject.mergedAt, ancestors },
+  );
   if (record.delivered.size === 0) {
     // The read SUCCEEDED and the answer is none — a different thing from the throw
     // above, and it must not look like it. Every target is out of scope and no check
@@ -653,9 +899,10 @@ export async function buildVerify(
   planRef: string,
   cwd: string,
   baseCwd?: string,
+  subjectSha?: string,
 ): Promise<VerifyOutcome> {
   const plan = await readPlanAtRef(gh, repo, planRef);
-  const delivery = await readDeliveryRecord(gh, repo, planRef, baseCwd);
+  const delivery = await readDeliveryRecord(gh, repo, planRef, plan, baseCwd, subjectSha);
   return runVerification(plan, planRef, cwd, baseCwd, delivery);
 }
 
@@ -693,6 +940,17 @@ export async function planRefForMergedCommit(gh: Octokit, repo: RepoRef, sha: st
     if (marker) return marker.planRef;
   }
   return null;
+}
+
+/** The subject checkout's HEAD, for the as-of delivery scope when no `--commit` was
+ *  given. Best effort: a checkout that is not a git tree is not a reason to fail a
+ *  verification, it just means the record falls back to read-time scope and says so. */
+function subjectHeadOrUndefined(cwd: string): string | undefined {
+  try {
+    return snapshotCheckout(cwd).head;
+  } catch {
+    return undefined;
+  }
 }
 
 const isMain = process.argv[1]?.endsWith('build-verify.ts');
@@ -734,7 +992,9 @@ if (isMain) {
         return ref;
       });
   resolve
-    .then((planRef) => buildVerify(gh, repo, planRef, cwd, baseCwd))
+    // `commit` is the subject when the caller named one; otherwise the checkout's own
+    // HEAD is the commit being verified, which is the same thing by construction.
+    .then((planRef) => buildVerify(gh, repo, planRef, cwd, baseCwd, commit ?? subjectHeadOrUndefined(cwd)))
     .then((outcome) => {
       mkdirSync(dirname(out) === '' ? '.' : dirname(out), { recursive: true });
       writeFileSync(out, `${JSON.stringify({ plan_ref: outcome.planRef, results: outcome.results }, null, 2)}\n`);
@@ -758,6 +1018,15 @@ if (isMain) {
             .join(' | ')}. No check run is created for these, so completion (L3) reads each as UNVERIFIED and stays ` +
             'refused — which is the same refusal a red would produce, with the remedy that is actually true: build ' +
             'the step. They are not failing targets.',
+        );
+      }
+      if (outcome.reportedWithPendingOptional.length > 0) {
+        console.log(
+          `REPORTED WITH AN OPTIONAL STEP MISSING: ${outcome.reportedWithPendingOptional
+            .map((t) => `${t.id} → ${t.optionalStepIds.join(', ')}`)
+            .join(' | ')}. Each is MUST-mapped, so it must be reported or the workload could never complete — but the ` +
+            'command ran against a tree lacking that optional work. Read a red one with that in mind: the remedy may ' +
+            'be to build the optional step, or to re-open and split the target, not to fix the delivered step.',
         );
       }
       if (outcome.controlSkipped.length > 0) {

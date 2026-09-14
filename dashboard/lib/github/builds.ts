@@ -1,7 +1,7 @@
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { credentialRemedy, errorMessage, errorStatus, githubSaid, isPermissionDenied, Refusal } from './errors';
-import { listRequiredCheckRuns, pendingRequiredChecks } from './required-checks';
+import { classifyRequiredSuite, listRequiredCheckRuns } from './required-checks';
 import { parseDeliverableMarker, type DeliverableMarker } from './markers';
 import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha, freezeCompletion, freezeIncompleteSentence } from './plans';
 import { findIntentConfirmation, getChunk } from './chunks';
@@ -222,22 +222,30 @@ export interface DeliverablePrView {
    *  deterministic merger is not the operator's problem and is not flagged. */
   actionRequired: boolean;
   /**
-   * A PRE-AUTHORIZED deliverable whose required checks have ALL CONCLUDED and which is
-   * still open — one that should have merged and did not (GHI #236, complement 4).
+   * Why a PRE-AUTHORIZED, still-open deliverable has not landed — or `null` when the
+   * question does not apply or could not be answered (GHI #236, corrected by Codex on
+   * PR #252).
    *
-   * `null` is every other case, and the distinction it draws is the one no surface
-   * made before: a pre-authorized PR whose gate is STILL RUNNING is in flight and
-   * nothing is wrong with it, while one whose gate finished and which is still sitting
-   * open means the merger did not land it. Live on 2026-09-12 the second state existed
-   * for 101 minutes behind a green `build-merge` run, with the Builds page reporting
-   * merge authority and saying nothing at all about the stall (PB-017 finding 14).
+   * This was a single `string | null` that said "should have merged and did not", and it
+   * said it in three different situations because it was reached by the NEGATION of "a
+   * run exists and is unfinished". Two of the three were wrong: a deliverable whose gate
+   * had not yet published anything (the ORDINARY state of every bot-opened pull request
+   * for a while) and one whose gate had concluded RED both got a banner telling the
+   * operator to re-run a merge sweep — which, for the red one, `mergeIfPreAuthorized`
+   * guarantees will come back `blocked`.
    *
-   * Only populated when the caller asks (`detectMergeStalls`): it costs one check-run
-   * read per open pre-authorized deliverable, which the Builds page can afford and
-   * `resolveVerifiedCommit` — which asks only about MERGED pull requests, on every
-   * workload card — must not pay for.
+   * Now a discriminant, so the page can say three different true things:
+   *   `stalled`     every required check concluded satisfyingly and it is still open —
+   *                 the merger did not land it; the sweep is the remedy
+   *   `refused`     a required check concluded outside success/skipped/neutral — GitHub
+   *                 is right to refuse and no sweep can repair it
+   *   `unobserved`  nothing has reported yet, and it has been long enough to be worth
+   *                 saying so — the gate is the thing to look at, not the merger
+   *
+   * `null` for an in-flight gate (nothing is wrong), for a row the question does not
+   * apply to, and for a read that threw.
    */
-  stalledPreAuthorized: string | null;
+  preAuthorizedHold: { kind: 'stalled' | 'refused' | 'unobserved'; message: string } | null;
   mergeAuthority: 'pre-authorized' | 'operator-merge-required' | 'unknown';
   /** WHY, in the rule's own plain words (`resolveMergeAuthority`), for the Builds page
    *  to show under an operator-required row — which path waits, or which setting asked.
@@ -351,31 +359,74 @@ export async function readOperatorMergeCheckpoint(gh: Octokit, repo: RepoRef): P
 }
 
 /**
- * Why a pre-authorized deliverable is still open — or `null` when it is legitimately
- * in flight (GHI #236, complement 4).
+ * Why a pre-authorized deliverable is still open (GHI #236, complement 4).
  *
  * FAILS QUIET, ON PURPOSE. A check-read that errors returns `null` rather than
  * throwing: this decorates one row of a listing, and taking the Builds page down
  * because one check read 403'd would be a worse outcome than the annotation it was
  * fetching — the same stance `readOperatorMergeCheckpoint` takes one function away.
- * What it must never do is claim a stall it could not observe.
+ * What it must never do is claim a hold it could not observe.
+ *
+ * `unobserved` is AGE-GATED. A bot-opened deliverable has no required check run on its
+ * head for a little while by construction — the `pull_request` gate copy does not run
+ * for it at all now (see `deliverable-gate.yml`), and the sweep's check run takes a
+ * moment to appear. Warning immediately would fire on every healthy deliverable the
+ * instant it is published. The gate can only DELAY the banner, never fire it early.
  */
-async function describeMergeStall(gh: Octokit, repo: RepoRef, headSha: string): Promise<string | null> {
-  let pending;
+const UNOBSERVED_AFTER_MS = 15 * 60 * 1000;
+
+async function describeMergeHold(
+  gh: Octokit,
+  repo: RepoRef,
+  headSha: string,
+  updatedAt: string,
+): Promise<DeliverablePrView['preAuthorizedHold']> {
+  let verdict;
   try {
-    pending = pendingRequiredChecks(await listRequiredCheckRuns(gh, repo, headSha));
+    verdict = classifyRequiredSuite(await listRequiredCheckRuns(gh, repo, headSha));
   } catch {
     return null;
   }
-  // Still running = in flight. This is the distinction the whole field exists to draw,
-  // and getting it backwards would flag every healthy deliverable in the seconds
-  // between its gate starting and the merger landing it.
-  if (pending.length > 0) return null;
-  return (
-    'this deliverable is pre-authorized and its required checks have all concluded, but it has not merged — ' +
-    'the deterministic merger did not land it. Recover with Actions → build-merge → Run workflow (no inputs); ' +
-    'a sweep will find it. GHI #236'
-  );
+  switch (verdict.kind) {
+    // Still running = in flight. Getting this backwards would flag every healthy
+    // deliverable in the seconds between its gate starting and the merger landing it.
+    case 'in-flight':
+      return null;
+    case 'refused':
+      return {
+        kind: 'refused',
+        message:
+          `the required check ${verdict.contexts.map((c, i) => `${c} (${verdict.conclusions[i]})`).join(', ')} did not pass, ` +
+          'so GitHub is refusing this merge and it is right to. Re-running the merge sweep cannot repair it — the merger ' +
+          're-runs the same gate and will refuse again. Open the check to see what it found, then fix the deliverable or ' +
+          'close this pull request',
+      };
+    case 'unobserved': {
+      const age = Date.now() - Date.parse(updatedAt);
+      if (!Number.isFinite(age) || age < UNOBSERVED_AFTER_MS) return null;
+      // NAMES THE CONTEXT THAT IS ACTUALLY MISSING (Codex on PR #252, third review). The
+      // classifier distinguishes them; this message used to discard that and hard-code
+      // both the total-absence wording and `deliverable-gate` — so when deliverable-gate
+      // had succeeded and the independently-started plan-gate was the absent one, the
+      // remedy pointed at the healthy workflow.
+      return {
+        kind: 'unobserved',
+        message:
+          `${verdict.contexts.join(' and ')} ${verdict.contexts.length > 1 ? 'have' : 'has'} not reported on this ` +
+          'deliverable, and it has been open a while. The merger is waiting for a verdict that never arrived, so the ' +
+          `thing to look at is ${verdict.contexts.join(' / ')} — check whether ${verdict.contexts.length > 1 ? 'those sweeps' : 'that sweep'} ` +
+          'ran for this pull request — not build-merge',
+      };
+    }
+    case 'settled':
+      return {
+        kind: 'stalled',
+        message:
+          'this deliverable is pre-authorized and its required checks have all concluded, but it has not merged — ' +
+          'the deterministic merger did not land it. Recover with Actions → build-merge → Run workflow (no inputs); ' +
+          'a sweep will find it. GHI #236',
+      };
+  }
 }
 
 /** What a caller wants beyond the listing itself. */
@@ -552,9 +603,9 @@ export async function listDeliverablePrs(
       // Read only for the row that could BE stalled, and only when the caller asked:
       // open, awaiting the deterministic merger, and pre-authorized. Everything else is
       // `null` because the question does not apply to it, not because it passed.
-      stalledPreAuthorized:
+      preAuthorizedHold:
         options.detectMergeStalls === true && isOpen && state === 'awaiting-merge' && authority === 'pre-authorized'
-          ? await describeMergeStall(gh, repo, pr.head.sha)
+          ? await describeMergeHold(gh, repo, pr.head.sha, pr.updated_at)
           : null,
       mergeAuthority: authority,
       mergeReason,

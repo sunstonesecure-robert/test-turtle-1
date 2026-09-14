@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { parseDeliverableMarker } from '../dashboard/lib/github/markers';
@@ -68,8 +69,10 @@ import {
  * *"is in progress"*, *"is expected"*, *"Base branch was modified"* — is recorded as
  * `waiting-on-checks`, NOT as `blocked`: it is a statement about this instant, not
  * about this pull request, and the two must never be filed under one word again.
- * `templates/workflows/build-merge.yml` carries the backstop for a wait that expires
- * (a `check_suite: completed` trigger), so nothing here has to succeed on the first try.
+ * A wait that EXPIRES leaves a visible hold, not a silent one: `waiting-on-checks` is
+ * recorded, the Builds page names it, and an operator clears it with a no-input dispatch.
+ * There is no automatic retry — the `check_suite` backstop this file used to promise was
+ * measured inert (45 runs, zero) and removed. See `waitForRequiredChecks` below.
  *
  * WHY IT NEEDS NO RULESET BYPASS. `setup-repo.ts` grants the main ruleset's only
  * bypass to the repo-admin role; the `github-actions` Integration deliberately holds
@@ -90,7 +93,7 @@ export type MergeOutcome =
    * until 2026-09-13, which is how a deliverable that was thirty seconds from merging
    * came to be filed as permanently refused behind a green run. Exits the sweep
    * successfully like `blocked` does, but the Builds page reads it as a live state and
-   * the workflow's `check_suite` trigger brings another sweep when the gate concludes.
+   * the next sweep — an operator's dispatch, or the next deliverable's gate — finds it.
    */
   | { outcome: 'waiting-on-checks'; prNumber: number; reason: string; pending: PendingRequiredCheck[] }
   | { outcome: 'no-pr'; branch: string }
@@ -117,6 +120,9 @@ export interface MergeOptions {
   /** passed straight to `waitForRequiredChecks` — the tests inject a fake clock and
    *  sleep so the wait's re-read is proved without spending real seconds */
   wait?: Parameters<typeof waitForRequiredChecks>[3];
+  /** called the instant `pulls.merge` returns and BEFORE any ancillary write, so a merge
+   *  can never be performed without being recorded and verified (Codex on PR #252) */
+  onMerged?: (merged: { prNumber: number; sha: string }) => Promise<void>;
 }
 
 /**
@@ -147,8 +153,9 @@ export function isTransientMergeRefusal(message: string): boolean {
 
 /** How long the merger waits for the required contexts, and how often it looks.
  *  Five minutes because the live case settled in 31 s and the job's own cap is 10
- *  minutes — long enough that the ordinary race never reaches the backstop, short
- *  enough that a genuinely stuck gate does not burn the job. */
+ *  minutes — long enough that the ordinary race settles well inside it, short enough
+ *  that a genuinely stuck gate does not burn the job. Shared across the whole sweep, not
+ *  per candidate (see `sweepMergeable`). */
 const WAIT_BUDGET_MS = 5 * 60 * 1000;
 const WAIT_POLL_MS = 10 * 1000;
 
@@ -156,11 +163,25 @@ const WAIT_POLL_MS = 10 * 1000;
  * Wait until no required context has a run still going on `sha`, and report what was
  * still pending when the budget ran out (empty = settled).
  *
- * THE WAIT IS BOUNDED AND ITS EXPIRY IS NOT A FAILURE. The `check_suite: completed`
- * trigger on this workflow brings another sweep when the gate concludes, so an expired
- * wait costs one more sweep rather than a stall — belt and braces for a chain that has
- * now produced three distinct silent stalls (T245, GHI #228, and this one), each for a
- * different reason.
+ * THE WAIT IS BOUNDED, AND ITS EXPIRY IS A VISIBLE STALL AN OPERATOR CLEARS. This
+ * docblock used to promise that a `check_suite: completed` trigger brought another
+ * sweep. It never did: GitHub's anti-recursion rule suppresses every event caused by
+ * `GITHUB_TOKEN`, and a check suite in a governed repo is created by the Actions app.
+ * Measured on test-turtle-1 2026-09-13 — 45 `build-merge` runs, ZERO on `check_suite`,
+ * with the trigger installed and check suites completing throughout. The same rule kills
+ * the other candidate: the `pull_request` copy of `deliverable-gate` carries
+ * `actor = github-actions[bot]`, so its completion fires no `workflow_run` either (gate
+ * run 34697342001 on PR #94 concluded `success` with no `build-merge` behind it).
+ *
+ * Only `workflow_dispatch`, `repository_dispatch` and `schedule` are delivered here, and
+ * this workflow takes none of them automatically — a scheduled sweep is a standing
+ * decision against (see the workflow header). So when this wait expires the deliverable
+ * stays open, `waiting-on-checks` is recorded, the Builds page names the hold, and the
+ * operator clears it with *Actions → build-merge → Run workflow*. That is a real hole in
+ * the unattended path, stated rather than papered over (operator decision 2026-09-13,
+ * option A). What removes the RACE that causes it is a change one layer up:
+ * `deliverable-gate` no longer runs its `pull_request` copy for a bot-opened deliverable,
+ * so no second in-progress required context is ever created.
  *
  * `sleep` is injectable so the tests do not spend real seconds proving the loop
  * re-reads; nothing else about the wait changes between the two.
@@ -236,7 +257,8 @@ export async function mergeIfPreAuthorized(
       reason:
         `required check ${pendingPhrase(pending)} has not concluded on ${pr.head.sha.slice(0, 8)} — not merged, and ` +
         'NOT blocked: nothing is wrong with this deliverable and the answer is not available yet. The next sweep ' +
-        "(this workflow's check_suite trigger, or Actions → build-merge → Run workflow) will find it",
+        'will find it — an operator dispatch (Actions → build-merge → Run workflow, no inputs), or the next ' +
+        "deliverable's gate. Nothing retries on its own",
       pending,
     };
   }
@@ -251,7 +273,31 @@ export async function mergeIfPreAuthorized(
         `Pre-authorized by the approved plan (FR-062).\n\n` +
         `plan: ${marker.planRef}\nstep: ${marker.stepId}\nexecutor: ${marker.executorId}\nbuild run: ${marker.runId}\n`,
     });
-    await setBuildLabel(gh, repo, pr.number, 'build:merged');
+    // RECORDED AND VERIFIED BEFORE ANY ANCILLARY WRITE (Codex on PR #252, third review).
+    //
+    // `setBuildLabel` used to sit between the merge and the caller learning about it, and
+    // it can throw: `removeLabel` rethrows anything that is not a 404. A failure there —
+    // or a cancellation in that window — meant `mergeIfPreAuthorized` never returned, so
+    // the sweep's callback never fired: no `BM_RESULTS_FILE` line, no `build-verify`
+    // dispatch. And the pull request is MERGED by then, so no later sweep can find it
+    // (`sweepMergeable` lists `state: 'open'` only). An unverified merge on the default
+    // branch, unreachable by any retry.
+    //
+    // The ordering is now: merge → record and dispatch → label. The label is the only one
+    // of the three that is recoverable on its own — the `pull_request` close event runs
+    // `transitionOnClose`, which sets it from the merge GitHub already performed.
+    await opts.onMerged?.({ prNumber: pr.number, sha: data.sha });
+    try {
+      await setBuildLabel(gh, repo, pr.number, 'build:merged');
+    } catch (error: unknown) {
+      // Loud, and NOT fatal. The merge happened, it is recorded and its verification has
+      // started; losing the outcome now because a label write failed would undo the whole
+      // point of the ordering above.
+      console.error(
+        `merged PR #${pr.number} but could not set build:merged (${errorMessage(error)}) — the close event's ` +
+          'transition will set it; the merge and its verification are unaffected',
+      );
+    }
     return { outcome: 'merged', prNumber: pr.number, sha: data.sha };
   } catch (error: unknown) {
     // ONLY THE EXPECTED NON-MERGEABLE ANSWERS BECOME `blocked` (Codex on PR #145,
@@ -274,7 +320,7 @@ export async function mergeIfPreAuthorized(
     // progress, or the base branch can move, between the last poll and the merge call
     // — and the two arrive under the SAME 405. Recorded as `waiting-on-checks`, which
     // exits the sweep successfully like `blocked` but says "not yet" instead of "no",
-    // so the Builds page keeps showing it and the backstop sweep retries it.
+    // so the Builds page keeps showing it and the next sweep can still land it.
     const status = errorStatus(error);
     if (status === 405 || status === 409 || status === 422) {
       const message = errorMessage(error);
@@ -305,16 +351,44 @@ export async function sweepMergeable(
   gh: Octokit,
   repo: RepoRef,
   opts: MergeOptions = {},
+  /** called the instant each outcome is formed and AWAITED before the next candidate is
+   *  touched — see ONE DEADLINE FOR THE WHOLE SWEEP below for why the caller needs this,
+   *  and the CLI for why it starts verification from here rather than after the loop */
+  onOutcome?: (outcome: MergeOutcome) => void | Promise<void>,
 ): Promise<MergeOutcome[]> {
   // A thrown operational failure propagates out of here by design (see the catch in
   // `mergeIfPreAuthorized`): one unmergeable pull request is a result, but a broken
   // API is a broken sweep, and finishing the loop quietly would hide it.
   const open = await gh.paginate(gh.pulls.list, { ...repo, state: 'open', per_page: 100 });
   const out: MergeOutcome[] = [];
+  // ONE DEADLINE FOR THE WHOLE SWEEP, not one per candidate (Codex on PR #252).
+  //
+  // Each candidate used to get the FULL five-minute wait, serially, under a job whose
+  // own cap is ten minutes. Two slow candidates plus checkout, setup-node and `npm ci`
+  // already exceed it — and a job cancelled at the cap takes the process down mid-loop,
+  // so merges this sweep ALREADY MADE were never printed and never recorded. The dispatch
+  // step then starts no verification for them, and a `GITHUB_TOKEN` merge emits no
+  // `push` to start one by any other route: an unverified merge sitting on the default
+  // branch behind a GREEN build-merge run. `sweepMergeable` lists `state: 'open'` only,
+  // so the merged-but-unrecorded pull request is never found again by a later sweep.
+  //
+  // The budget is therefore shared. A later candidate inherits whatever is left, and
+  // `budgetMs: 0` degrades to exactly one reading and a `waiting-on-checks` — a state
+  // this file already produces correctly and the next sweep resolves.
+  const now = opts.wait?.now ?? (() => Date.now());
+  const sweepDeadline = now() + (opts.wait?.budgetMs ?? WAIT_BUDGET_MS);
   for (const pr of open) {
     if (!pr.head.ref.startsWith('build/')) continue;
     if (!parseDeliverableMarker(pr.body ?? '')) continue;
-    out.push(await mergeIfPreAuthorized(gh, repo, pr.head.ref, opts));
+    const outcome = await mergeIfPreAuthorized(gh, repo, pr.head.ref, {
+      ...opts,
+      wait: { ...opts.wait, budgetMs: Math.max(0, sweepDeadline - now()) },
+    });
+    out.push(outcome);
+    // RECORDED BEFORE THE NEXT CANDIDATE IS TOUCHED. Printing only after the whole
+    // sweep resolves is the other half of the defect above: a throw or a cancellation
+    // mid-loop loses every outcome already formed.
+    await onOutcome?.(outcome);
   }
   return out;
 }
@@ -353,10 +427,90 @@ if (isMain) {
     // (the gate is red, or the operator's merge is required). Exiting non-zero would
     // turn "waiting for a human" into a red run, which is exactly the misreading
     // FR-067 forbids on the operator's own surfaces.
-    void sweepMergeable(gh, repo, opts)
+    // WRITTEN AS THEY HAPPEN, not collected and printed at the end (Codex on PR #252).
+    // `| tee` cannot save this: the shell buffers, and a job cancelled at its timeout
+    // takes the process down with the buffer unflushed. An unbuffered append per outcome
+    // is what survives both the mid-loop throw this file deliberately propagates and the
+    // SIGTERM a job-level timeout sends — and the record is what the workflow's dispatch
+    // step reads to start verification for each merge. A merge that HAPPENED must always
+    // be recorded and verified, even when the sweep around it did not finish.
+    const resultsFile = process.env.BM_RESULTS_FILE;
+    // VERIFICATION IS STARTED HERE, PER MERGE, NOT AFTER THE LOOP (Codex on PR #252,
+    // second review). The previous shape recorded each merge to a runner-local file and
+    // left a later workflow STEP to dispatch verification for all of them. `always()`
+    // does not rescue that: `timeout-minutes` cancels the JOB, and a runner-local file
+    // dies with it — so a merge that had already landed could end up on the default
+    // branch with no verification and no record, and `sweepMergeable` lists OPEN pull
+    // requests only, so no later sweep would ever find it again.
+    //
+    // Starting the verify run immediately after `pulls.merge` returns makes the two
+    // atomic in the only sense that matters: nothing between them can be lost. The
+    // workflow step remains as a BACKSTOP for anything this missed. A `workflow_dispatch`
+    // made with GITHUB_TOKEN is the documented exemption to the anti-recursion rule and
+    // is proven here twice (E1a).
+    const failures: string[] = [];
+    const defaultBranch = process.env.BM_DEFAULT_BRANCH;
+    const append = (line: string): void => {
+      if (!resultsFile) return;
+      try {
+        appendFileSync(resultsFile, `${line}\n`);
+      } catch (error: unknown) {
+        // NOT swallowed. stderr does not fail a step — the comment here used to claim it
+        // did, and it was wrong. Collected, and the run exits 1 below, because a merge
+        // nobody recorded is a merge nobody verifies.
+        failures.push(`could not append to BM_RESULTS_FILE (${resultsFile}): ${errorMessage(error)}`);
+      }
+    };
+    // CALLED BEFORE ANY ANCILLARY WRITE, so a merge cannot exist without its record and
+    // its verification (Codex on PR #252, third review).
+    //
+    // `verifyDispatched` is what stops the workflow's backstop step dispatching a SECOND
+    // run for every merge (same review). Nothing recorded whether this succeeded, so the
+    // backstop re-dispatched unconditionally: two verify runs per merge, double the cost,
+    // and a duplicate result able to supersede the first. The backstop now dispatches
+    // only the merges whose line says verification did NOT start.
+    const onMerged = async ({ prNumber, sha }: { prNumber: number; sha: string }): Promise<void> => {
+      let verifyDispatched = false;
+      if (!defaultBranch) {
+        failures.push(`merged PR #${prNumber} but BM_DEFAULT_BRANCH is unset, so no build-verify run was started`);
+      } else {
+        try {
+          await gh.actions.createWorkflowDispatch({
+            ...repo,
+            workflow_id: 'build-verify.yml',
+            ref: defaultBranch,
+            inputs: { commit: sha },
+          });
+          verifyDispatched = true;
+          console.log(`started build-verify for merge commit ${sha} (E1: expect a run with event=workflow_dispatch)`);
+        } catch (error: unknown) {
+          // EVERY merge is still attempted — one refused dispatch must not leave the later
+          // merges undispatched and unnamed (PR #204 finding F9). Collected, reported with
+          // its by-hand remedy, and the backstop step will try this sha again.
+          failures.push(
+            `merged PR #${prNumber} → ${sha} but could not start build-verify: ${errorMessage(error)}. ` +
+              `The backstop step will retry it; by hand: gh workflow run build-verify.yml -f commit=${sha}`,
+          );
+        }
+      }
+      append(JSON.stringify({ outcome: 'merged', prNumber, sha, verifyDispatched }));
+    };
+    // The JSONL line for a merge is written by `onMerged` above, before the label write;
+    // this records every OTHER outcome, and prints them all.
+    const record = (r: MergeOutcome): void => {
+      console.log(JSON.stringify(r));
+      if (r.outcome !== 'merged') append(JSON.stringify(r));
+    };
+    void sweepMergeable(gh, repo, { ...opts, onMerged }, record)
       .then((results) => {
         if (results.length === 0) console.log('no open deliverable pull requests — nothing to merge');
-        for (const r of results) console.log(JSON.stringify(r));
+        if (failures.length > 0) {
+          for (const f of failures) console.error(f);
+          // A merge that landed without its verification started, or without its record
+          // written, is the silent-stall class this whole file exists to close. It must
+          // be loud.
+          process.exit(1);
+        }
       })
       .catch((error) => {
         console.error(errorMessage(error));
@@ -380,8 +534,10 @@ if (isMain) {
           process.exit(1);
           break;
         // EXIT 0, deliberately. A red run here would say the merger failed, and it did
-        // not: it declined to ask a question whose answer was not ready. The retry is
-        // the workflow's own backstop trigger, not an operator re-running a red job.
+        // not: it declined to ask a question whose answer was not ready. What clears it
+        // is the next sweep — the operator's own dispatch, or the one the next
+        // deliverable's gate starts. NOT a `check_suite` retry: that trigger never fired
+        // and has been removed (GHI #236 follow-up, Codex on PR #252).
         case 'waiting-on-checks':
           console.log(`PR #${result.prNumber} not merged yet: ${result.reason}`);
           break;

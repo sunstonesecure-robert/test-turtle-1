@@ -138,15 +138,20 @@ export const INSTALLED_STRUCTURE: readonly StructuralClause[] = [
       'ever be completed — the verification results exist only inside a run artifact',
   },
   {
-    // GHI #236: without this trigger the merge sweep is started only by the SWEEP copy
-    // of deliverable-gate, never by the `pull_request` copy concluding — which is the
-    // event that makes a raced merge merge-able. A pre-authorized deliverable then
-    // stalls behind a green run with no surface reporting it.
+    // GHI #236 follow-up (Codex on PR #252). This clause named `check_suite:` until
+    // 2026-09-13 — a trigger that GitHub's anti-recursion rule makes INERT, measured at
+    // 45 build-merge runs and zero on that event. Readiness was certifying a capability
+    // that did not exist, which is the exact failure I7's structural clauses were added
+    // to prevent, on their first use. Repointed at a fact that IS load-bearing and DOES
+    // hold: the sweep records each merge as it happens rather than through a buffered
+    // pipe, so a job cancelled at its cap cannot leave a merged deliverable unrecorded
+    // and therefore unverified.
     file: 'build-merge.yml',
-    pattern: /^\s{2}check_suite:/m,
+    pattern: /^\s+BM_RESULTS_FILE:/m,
     breaks:
-      'a pre-authorized deliverable that loses the race with its own required check is never retried — it sits ' +
-      'open behind a green build-merge run until an operator dispatches the sweep by hand',
+      'a sweep cancelled at the job timeout loses the record of merges it already made — those deliverables get no ' +
+      'verification run and no later sweep ever finds them again, leaving an unverified merge on the default branch ' +
+      'behind a green build-merge run',
   },
 ];
 

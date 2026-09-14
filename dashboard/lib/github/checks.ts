@@ -244,21 +244,60 @@ export function deriveCompletionStatus(
   const unmet: string[] = [];
   for (const [vtId, mustStepIds] of mustStepsByVt) {
     const run = runs.get(vtId);
+    // DELIVERY IS ASKED FIRST, BEFORE ANY EXISTING CHECK RUN (Codex on PR #252, second
+    // review). This test used to sit inside `if (!run)`, and that was a completion-
+    // integrity hole of GHI #141's own family — a completion earned against code the
+    // repository does not contain.
+    //
+    // Check runs are IMMUTABLE and they outlive the verifier that wrote them. The
+    // pre-#231 verifier reported EVERY target of the plan on every merge, including
+    // targets for steps nobody had built; install this version into a repository with an
+    // in-progress plan and the newest merge commit still carries those runs. A legacy
+    // `success` for an UNDELIVERED MUST target would then be read as `passing` — and
+    // re-verifying could never clear it, because the new verifier deliberately emits no
+    // replacement for a target whose step has not been delivered. A stale green with no
+    // way to retract it is precisely what this product refuses.
+    //
+    // So the plan's own record of what was BUILT outranks any check run's claim about
+    // it: an undelivered step's target is `not-built` whatever the history says.
+    //
+    // SCOPED TO A WORKLOAD THAT HAS ACTUALLY DELIVERED SOMETHING, and this is not a
+    // softening — it is the difference between two records that look identical and mean
+    // opposite things. When `deliveredStepIds` is EMPTY the workload has no merged
+    // deliverable at all, so `resolveVerifiedCommit` is on the pre-US18 COMPATIBILITY
+    // SHIM: the verified commit is the frozen tag's own, and any `vt-*` runs there were
+    // written by a build that verified the FROZEN TREE, which is the legitimate record
+    // for that cohort (FR-063's migration). Disregarding them would make every plan
+    // frozen before 2026-08-24 permanently uncompletable — trading a stale-green hole
+    // for a strictly larger one. An empty record is "I have nothing to say", not "nothing
+    // was delivered", and it must not be read as the second.
+    //
+    // A post-US18 workload with nothing merged lands in the same branch and is unharmed:
+    // it has no `vt-*` runs on the frozen commit either, because `build-publish` creates
+    // nothing for a build with no deliverable.
+    const recordIsAuthoritative = delivery !== undefined && delivery.deliveredStepIds.size > 0;
+    const notBuilt = delivery === undefined ? [] : mustStepIds.filter((id) => !delivery.deliveredStepIds.has(id));
+    // An EXISTING run is only disregarded when the record is authoritative; an ABSENT one
+    // needs no such caution, because there is no stale green to weigh against. That split
+    // is what lets GHI #231's "not built yet" survive on a workload with nothing merged
+    // while the shim's legitimate frozen-tree results still count.
+    if (notBuilt.length > 0 && (!run || recordIsAuthoritative)) {
+      targets.push({ vtId, mustStepIds, status: 'not-built', conclusion: null, detailsUrl: null });
+      unmet.push(
+        `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) has not been verified because ` +
+          `${stepsPhrase(notBuilt)} ${notBuilt.length > 1 ? 'have' : 'has'} not been delivered yet — ` +
+          `dispatch the build for ${workItemsPhrase(notBuilt, delivery!)}. This is not a failing target` +
+          (run
+            ? `. A ${vtId} check run exists on this commit and is DISREGARDED: it was written by a verifier that ` +
+              'reported targets for undelivered steps, and a result about work the repository does not contain is ' +
+              'not evidence about it'
+            : ''),
+      );
+      continue;
+    }
     if (!run) {
-      // WHY there is no check run decides the remedy, and until 2026-09-13 the only
-      // sentence available assumed a build had already run. `build-verify` does not
-      // report a target whose step has no merged deliverable (GHI #231), so on a
-      // part-delivered plan this is the ORDINARY case, not an anomaly.
-      const notBuilt = delivery === undefined ? [] : mustStepIds.filter((id) => !delivery.deliveredStepIds.has(id));
-      if (notBuilt.length > 0) {
-        targets.push({ vtId, mustStepIds, status: 'not-built', conclusion: null, detailsUrl: null });
-        unmet.push(
-          `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) has not been verified because ` +
-            `${stepsPhrase(notBuilt)} ${notBuilt.length > 1 ? 'have' : 'has'} not been delivered yet — ` +
-            `dispatch the build for ${workItemsPhrase(notBuilt, delivery!)}. This is not a failing target`,
-        );
-        continue;
-      }
+      // The step WAS delivered and nothing reported — a different fault from the one
+      // above, wanting a different action: find out why the verification did not report.
       targets.push({ vtId, mustStepIds, status: 'unverified', conclusion: null, detailsUrl: null });
       unmet.push(
         `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) is unverified — its ${stepsPhrase(mustStepIds)} ` +

@@ -169,7 +169,8 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
      command is exempt from `set -e` so nothing catches it. Assert the file exists first
      (`test -f <path> && ! grep -q … <path>`).
 
-   Also: `run` must be valid shell. G19 parses every command with `bash -n`, because one
+   Also: `run` must be valid shell. G19 parses every command with `bash -n` — including the
+   body inside `bash -c '…'`, which an outer parse treats as one opaque word — because one
    that does not parse can never report anything — it concludes `failure` on every build
    with an error that looks like the step's fault.
 

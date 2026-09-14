@@ -127,7 +127,30 @@ jobs:
     # which satisfies the required-check rule — a plain skip, never a fail, so approval
     # PRs and ordinary development PRs are not blocked. Same shape as plan-gate's own
     # `plan/**` condition, for the same reason.
-    if: github.event_name == 'pull_request' && startsWith(github.event.pull_request.head.ref, 'build/')
+    #
+    # AND NOT FOR A DELIVERABLE THE PUBLISHER OPENED (GHI #236 at source; operator
+    # decision 2026-09-13, option D). A bot-opened pull request gets its `pull_request`
+    # workflow run created in the approval-required state, and APPROVING that run is what
+    # produced the race: a SECOND check run under the required `deliverable-gate` context
+    # goes in progress, and `build-merge` — started by the sweep copy's completion — asked
+    # GitHub to merge while it was still running. GitHub refused as a rule violation and
+    # PR #94 sat open 101 minutes behind a green run (PB-017 finding 14).
+    #
+    # Skipping here makes approving those shells HARMLESS rather than dangerous: the job
+    # concludes `skipped` immediately, so no in-progress required context is ever created
+    # and there is no race to lose. The deliverable is still gated — by the SWEEP copy,
+    # which publishes the required check run — and nothing merges on that record alone:
+    # `build-merge` re-runs `deliverableGate` in-process before it calls `pulls.merge`, so
+    # the merge is conditional on the gate's verdict about the code being merged, never on
+    # a check run's claim. This retires PB-017 finding 14's standing operator guidance
+    # ("do NOT approve the pull_request gate shells").
+    #
+    # A HUMAN-opened pull request on a build/** branch still runs here: it has no sweep
+    # behind it, and it is the case where this copy is the only gate.
+    if: >-
+      github.event_name == 'pull_request'
+      && startsWith(github.event.pull_request.head.ref, 'build/')
+      && github.event.pull_request.user.login != 'github-actions[bot]'
     permissions:
       contents: read # read the frozen plan and compare commits for D1's descendancy check
       pull-requests: read # the PR body's deliverable:v1 marker and its changed file list

@@ -128,8 +128,8 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    a `;`-list or a `for` loop reports only its LAST command's status (chain with `&&`, or
    begin with `set -e`), and `! grep … <path>` turns grep's exit 2 on a MISSING FILE into
    a pass (assert the file exists first). `run` must also be valid shell: G19 parses every
-   command with `bash -n`, because one that does not parse concludes `failure` on every
-   build with an error that reads like the step's fault.
+   command with `bash -n` — including the body inside `bash -c '…'` — because one that does
+   not parse concludes `failure` on every build with an error that reads like the step's fault.
    **`tracking_issue` is inherited, never created.** It names the work item (a `chunk:*`
    issue) a step delivers, and the operator is the only writer of it: they bind every step on
    the review page, under **Work items**, at **Commit for approval** — so do not "help" by
