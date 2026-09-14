@@ -222,3 +222,40 @@ node_modules/
 .next/
 *.tsbuildinfo
 dashboard/.env.local
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Landing Zone Accelerator — Phase 0 generated & sensitive paths (REP-007/REP-008)
+# Everything below is generated at run time or holds credentials/account IDs and
+# MUST NOT be committed. Desired-state files under config/, control-tower/ and
+# deployment/ are tracked; the paths here are their build products and secrets.
+
+# AWS credentials and local CLI state
+.aws/
+*.pem
+*.key
+credentials
+aws-credentials*
+
+# Upstream LZA source checked out and verified at run time
+vendor/
+
+# Build products (rendered manifests carry real account IDs; CDK synth output)
+build/
+cdk.out/
+
+# Downloaded upstream archives / installer bundles
+*.tgz
+*.tar.gz
+*.zip
+
+# Generated deployment evidence and state (GitHub artifacts are the default — REP-007)
+deployment-evidence.json
+deployment-state.json
+*.evidence.json
+govcloud-control-support.json
+
+# Environment and token files
+.env
+.env.*
+*.token
+*token*.txt
