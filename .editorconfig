@@ -1,0 +1,34 @@
+# EditorConfig — https://editorconfig.org
+# Consistent whitespace for the Phase 0 desired-state repository.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# YAML desired-state (config/, control-tower/, deployment/) — two-space indent.
+[*.{yaml,yml}]
+indent_style = space
+indent_size = 2
+
+# JSON documents and schemas.
+[*.json]
+indent_style = space
+indent_size = 2
+
+# Shell scripts under deploy/scripts and Bats tests.
+[*.{sh,bats}]
+indent_style = space
+indent_size = 2
+
+# Makefile requires literal tabs for recipe lines.
+[Makefile]
+indent_style = tab
+
+# Markdown — do not trim trailing whitespace (hard line breaks are significant).
+[*.md]
+trim_trailing_whitespace = false

@@ -1,0 +1,22 @@
+# CODEOWNERS — repository root (REQ-047; .github/CODEOWNERS is reserved)
+#
+# Purpose (REP-013): any change to the pinned upstream lock, the Control Tower
+# desired-state declarations, the LZA configuration, or the repository JSON
+# Schemas MUST receive owner review. Placing this file in the same delivery as
+# those paths means their very first change already requires the review REP-013
+# mandates.
+#
+# Patterns are most-specific-last, per GitHub CODEOWNERS precedence.
+
+# Provenance lock — the single record of the upstream release and toolchain.
+/lza.lock                    @sunstonesecure-robert
+
+# Control Tower desired-state: manifest template, baselines, controls,
+# exceptions and the ownership matrix (REP-004/REP-005/REP-013).
+/control-tower/**            @sunstonesecure-robert
+
+# The six mandatory LZA configuration files (REP-001).
+/config/**                   @sunstonesecure-robert
+
+# Repository JSON Schemas that every desired-state file validates against.
+/deployment/schemas/**       @sunstonesecure-robert

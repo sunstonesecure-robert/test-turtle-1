@@ -1,0 +1,31 @@
+# yamllint configuration — invoked by the Phase 0 offline gate (Section 7.1, check 6).
+# Applied to the desired-state YAML under config/, control-tower/ and deployment/.
+extends: default
+
+rules:
+  # LZA and Control Tower documents have long single-line ARNs, policy
+  # statements and URLs; do not fail on line length.
+  line-length: disable
+
+  # Two-space block indentation, matching .editorconfig.
+  indentation:
+    spaces: 2
+    indent-sequences: true
+
+  # Require a document start marker so multi-doc files are unambiguous.
+  document-start:
+    present: true
+
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: enable
+
+  # Allow the common desired-state booleans as written.
+  truthy:
+    allowed-values: ['true', 'false']
+    check-keys: false
+
+  # Do not require newline discipline beyond a single trailing newline.
+  empty-lines:
+    max: 2
+    max-end: 1
