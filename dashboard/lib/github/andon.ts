@@ -22,7 +22,7 @@ import { approvalPrMerged, closeOpenApprovalPr } from './approval';
 // The live/terminal split of the andon:* family, and the one predicate that reads it —
 // taken from the taxonomy rather than re-spelled, so a query here can never disagree with
 // the break page about which labels mean "still waiting on you".
-import { isLiveAndon, LIVE_ANDON_LABELS } from './labels';
+import { ANDON_LABELS, isLiveAndon, LIVE_ANDON_LABELS } from './labels';
 import { inertLogin } from '../actor-identity';
 import {
   parseAndonHeader,
@@ -246,6 +246,88 @@ export async function findResolvedAndonByPlanRef(gh: Octokit, repo: RepoRef, pla
   const breaks = await gh.paginate(gh.issues.listForRepo, { ...repo, labels: 'andon:resolved', state: 'closed', per_page: 100 });
   const match = breaks.find((issue) => parseAndonHeader(issue.body ?? '')?.planRef === planRef);
   return match?.number ?? null;
+}
+
+/** Which of the four andon states a label set is in, or null for an issue that is not a
+ *  break at all. */
+export type AndonState = (typeof ANDON_LABELS)[number];
+
+/**
+ * The state of a break from its labels alone.
+ *
+ * TERMINAL BEATS LIVE, and that is the whole reason this is not `labels.find(...)`.
+ * A break mid-teardown carries its live label UNDER its terminal one — `withdrawProposal`
+ * adds `andon:superseded` before removing `andon:open`, the crash-safe ordering GHI #48
+ * established so a partial failure never leaves a break with no andon:* label at all. Read
+ * in label order, such a break reads "waiting for your review" while it is in fact
+ * withdrawn, and the register would invite an operator into a review that has ended. The
+ * same precedence `isLiveAndon` already applies, stated once more as a value rather than a
+ * boolean because the register needs to name the state, not just ask whether it is live.
+ *
+ * Two terminal labels at once is a taxonomy violation (`exclusivityViolations` is what
+ * reports it as one, and it is not this function's job to). Resolved wins the tie so the
+ * answer is deterministic rather than dependent on GitHub's label ordering.
+ */
+export function andonStateFromLabels(labels: string[]): AndonState | null {
+  const has = (l: string) => labels.includes(l);
+  if (has('andon:resolved')) return 'andon:resolved';
+  if (has('andon:superseded')) return 'andon:superseded';
+  if (has('andon:under-review')) return 'andon:under-review';
+  if (has('andon:open')) return 'andon:open';
+  return null;
+}
+
+/** One row of the register. `published` is the andon:v1 header's presence — the same
+ *  distinction the Inbox draws, because a break whose plan was never published is a
+ *  real break with nothing to read yet, not a missing one. */
+export interface AndonRegisterEntry {
+  number: number;
+  title: string;
+  state: AndonState;
+  planRef: string | null;
+  runId: string | null;
+  published: boolean;
+  updatedAt: string;
+}
+
+/**
+ * Every Andon break in the repository, newest activity first.
+ *
+ * FOUR READS, NOT ONE. `labels` on the issues list is AND-semantic, so a single call
+ * asking for all four labels returns the breaks carrying all four — which is none. The
+ * same reason `findLiveAndonsBySlug` above queries its two labels separately.
+ *
+ * `state: 'all'` deliberately: live breaks are open issues and terminal ones are closed,
+ * and the register's entire purpose is to show both. A break is deduped by number because
+ * the teardown overlap above means one issue can legitimately answer two of these queries.
+ *
+ * Pull requests are excluded. GitHub's issues list returns them, they cannot be breaks,
+ * and one carrying a stray andon:* label would otherwise appear as a review to open.
+ */
+export async function listAndonBreaks(gh: Octokit, repo: RepoRef): Promise<AndonRegisterEntry[]> {
+  const pages = await Promise.all(
+    ANDON_LABELS.map((label) => gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'all', per_page: 100 })),
+  );
+  const byNumber = new Map<number, AndonRegisterEntry>();
+  for (const issue of pages.flat()) {
+    if (issue.pull_request) continue;
+    const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+    const state = andonStateFromLabels(labels);
+    if (state === null) continue;
+    const body = issue.body ?? '';
+    const header = parseAndonHeader(body);
+    const unpublished = header ? null : unpublishedAndonFromBody(body);
+    byNumber.set(issue.number, {
+      number: issue.number,
+      title: issue.title,
+      state,
+      planRef: header?.planRef ?? unpublished?.planRef ?? null,
+      runId: unpublished?.runId ?? null,
+      published: header !== null,
+      updatedAt: issue.updated_at,
+    });
+  }
+  return [...byNumber.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.number - a.number);
 }
 
 /** Every LIVE break (open or under-review) belonging to a workload — matched
