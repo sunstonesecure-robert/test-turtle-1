@@ -229,44 +229,122 @@ export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: numb
 }
 
 /**
+ * What the sweep observed about ONE deliverable pull request.
+ *
+ * A judged pull request and one the gate could not read are different facts and are
+ * modelled as different shapes, so no caller can average them into "not passing". A
+ * `fault` entry is the honest "no verdict was reached"; `unrecorded` says the verdict
+ * exists but the check run carrying it does not.
+ */
+export type SweepEntry =
+  | { prNumber: number; report: GateReport; unrecorded?: string }
+  | { prNumber: number; headSha: string; fault: string; unrecorded?: string };
+
+/**
  * Gate every open deliverable pull request and record the verdict as a check run.
  *
- * Returns the reports so the caller can exit non-zero on a red one — but a red gate
- * here is NOT a failed sweep: the check run is the product, and it has been written.
+ * Returns one entry per pull request so the caller can exit non-zero on a red one — but
+ * a red gate here is NOT a failed sweep: the check run is the product, and it has been
+ * written. What IS a failed sweep is a pull request left with no check run at all, which
+ * is why every per-pull-request fault is caught, recorded and carried in the return value
+ * instead of ending the loop (GHI #267).
  */
 export async function sweepDeliverablePrs(
   gh: Octokit,
   repo: RepoRef,
   opts: { write?: boolean } = {},
-): Promise<{ prNumber: number; report: GateReport }[]> {
+): Promise<SweepEntry[]> {
   const open = await gh.paginate(gh.pulls.list, { ...repo, state: 'open', per_page: 100 });
-  const out: { prNumber: number; report: GateReport }[] = [];
+  const out: SweepEntry[] = [];
   for (const pr of open) {
     if (!pr.head.ref.startsWith('build/')) continue;
     // The marker, not the branch name, is what makes this a deliverable: only the
     // deterministic writer emits one, and it holds a write scope no executor has.
     if (!/<!--\s*deliverable:v1\s/.test(pr.body ?? '')) continue;
-    const report = await deliverableGate(gh, repo, pr.number);
-    if (opts.write !== false) {
-      await gh.checks.create({
-        ...repo,
-        name: DELIVERABLE_CHECK_NAME,
-        head_sha: pr.head.sha,
-        status: 'completed',
-        conclusion: report.result === 'pass' ? 'success' : 'failure',
-        output: {
-          title: report.result === 'pass' ? 'D1–D6 green' : `refused: ${refusalDetail(report.gates)}`.slice(0, 120),
-          // The gate's OWN sentences, never a paraphrase — the same rule every other
-          // refusal surface in this system follows (GHI #127).
-          summary: report.gates
-            .map((g) => `- **${g.id}** (${g.requirement}) — \`${g.status}\`${g.detail ? `: ${g.detail}` : ''}`)
-            .join('\n'),
-        },
-      });
+
+    // ONE PULL REQUEST'S FAULT IS ONE PULL REQUEST'S FAULT (GHI #267). `deliverableGate`
+    // throws `ApiUnavailableError` on any read it could not complete — deliberately, so
+    // an unreadable executor config never passes as "none declared" (GHI #108/#150). But
+    // that throw used to escape the loop: a single transient 500 on ONE pull request
+    // ended the sweep, so NO check run was written for it and none for any pull request
+    // after it. Observed live on test-turtle-1 (2026-09-15): one
+    // `GET /contents/executors/tracer-hello.yml - 500 ... other side closed` left PR #104
+    // with no `deliverable-gate` check at all — and `deliverable-gate` is a REQUIRED
+    // context on the default branch, so the pull request was unmergeable by a required
+    // check that had never run, with nothing to retry it.
+    //
+    // The sweep exists precisely because "a sweep that dies mid-loop leaves some pull
+    // requests judged and some not, and nothing retries" (GHI #236). It has to survive
+    // its own loop body to be that.
+    let entry: SweepEntry;
+    try {
+      entry = { prNumber: pr.number, report: await deliverableGate(gh, repo, pr.number) };
+    } catch (error: unknown) {
+      // FAIL CLOSED AND SAY WHICH. Not a pass, and not silence: the check run is written
+      // as a failure whose text says the gate could not read, never that a gate refused
+      // something. An operator reading "could not be run" knows to re-run the sweep; an
+      // operator reading nothing at all has nothing to read (GHI #150).
+      entry = { prNumber: pr.number, headSha: pr.head.sha, fault: errorMessage(error) };
     }
-    out.push({ prNumber: pr.number, report });
+
+    if (opts.write !== false) {
+      const unrecorded = await recordSweepVerdict(gh, repo, pr.head.sha, entry);
+      if (unrecorded !== null) entry = { ...entry, unrecorded };
+    }
+    out.push(entry);
   }
   return out;
+}
+
+/**
+ * Write one pull request's verdict as the required check run.
+ *
+ * Returns the reason it could not be written, or `null` when it was. Its own failures
+ * are returned rather than thrown: a check run that could not be written must not take
+ * down the judgement of every pull request behind it either — that is the same defect
+ * one level up. The caller still reports it, and the sweep still exits non-zero.
+ */
+async function recordSweepVerdict(
+  gh: Octokit,
+  repo: RepoRef,
+  headSha: string,
+  entry: SweepEntry,
+): Promise<string | null> {
+  const body =
+    'report' in entry
+      ? {
+          conclusion: (entry.report.result === 'pass' ? 'success' : 'failure') as 'success' | 'failure',
+          title: entry.report.result === 'pass' ? 'D1–D6 green' : `refused: ${refusalDetail(entry.report.gates)}`.slice(0, 120),
+          // The gate's OWN sentences, never a paraphrase — the same rule every other
+          // refusal surface in this system follows (GHI #127).
+          summary: entry.report.gates
+            .map((g) => `- **${g.id}** (${g.requirement}) — \`${g.status}\`${g.detail ? `: ${g.detail}` : ''}`)
+            .join('\n'),
+        }
+      : {
+          conclusion: 'failure' as const,
+          title: 'could not be run — the gate could not read what it judges'.slice(0, 120),
+          summary:
+            `**D1–D6 did not run.** This is not a refusal: no gate reached a verdict about this pull request.\n\n` +
+            `\`\`\`\n${entry.fault}\n\`\`\`\n\n` +
+            'The gate fails closed when it cannot read what it judges, so this check is red rather than absent or ' +
+            'green — an unreadable input is never read as a satisfied one. It is retryable: re-run **deliverable-gate** ' +
+            '(Actions → deliverable-gate → Run workflow, no inputs) and the sweep will judge this pull request again.',
+        };
+
+  try {
+    await gh.checks.create({
+      ...repo,
+      name: DELIVERABLE_CHECK_NAME,
+      head_sha: headSha,
+      status: 'completed',
+      conclusion: body.conclusion,
+      output: { title: body.title, summary: body.summary },
+    });
+    return null;
+  } catch (error: unknown) {
+    return errorMessage(error);
+  }
 }
 
 const isMain = process.argv[1]?.endsWith('deliverable-gate.ts');
@@ -289,13 +367,29 @@ if (isMain && process.argv.includes('--sweep')) {
         console.log('no open deliverable pull requests — nothing to gate');
         return;
       }
-      for (const { prNumber, report } of results) {
-        console.log(`\n=== PR #${prNumber} ===`);
-        printReport(report, false);
+      for (const entry of results) {
+        console.log(`\n=== PR #${entry.prNumber} ===`);
+        if ('report' in entry) printReport(entry.report, false);
+        else console.error(`could not gate PR #${entry.prNumber}: ${entry.fault}`);
+        if (entry.unrecorded !== undefined) {
+          console.error(`  and the ${DELIVERABLE_CHECK_NAME} check run could not be written: ${entry.unrecorded}`);
+        }
       }
+      // EXIT AFTER EVERY PULL REQUEST HAS BEEN JUDGED AND RECORDED, never during. A red
+      // verdict still exits 0 — it was recorded, which is what the sweep is for. What
+      // fails the run is a pull request the sweep could not judge or could not record:
+      // those need a human to re-run it, so the run they would look at must be red.
+      const unjudged = results.filter((e) => !('report' in e)).map((e) => `#${e.prNumber}`);
+      const unrecorded = results.filter((e) => e.unrecorded !== undefined).map((e) => `#${e.prNumber}`);
+      if (unjudged.length === 0 && unrecorded.length === 0) return;
+      if (unjudged.length > 0) console.error(`\nno verdict reached for ${unjudged.join(', ')} — retryable, re-run this workflow`);
+      if (unrecorded.length > 0) console.error(`\nverdict not recorded for ${unrecorded.join(', ')} — the check run write failed`);
+      process.exit(1);
     })
     .catch((error: unknown) => {
-      console.error(error instanceof Error ? error.message : String(error));
+      // Only a failure of the sweep ITSELF reaches here now — listing the open pull
+      // requests. Per-pull-request faults are recorded above and never thrown.
+      console.error(`could not list open pull requests to sweep: ${errorMessage(error)}`);
       process.exit(1);
     });
 } else if (isMain) {

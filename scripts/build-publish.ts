@@ -300,21 +300,18 @@ export async function publishDeliverable(
   const checkpointPaths = checkpointPathsTouched(paths, ctx.checkpointGlobs ?? []);
   const { authority, reason } = resolveMergeAuthority(step, { requiresOperatorMerge: ctx.requiresOperatorMerge, checkpointPaths });
 
-  // The branch is cut from the FROZEN TAG'S COMMIT, so the head is a DESCENDANT of
-  // the frozen commit and never an alteration of it (FR-007 as amended, and what D1
-  // re-checks independently).
-  try {
-    await gh.git.createRef({ ...repo, ref: `refs/heads/${branch}`, sha: tagSha });
-  } catch (error: unknown) {
-    if (errorStatus(error) !== 422) throw error; // 422 = exists; resume below
-  }
-
-  // Written through the git DATA API — blob, tree, commit, ref — rather than a
-  // `git push`, so this workflow never holds a git credential in `.git/config`
-  // either (zizmor artipacked; the same reason every checkout here sets
-  // `persist-credentials: false`).
-  const { data: branchRef } = await gh.git.getRef({ ...repo, ref: `heads/${branch}` });
-  const { data: headCommit } = await gh.git.getCommit({ ...repo, commit_sha: branchRef.object.sha });
+  // WHERE THE COMMIT WOULD LAND, resolved BEFORE the branch is created. The branch is
+  // cut from the FROZEN TAG'S COMMIT, so the head is a DESCENDANT of the frozen commit
+  // and never an alteration of it (FR-007 as amended, and what D1 re-checks
+  // independently) — but an EXISTING branch is resumed on its own head instead.
+  //
+  // `createRef` moved BELOW the no-op check (GHI #268): a delivery that changes nothing
+  // is refused, and `refuse` promises the operator that **nothing was written**. Cutting
+  // the branch first made that sentence false — it left an orphan `build/...` ref behind
+  // on every refusal. Blobs and trees created above that point are unreferenced objects:
+  // no branch, no pull request, nothing an operator or a gate can see.
+  const existingHeadSha = await readBranchHead(gh, repo, branch);
+  const { data: headCommit } = await gh.git.getCommit({ ...repo, commit_sha: existingHeadSha ?? tagSha });
 
   const treeEntries: { path: string; mode: '100644'; type: 'blob'; sha?: string | null; content?: string }[] = [];
   for (const file of patch.files) {
@@ -331,29 +328,125 @@ export async function publishDeliverable(
     treeEntries.push({ path: normalizePath(path), mode: '100644', type: 'blob', sha: null });
   }
 
+  // Written through the git DATA API — blob, tree, commit, ref — rather than a
+  // `git push`, so this workflow never holds a git credential in `.git/config`
+  // either (zizmor artipacked; the same reason every checkout here sets
+  // `persist-credentials: false`).
   const { data: tree } = await gh.git.createTree({ ...repo, base_tree: headCommit.tree.sha, tree: treeEntries as never });
+
+  // Re-delivery of an identical envelope ONTO A PULL REQUEST THAT IS ALREADY OPEN is not
+  // an error and not a second commit: the seam is idempotent precisely so a
+  // `workflow_run` re-delivery completes rather than conflicting. The deliverable
+  // already exists, open, with this exact content.
   if (tree.sha === headCommit.tree.sha) {
-    // Re-delivery of an identical envelope. Not an error and not a second commit:
-    // the seam is idempotent precisely so a `workflow_run` re-delivery completes
-    // rather than conflicting.
     const existing = await findDeliverablePr(gh, repo, branch, base);
     if (existing) return { outcome: 'already_published', branch, prNumber: existing };
   }
 
+  // WHAT THIS DELIVERY ADDS TO THE APPROVED STARTING POINT — measured against the FROZEN
+  // COMMIT, never against the branch head (GHI #268, corrected by Codex on PR #269).
+  //
+  // The branch head is the wrong yardstick, and the difference is the whole of the
+  // resume case. A previous attempt that committed and then died on `pulls.create` —
+  // the live I7 failure, *"GitHub Actions is not permitted to create or approve pull
+  // requests"* (GHI #149) — leaves the branch ALREADY CARRYING the delivery. Its tree
+  // then equals the head's, and comparing against the head would call that "changes
+  // nothing" and refuse permanently, when in fact the work is committed and only the
+  // pull request is missing. The same is true of a branch whose earlier pull request was
+  // closed unmerged: unchanged against the branch head does not mean unchanged against
+  // the base.
+  //
+  // Against the FROZEN commit both of those still differ, and only the case GHI #268 is
+  // about — a delivery whose every path is already there, byte for byte, at the commit
+  // the operator approved — comes out equal.
+  const frozenTreeSha =
+    existingHeadSha === null || existingHeadSha === tagSha
+      ? headCommit.tree.sha // the branch is at the tag (or does not exist): already read
+      : (await gh.git.getCommit({ ...repo, commit_sha: tagSha })).data.tree.sha;
+
+  if (tree.sha === frozenTreeSha) {
+    // THE DELIVERY ADDS NOTHING TO THE FROZEN COMMIT. Committing anyway produced an EMPTY
+    // COMMIT and a pull request whose log line named the paths it had "delivered",
+    // observed live on test-turtle-1 PR #104 (2026-09-15): `lza.lock` was already on
+    // `main`, byte for byte, from the v3 arc; the v4 branch was new, so the open-PR
+    // lookup found nothing and the old code fell straight through to `createCommit`.
+    // Zero files changed, a green publish, and a required gate waiting on a pull request
+    // that delivers nothing.
+    //
+    // GHI #238 records this case as benign. It is benign only on the SAME branch: every
+    // re-freeze puts the plan version in the branch name (`build/<slug>/v<N>/<step>`), so
+    // a rebuild after a version bump never finds the earlier version's pull request.
+    //
+    // WHY THIS IS A REFUSAL AND NOT A SHRUG, both ways round — the two readings of an
+    // unchanged tree after a re-freeze are the two halves of GHI #258's question, and
+    // BOTH of them end here:
+    //
+    //   - the step's DEFINITION is unchanged, and the earlier version's merge already
+    //     delivered it. There is nothing to build. Opening a pull request that changes
+    //     no file does not record that; it only adds a deliverable the gate must judge
+    //     and the operator must merge to learn it was empty.
+    //   - the step was REDEFINED (a different `stepDefinitionDigest`) and the agent
+    //     produced the old content anyway. That is a FAILED build wearing a green
+    //     publish, and it is the exact shape #258 is about: work that was never built
+    //     reading as delivered. Refusing puts it in front of the operator now.
+    //
+    // This deliberately does NOT read the digest. `stepDefinitionDigest` lives in
+    // `scripts/build-verify.ts` and nowhere else (#258's whole finding), and a second
+    // private copy of the rule is what that issue asks us to stop doing. A delivery that
+    // adds nothing to the frozen commit is refusable on its own terms — nothing to merge
+    // — whichever reading is true.
+    //
+    // Nor does it decide #238's open question, whether a delivered work item may be
+    // rebuilt at all. A rebuild that changes something still publishes exactly as
+    // before. This refuses only the case where there is, literally, nothing to merge.
+    return refuse(
+      gh,
+      repo,
+      reportOn,
+      `deliverable.patch changes nothing: every path it delivers (${paths.map((p) => `\`${p}\``).join(', ')}) is ` +
+        'already present at the frozen commit with identical content, and it deletes nothing that is there. An ' +
+        'empty commit is not a deliverable — it would open a pull request that changes no file, and merging it ' +
+        'would deliver none of the work the step promises.\n\nOne of two things is true, and both need you rather ' +
+        'than a retry: this step was **already delivered** by an earlier plan version and needs no rebuild, or the ' +
+        'step was **redefined** since that delivery and the agent rebuilt the old content instead of the new work.',
+    );
+  }
+
+  // THE DELIVERY IS ALREADY COMMITTED, and only the pull request is missing — the resume
+  // case above. Do not commit again: a second commit here would be the empty one this
+  // whole guard exists to stop, and the branch already points at the right tree. Fall
+  // through to the pull-request half with the head the previous attempt left.
+  //
+  // Reachable only with an existing branch: were the branch absent or still at the tag,
+  // `headCommit.tree.sha` WOULD be `frozenTreeSha` and the refusal above would have
+  // fired, so no `createRef` is owed here either.
+  const resuming = tree.sha === headCommit.tree.sha;
+
+  if (!resuming) {
+    // Only now is anything REFERENCED: past this point the branch must exist.
+    try {
+      await gh.git.createRef({ ...repo, ref: `refs/heads/${branch}`, sha: tagSha });
+    } catch (error: unknown) {
+      if (errorStatus(error) !== 422) throw error; // 422 = exists; resume above resolved its head
+    }
+  }
+
   const summary = patch.summary ?? `deliver ${step.id}`;
-  const { data: commit } = await gh.git.createCommit({
-    ...repo,
-    message:
-      `build: ${summary}\n\n` +
-      `plan: ${patch.plan_ref}\nstep: ${step.id}\nexecutor: ${patch.executor_id}\nbuild run: ${ctx.runId}\n`,
-    tree: tree.sha,
-    parents: [headCommit.sha],
-  });
-  await gh.git.updateRef({ ...repo, ref: `heads/${branch}`, sha: commit.sha, force: false }).catch(async (error: unknown) => {
-    // A non-fast-forward here means the branch moved under us — a concurrent
-    // re-delivery. Fail loudly rather than force: this branch is a record.
-    throw new Error(`could not advance ${branch}: ${errorMessage(error)}`);
-  });
+  if (!resuming) {
+    const { data: commit } = await gh.git.createCommit({
+      ...repo,
+      message:
+        `build: ${summary}\n\n` +
+        `plan: ${patch.plan_ref}\nstep: ${step.id}\nexecutor: ${patch.executor_id}\nbuild run: ${ctx.runId}\n`,
+      tree: tree.sha,
+      parents: [headCommit.sha],
+    });
+    await gh.git.updateRef({ ...repo, ref: `heads/${branch}`, sha: commit.sha, force: false }).catch(async (error: unknown) => {
+      // A non-fast-forward here means the branch moved under us — a concurrent
+      // re-delivery. Fail loudly rather than force: this branch is a record.
+      throw new Error(`could not advance ${branch}: ${errorMessage(error)}`);
+    });
+  }
 
   const marker = serializeDeliverableMarker({
     planRef: patch.plan_ref,
@@ -417,6 +510,24 @@ export async function publishDeliverable(
   await gh.issues.addLabels({ ...repo, issue_number: prNumber, labels: ['build:awaiting-merge'] }).catch(() => undefined);
 
   return { outcome: 'published', branch, prNumber, paths, authority };
+}
+
+/**
+ * The branch's current head commit, or `null` when the branch does not exist yet.
+ *
+ * ONLY A VERIFIED 404 MEANS ABSENT (GHI #150, the same rule the gates read by). A 5xx
+ * or an authorization failure here must NOT be read as "no branch yet": that would
+ * resolve the base to the frozen tag, and a resumed branch's own commits would be
+ * silently dropped from the delivery.
+ */
+async function readBranchHead(gh: Octokit, repo: RepoRef, branch: string): Promise<string | null> {
+  try {
+    const { data } = await gh.git.getRef({ ...repo, ref: `heads/${branch}` });
+    return data.object.sha;
+  } catch (error: unknown) {
+    if (errorStatus(error) === 404) return null;
+    throw error;
+  }
 }
 
 /** The open deliverable PR for this branch, if there is one. */
