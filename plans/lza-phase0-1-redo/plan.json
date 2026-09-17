@@ -1,0 +1,117 @@
+{
+  "feature": "lza-phase0-1-redo",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "35180237427",
+  "andon_issue": 112,
+  "steps": [
+    {
+      "id": "step-config",
+      "title": "Deliver the six mandatory LZA v1.16.1 config files at the repository-root config/",
+      "intent": "Deliver, at the repository-root config/ (workload #111 states 'All delivered work lands in the main repo, not in the inputs/ folder' — this redo corrects the prior attempt lza-phase0-1, which mistakenly wrote inputs/lza-phase0/config/), exactly the six mandatory LZA desired-state files (accounts, global, iam, network, organization, security) and nothing else there — no customizations-config.yaml (REP-001). Every key name must be one the pinned Landing Zone Accelerator v1.16.1 release (tag v1.16.1, commit 8b43dc6e347b5fc1c477940c7f71ea595fbf19ab) actually accepts, confirmed against the checked-out release source under vendor/lza rather than from memory (CFG-005/CFG-006). The files carry the Phase 0 credential-free posture (REQ-049/REQ-051): homeRegion, enabledRegions and controlTower.landingZone.version stay consistent with lza.lock; the iam and network extension collections are empty; and the central security services (macie, guardduty, securityHub, detective, auditManager) plus the AWS Config recorder, delivery channel and aggregation are disabled so LZA provisions nothing. global-config.yaml is aligned to the reviewed, schema-validated example set, which includes useV2Stacks: true (LZACFG-039: use version-2 stacks when supported by the pinned release) — the sole content difference between today's root config/ and that validated set. Reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, package manifests) and the governance record (plans/**, confirmations/**, evidence/**) are out of scope and must not be touched; the example prototypes under inputs/lza-phase0/ are read-only reference, not a delivery target.",
+      "acceptance": "config/ at the repository root contains exactly the six mandatory files and no customizations-config.yaml; all six parse as YAML and every key is accepted by the pinned LZA v1.16.1 config source (confirmed against vendor/lza, not from memory); the iam/network extension collections are empty; the central security services and the AWS Config recorder/delivery/aggregation are disabled; global-config homeRegion, enabledRegions and controlTower.landingZone.version agree with lza.lock; and global-config sets useV2Stacks: true per LZACFG-039.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "The reviewed six-file set from inputs/lza-phase0/config/ — recorded by the prior review (plan/lza-phase0-1/v1) as accepted by pinned LZA v1.16.1 with every key valid and no required key missing — delivered to the repository-root config/, including useV2Stacks: true (LZACFG-039). Account emails kept as the existing management+govcloud@example.com / logarchive+govcloud@example.com / audit+govcloud@example.com literals (a valid EmailAddress form that deploys nothing under the credential-free Phase 0 posture). Confirmation that every key is accepted by v1.16.1 is performed at build against vendor/lza, since the pinned validator cannot run in the read-only planning environment.",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "config/**"
+      ],
+      "tracking_issue": 113
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-config-six-mandatory",
+      "kind": "expected-output",
+      "check": "The repository-root config/ holds exactly the six mandatory LZA files (accounts/global/iam/network/organization/security-config.yaml) and no customizations-config.yaml.",
+      "run": "bash -c 'set -e; d=config; test -d \"$d\"; test \"$(find \"$d\" -maxdepth 1 -type f | wc -l)\" -eq 6; for n in accounts global iam network organization security; do test -f \"$d/$n-config.yaml\"; done; test ! -e \"$d/customizations-config.yaml\"'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-parses",
+      "kind": "expected-output",
+      "check": "All six config files under the repository-root config/ parse as YAML.",
+      "run": "python3 -c 'import yaml,glob; ps=sorted(glob.glob(\"config/*.yaml\")); assert len(ps)==6, ps; [yaml.safe_load(open(p)) for p in ps]'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-v2stacks",
+      "kind": "boundary-behavior",
+      "check": "global-config.yaml sets useV2Stacks: true (LZACFG-039), matching the reviewed schema-validated example set. This is the net content correction of the redo and is absent from today's root config/.",
+      "run": "python3 -c 'import yaml; g=yaml.safe_load(open(\"config/global-config.yaml\")); assert g.get(\"useV2Stacks\") is True'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-phase0-disabled",
+      "kind": "boundary-behavior",
+      "check": "Phase 0 credential-free posture: iam/network extension collections are empty and the central security services (macie, guardduty, securityHub, detective, auditManager) and the AWS Config recorder, delivery channel and aggregation are disabled.",
+      "run": "python3 -c 'import yaml; L=lambda n: yaml.safe_load(open(f\"config/{n}-config.yaml\")); iam=L(\"iam\"); net=L(\"network\"); sec=L(\"security\"); assert all(iam[k]==[] for k in (\"providers\",\"policySets\",\"roleSets\",\"groupSets\",\"userSets\")); assert all(net[k]==[] for k in (\"transitGateways\",\"vpcs\",\"vpcTemplates\",\"vpcPeering\")); assert sec[\"awsConfig\"][\"enableConfigurationRecorder\"] is False and sec[\"awsConfig\"][\"enableDeliveryChannel\"] is False and sec[\"awsConfig\"][\"aggregation\"][\"enable\"] is False; assert all(sec[\"centralSecurityServices\"][s][\"enable\"] is False for s in (\"macie\",\"guardduty\",\"securityHub\",\"detective\",\"auditManager\"))'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-lock-consistency",
+      "kind": "boundary-behavior",
+      "check": "global-config homeRegion, enabledRegions and controlTower.landingZone.version agree with lza.lock (no drifting version/Region literal).",
+      "run": "python3 -c 'import yaml; lock=yaml.safe_load(open(\"lza.lock\")); g=yaml.safe_load(open(\"config/global-config.yaml\")); assert g[\"homeRegion\"]==lock[\"homeRegion\"]==\"us-gov-west-1\"; assert g[\"enabledRegions\"]==[lock[\"homeRegion\"]]; assert str(g[\"controlTower\"][\"landingZone\"][\"version\"])==str(lock[\"controlTowerLandingZoneVersion\"])==\"4.0\"'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-accounts",
+      "kind": "exact-copy",
+      "check": "accounts-config declares exactly the three mandatory accounts Management (OU Root), LogArchive (OU Security) and Audit (OU Security), with workloadAccounts empty (LZACFG-010..013).",
+      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); m={x[\"name\"]:x[\"organizationalUnit\"] for x in a[\"mandatoryAccounts\"]}; assert m=={\"Management\":\"Root\",\"LogArchive\":\"Security\",\"Audit\":\"Security\"}, m; assert a[\"workloadAccounts\"]==[]'",
+      "maps_to": [
+        "step-config"
+      ]
+    },
+    {
+      "id": "vt-config-org-ous",
+      "kind": "expected-output",
+      "check": "organization-config enables the organization and declares exactly the Security and Infrastructure OUs (LZACFG-020..021).",
+      "run": "python3 -c 'import yaml; o=yaml.safe_load(open(\"config/organization-config.yaml\")); assert o[\"enable\"] is True; assert [u[\"name\"] for u in o[\"organizationalUnits\"]]==[\"Security\",\"Infrastructure\"]'",
+      "maps_to": [
+        "step-config"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-config-root-not-inputs",
+      "description": "Delivery target is the repository-root config/ ONLY (workload #111: 'All delivered work lands in the main repo, not in the inputs/ folder'). The prior attempt lza-phase0-1/v1 wrote inputs/lza-phase0/config/ instead; this redo must write root config/ and must not modify inputs/lza-phase0/ (read-only reference) nor any reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, package manifests) or governance record (plans/**, confirmations/**, evidence/**).",
+      "step_id": "step-config"
+    },
+    {
+      "id": "bc-config-six-exact",
+      "description": "config/ must hold exactly the six mandatory files — no seventh file and specifically no customizations-config.yaml (REP-001). A build that adds an extra file, or omits one of the six, fails the delivery even if each file present is individually valid.",
+      "step_id": "step-config"
+    },
+    {
+      "id": "bc-config-keys-from-source",
+      "description": "Every key name must be one the pinned LZA v1.16.1 release actually accepts, confirmed against the checked-out release source under vendor/lza — never invented from memory (CFG-005), and the live deployment is never used as schema trial-and-error (CFG-006). A key that is YAML-valid but rejected by the pinned config source fails the delivery.",
+      "step_id": "step-config"
+    },
+    {
+      "id": "bc-config-credential-free",
+      "description": "Phase 0 is the credential-free tracer (REQ-049/REQ-051): the delivered config must leave the iam/network extension collections empty and every central security service plus the AWS Config recorder/delivery/aggregation disabled, so LZA would provision nothing. Enabling any of them here is a regression against LZACFG-050/060/070..074.",
+      "step_id": "step-config"
+    },
+    {
+      "id": "bc-config-already-valid",
+      "description": "Five of the six root config files already match the reviewed schema-validated example set byte-for-byte and already meet the Phase 0 posture; the single net change is adding useV2Stacks: true to global-config.yaml (LZACFG-039). Expect most verification targets to already hold on the current tree — this is a confirm-and-align redo, not a value rewrite. The build must NOT regress the already-correct posture, and the only content difference a reviewer should see is the useV2Stacks line (plus any key correction the vendored v1.16.1 source turns out to require).",
+      "step_id": "step-config"
+    }
+  ]
+}
