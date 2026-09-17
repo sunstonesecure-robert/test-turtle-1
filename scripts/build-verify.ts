@@ -208,6 +208,22 @@ export interface VerifyOutcome {
    *  been delivered — reported because suppressing them would make the workload
    *  uncompletable, and flagged because their result is weaker than it looks */
   reportedWithPendingOptional: { id: string; optionalStepIds: string[] }[];
+  /**
+   * Steps that were DELIVERED BEFORE a step they declare `depends_on` (GHI #199), with
+   * the prerequisites that had not landed at the time this run read the record.
+   *
+   * RECORDED, NEVER ENFORCED (operator decision, 2026-09-16). `depends_on` is the
+   * planning agent's declared order, not a fact about the repository: a step can be
+   * legitimately buildable ahead of a prerequisite that turned out not to matter, and the
+   * dashboard warns before the click rather than refusing it. So this changes no
+   * conclusion, demotes no target and gates no completion — it is the line that lets an
+   * operator reading a red target tell "the step is wrong" from "the step was built
+   * before the work it was declared to come after".
+   *
+   * Empty when `delivery` was not supplied: the by-hand CLI path has no delivery record,
+   * and an order it cannot observe is one it must not assert.
+   */
+  outOfOrder: { stepId: string; pendingPrerequisiteIds: string[] }[];
 }
 
 /** One merged deliverable, reduced to what delivery scope needs. */
@@ -525,6 +541,27 @@ export function runVerification(
   const notYetDelivered: { id: string; pendingStepIds: string[] }[] = [];
   const controlSkipped: { id: string; baselineStepIds: string[] }[] = [];
   const reportedWithPendingOptional: { id: string; optionalStepIds: string[] }[] = [];
+  /**
+   * THE JOIN THE HARNESS NEVER MADE (GHI #199): declared order against delivery state.
+   * Both operands were already here — `depends_on` on the plan document this function
+   * reads, and `delivery.delivered` it was handed — and nothing asked whether a
+   * delivered step's prerequisites were there when it landed.
+   *
+   * Asked of DELIVERED steps only. An undelivered step has not been built out of order;
+   * it has not been built. Skipped entirely without a delivery record, because an order
+   * this runner cannot observe is one it must not assert — the same rule the target-side
+   * delivery scope below follows.
+   */
+  const outOfOrder: { stepId: string; pendingPrerequisiteIds: string[] }[] =
+    delivery === undefined
+      ? []
+      : plan.steps
+          .filter((step) => delivery.delivered.has(step.id))
+          .map((step) => ({
+            stepId: step.id,
+            pendingPrerequisiteIds: step.depends_on.filter((id) => !delivery.delivered.has(id)),
+          }))
+          .filter((row) => row.pendingPrerequisiteIds.length > 0);
   const mustIds = new Set(mustMappedTargetIds(plan));
   // The MUST STEPS themselves, not the targets that map to them — derived from the same
   // plan read so the ANY (target is mandatory) and the per-step ALL (its subject exists)
@@ -681,7 +718,17 @@ export function runVerification(
     }
     results.push({ id: target.id, conclusion });
   }
-  return { planRef, results, unexecutable, mutated, nonDiscriminating, notYetDelivered, controlSkipped, reportedWithPendingOptional };
+  return {
+    planRef,
+    results,
+    unexecutable,
+    mutated,
+    nonDiscriminating,
+    notYetDelivered,
+    controlSkipped,
+    reportedWithPendingOptional,
+    outOfOrder,
+  };
 }
 
 /**
@@ -1027,6 +1074,27 @@ if (isMain) {
             .join(' | ')}. Each is MUST-mapped, so it must be reported or the workload could never complete — but the ` +
             'command ran against a tree lacking that optional work. Read a red one with that in mind: the remedy may ' +
             'be to build the optional step, or to re-open and split the target, not to fix the delivered step.',
+        );
+      }
+      if (outcome.outOfOrder.length > 0) {
+        // Loud, and NOT a failure — nothing here changes a conclusion. This is the line
+        // that lets an operator reading a red target tell "the step is wrong" from "the
+        // step was built before the work it declares it comes after" (GHI #199).
+        //
+        // IT REPORTS THE ORDER AND NOTHING ABOUT THE OPERATOR (Codex P2 on PR #272). The
+        // first wording said the dashboard had warned and the operator chose to build
+        // anyway. This runner cannot observe either half: a build dispatched through the
+        // guarded Actions route (B8, T236) never passed a dashboard row, and a dashboard
+        // that could not read the delivery record showed no warning to choose past. The
+        // run log is a record of what happened, so it must not narrate a decision it did
+        // not see — an audit line that invents consent is worse than no line.
+        console.log(
+          `DELIVERED OUT OF ORDER (GHI #199): ${outcome.outOfOrder
+            .map((s) => `${s.stepId} → came after ${s.pendingPrerequisiteIds.join(', ')}, which had not landed`)
+            .join(' | ')}. The plan declared that order and the delivery record shows it was not followed. This is ` +
+            'not a refusal: building ahead of a declared prerequisite is allowed, no target is demoted and no ' +
+            'completion is gated on it. Read a red target on one of these steps with the missing prerequisite in ' +
+            'mind — the remedy may be to build that step rather than to fix this one.',
         );
       }
       if (outcome.controlSkipped.length > 0) {

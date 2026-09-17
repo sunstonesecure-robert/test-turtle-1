@@ -848,6 +848,99 @@ export function repeatDispatchSentence(prior: PriorBuild): string {
   }
 }
 
+/** One prerequisite of a step that has not been delivered — the step it names, and the
+ *  work item that tracks it so the sentence can point the operator at the thing they
+ *  would dispatch rather than at a step id they cannot click. `issueNumber` is null when
+ *  the plan binds no item to that step, which is itself why it cannot have landed. */
+export interface UnmetPrerequisite {
+  stepId: string;
+  title: string;
+  issueNumber: number | null;
+}
+
+/**
+ * The sentence the confirm dialog adds when this step declares prerequisites that have
+ * not been delivered (GHI #199) — appended beside `repeatDispatchSentence`, for the same
+ * reason and with the same rules: one wording for both surfaces, facts only, and a
+ * surface that could not learn what has been delivered adds no sentence rather than
+ * guessing at one.
+ *
+ * NOT A REFUSAL, deliberately (operator decision, 2026-09-16). Every `BlockedKind`
+ * SUPPRESSES Dispatch, and an unmet prerequisite is a judgment the operator is allowed to
+ * make: `depends_on` is the planning agent's declared order, not a fact about the
+ * repository, and a step can be legitimately buildable ahead of a prerequisite that turned
+ * out not to matter. So the button stays live behind the confirm the row already has, the
+ * cost is named before the click, and `build-verify` records what the order actually was.
+ *
+ * WHY THE EMPTY CASE IS NULL AND NOT A REASSURING SENTENCE. The caller passes an empty
+ * list both when every prerequisite has landed and when it could not read the delivery
+ * record at all (`deliveredStepIds` is empty for an unparseable plan ref). Those are
+ * different facts and only one of them is good news, so neither gets a sentence.
+ */
+/**
+ * WHICH OF A STEP'S DECLARED PREREQUISITES HAVE NOT LANDED — PURE (GHI #199), and the
+ * ONE derivation both surfaces read, for the reason `repeatDispatchSentence` lives here:
+ * the workload card and the plan review are two views of one work item, and a shared
+ * predicate is what makes it impossible for them to answer differently.
+ *
+ * The harness has held both operands all along and never joined them. `depends_on` is
+ * read by G10 for shape (ids resolve, no cycles), by `propagate` for corrections and by
+ * the row for display; the delivered set rides out of the deliverable listing both pages
+ * already fetch. Nothing asked whether the work a step declares it comes after is
+ * actually there, so a build could be dispatched out of order with no warning and no
+ * record.
+ *
+ * `delivered` IS `null` FOR "NOT KNOWN", AND AN EMPTY SET FOR "NOTHING HAS BEEN
+ * DELIVERED" — and the two must never be the same value (Codex P1 on PR #272).
+ *
+ * The first draft conflated them: any empty set answered "no unmet prerequisites", on the
+ * reasoning that a caller which could not read the listing must not warn on every row.
+ * That reasoning is right about the FAILED read and wrong about the commonest real one. A
+ * newly frozen plan has no merged deliverables at all, so both surfaces read the listing
+ * SUCCESSFULLY and hand over an empty set — and that is exactly the case this warning
+ * exists for: an eight-step plan where the operator dispatches step six first, and every
+ * prerequisite is genuinely unmet. Under the old rule the feature was silent precisely
+ * when it had the most to say.
+ *
+ * So the unknown is carried as `null` by every caller and answered with `[]` here, while
+ * an empty set is authoritative and makes every declared prerequisite unmet. Silence on a
+ * degraded read is still the chosen direction — it is just no longer spelled the same way
+ * as "nothing has been built yet".
+ *
+ * `steps` is the whole plan's steps in PLAN ORDER — the operator reads the plan top to
+ * bottom, and the order a planning agent happened to list prerequisites in carries no
+ * meaning they can use. Deliberately a structural shape rather than `PlanStep`, so the
+ * review's rows (which carry the same three fields and no plan document) feed the same
+ * function. An id in `dependsOn` naming no step is skipped: G10 already refuses that
+ * plan, and a row does not restate a gate's finding.
+ */
+export function unmetPrerequisites(
+  steps: readonly { id: string; title: string; tracking_issue?: number | null }[],
+  dependsOn: readonly string[],
+  /** what has been delivered, or `null` when the caller could not find out */
+  delivered: ReadonlySet<string> | null,
+): UnmetPrerequisite[] {
+  if (delivered === null) return [];
+  const wanted = new Set(dependsOn);
+  return steps
+    .filter((s) => wanted.has(s.id) && !delivered.has(s.id))
+    .map((s) => ({ stepId: s.id, title: s.title, issueNumber: typeof s.tracking_issue === 'number' ? s.tracking_issue : null }));
+}
+
+export function prerequisiteDispatchSentence(unmet: readonly UnmetPrerequisite[]): string | null {
+  if (unmet.length === 0) return null;
+  const named = unmet
+    .map((u) => (u.issueNumber === null ? `${u.title} (${u.stepId}, no work item bound)` : `${u.title} (${u.stepId}, work item #${u.issueNumber})`))
+    .join('; ');
+  const subject = unmet.length === 1 ? 'a step that has not been delivered yet' : `${unmet.length} steps that have not been delivered yet`;
+  return (
+    `This work item comes after ${subject}: ${named}. The plan says this work depends on it, so the build may fail or ` +
+    'deliver against a tree that is missing what it needs — and it is a paid agent run either way. Building now is ' +
+    'allowed; the order it was built in is recorded on the verification run.'
+  );
+}
+
+
 /**
  * Why this deliverable's branch is NAMED and not linked — or null while the pull
  * request is still open and the branch is exactly the delivered tree.
