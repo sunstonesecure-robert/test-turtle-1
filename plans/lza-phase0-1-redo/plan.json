@@ -19,7 +19,7 @@
       "scope": [
         "config/**"
       ],
-      "tracking_issue": null
+      "tracking_issue": 113
     }
   ],
   "verification_targets": [
