@@ -7,12 +7,12 @@
   "steps": [
     {
       "id": "step-accounts-config",
-      "title": "Deliver config/accounts-config.yaml with the three mandatory LZA accounts and empty workloadAccounts",
-      "intent": "Deliver, at the repository-root config/accounts-config.yaml, the LZA accounts-config declaring EXACTLY the three mandatory accounts — Management (organizationalUnit Root), LogArchive and Audit (both organizationalUnit Security) — each carrying a non-empty description and a placeholder email in valid EmailAddress form, with workloadAccounts as an empty list (issue #117; LZACFG-010..013). The file keeps the Phase 0 credential-free posture: the emails are example.com placeholders that deploy nothing (REQ-049/REQ-051). NOTE FOR THE OPERATOR: this exact file already exists on main (delivered by the prior workload lza-phase0-1-redo as part of the six-file config set, PR #116) and is byte-for-byte identical to the reviewed example prototype inputs/lza-phase0/config/accounts-config.yaml, so absent a directed content change this step is a no-op — see q-already-delivered, q-emails, q-descriptions and bc-accounts-already-present. The prototype under inputs/lza-phase0/ is read-only reference; the reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, package manifests) and the governance record (plans/**, confirmations/**, evidence/**) are out of scope and must not be touched.",
-      "acceptance": "config/accounts-config.yaml exists at the repository root, parses as YAML, declares exactly three mandatoryAccounts mapping name to organizationalUnit as {Management: Root, LogArchive: Security, Audit: Security}, each account has a non-empty string description and a syntactically valid placeholder email, and workloadAccounts is an empty list.",
+      "title": "Deliver config/accounts-config.yaml with the three mandatory LZA accounts (sunstonesecure.com emails, spec-aligned descriptions) and empty workloadAccounts",
+      "intent": "Deliver, at the repository-root config/accounts-config.yaml, the LZA accounts-config declaring EXACTLY the three mandatory accounts — Management (organizationalUnit Root), LogArchive and Audit (both organizationalUnit Security) — each carrying the spec section 6.5 canonical description and an email in valid EmailAddress form on the operator's real sunstonesecure.com domain, tagged with the test-turtle-1 repository name (management+test-turtle-1@sunstonesecure.com, logarchive+test-turtle-1@sunstonesecure.com, audit+test-turtle-1@sunstonesecure.com), with workloadAccounts as an empty list (issue #117; LZACFG-010..013). The operator judged v1 and chose option (c) on q-already-delivered — apply a specific content change — so this is NOT the no-op re-affirmation of the file already on main: the delivered file replaces the prior example.com placeholder emails with sunstonesecure.com addresses (corrections #119 and #120 and answer q-emails) and aligns the LogArchive and Audit descriptions to spec section 6.5 (answer q-descriptions). The emails still deploy nothing under the Phase 0 credential-free posture (REQ-049/REQ-051); they are real-format addresses that satisfy the pinned LZA v1.16.1 EmailAddress schema. The prototype under inputs/lza-phase0/ is read-only reference; the reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, package manifests) and the governance record (plans/**, confirmations/**, evidence/**) are out of scope and must not be touched.",
+      "acceptance": "config/accounts-config.yaml exists at the repository root, parses as YAML, declares exactly three mandatoryAccounts mapping name to organizationalUnit as {Management: Root, LogArchive: Security, Audit: Security}, each account carries its spec section 6.5 canonical description and an email of the form <name>+test-turtle-1@sunstonesecure.com on the sunstonesecure.com domain (no example.com placeholder and no ${...} token), and workloadAccounts is an empty list.",
       "priority": "MUST",
-      "evidence_tag": "assumption",
-      "stand_in": "The reviewed accounts-config.yaml already on main (delivered by lza-phase0-1-redo, PR #116) and identical to inputs/lza-phase0/config/accounts-config.yaml: three mandatory accounts Management (Root)/LogArchive (Security)/Audit (Security) with example.com placeholder emails (management+govcloud@example.com, logarchive+govcloud@example.com, audit+govcloud@example.com), current descriptions, and workloadAccounts: []. Used as the defaulted content pending q-already-delivered, q-emails and q-descriptions.",
+      "evidence_tag": "verified",
+      "stand_in": null,
       "high_stakes": false,
       "authority": null,
       "depends_on": [],
@@ -30,17 +30,8 @@
     {
       "id": "vt-accounts-three-mandatory",
       "kind": "exact-copy",
-      "check": "config/accounts-config.yaml declares exactly the three mandatory accounts mapping name to organizationalUnit as {Management: Root, LogArchive: Security, Audit: Security}, and workloadAccounts is an empty list (LZACFG-010..013).",
-      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); m={x[\"name\"]:x[\"organizationalUnit\"] for x in a[\"mandatoryAccounts\"]}; assert m=={\"Management\":\"Root\",\"LogArchive\":\"Security\",\"Audit\":\"Security\"}, m; assert a[\"workloadAccounts\"]==[]'",
-      "maps_to": [
-        "step-accounts-config"
-      ]
-    },
-    {
-      "id": "vt-accounts-descriptions",
-      "kind": "expected-output",
-      "check": "Each of the three mandatory accounts in config/accounts-config.yaml has a non-empty string description.",
-      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); ma=a[\"mandatoryAccounts\"]; assert len(ma)==3, len(ma); assert all(isinstance(x.get(\"description\"),str) and x[\"description\"].strip() for x in ma)'",
+      "check": "config/accounts-config.yaml declares exactly the three mandatory accounts mapping name to organizationalUnit as {Management: Root, LogArchive: Security, Audit: Security}, workloadAccounts is an empty list, and every account email is on the operator-directed sunstonesecure.com domain (LZACFG-010..013; corrections #119/#120).",
+      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); ma=a[\"mandatoryAccounts\"]; m={x[\"name\"]:x[\"organizationalUnit\"] for x in ma}; assert m=={\"Management\":\"Root\",\"LogArchive\":\"Security\",\"Audit\":\"Security\"}, m; assert a[\"workloadAccounts\"]==[]; assert all(str(x.get(\"email\",\"\")).endswith(\"@sunstonesecure.com\") for x in ma), [x.get(\"email\") for x in ma]'",
       "maps_to": [
         "step-accounts-config"
       ]
@@ -48,8 +39,17 @@
     {
       "id": "vt-accounts-emails",
       "kind": "expected-output",
-      "check": "Each of the three mandatory accounts has a syntactically valid placeholder email address (a form the pinned LZA v1.16.1 EmailAddress schema accepts), not a ${...} token.",
-      "run": "python3 -c 'import re,yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); pat=re.compile(r\"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$\"); assert all(pat.match(str(x.get(\"email\",\"\"))) for x in a[\"mandatoryAccounts\"])'",
+      "check": "Each of the three mandatory accounts has an email of the operator-directed form <name>+test-turtle-1@sunstonesecure.com — valid EmailAddress form on the sunstonesecure.com domain carrying the test-turtle-1 repository-name tag, never a ${...} token and never an example.com placeholder (correction #120; answer q-emails).",
+      "run": "python3 -c 'import re,yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); pat=re.compile(r\"^[^@\\s]+\\+test-turtle-1@sunstonesecure\\.com$\"); ma=a[\"mandatoryAccounts\"]; assert len(ma)==3, len(ma); assert all(pat.match(str(x.get(\"email\",\"\"))) for x in ma), [x.get(\"email\") for x in ma]'",
+      "maps_to": [
+        "step-accounts-config"
+      ]
+    },
+    {
+      "id": "vt-accounts-descriptions",
+      "kind": "expected-output",
+      "check": "Each of the three mandatory accounts carries its spec section 6.5 canonical description: Management 'GovCloud organization management account', LogArchive 'AWS Control Tower and platform log archive account', Audit 'AWS Control Tower security, Config aggregator, and audit account' (answer q-descriptions).",
+      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); d={x[\"name\"]:x[\"description\"] for x in a[\"mandatoryAccounts\"]}; assert d=={\"Management\":\"GovCloud organization management account\",\"LogArchive\":\"AWS Control Tower and platform log archive account\",\"Audit\":\"AWS Control Tower security, Config aggregator, and audit account\"}, d'",
       "maps_to": [
         "step-accounts-config"
       ]
@@ -58,7 +58,7 @@
   "boundary_cases": [
     {
       "id": "bc-accounts-already-present",
-      "description": "The deliverable config/accounts-config.yaml ALREADY exists on main (delivered by the prior workload lza-phase0-1-redo as part of its six-file config set, PR #116) and already satisfies issue #117 byte-for-byte. Every verification target above is therefore expected to already hold on the current/frozen plan tree; unless the operator directs a specific content change (see q-already-delivered / q-emails / q-descriptions), the build step is a no-op and build-verify will report action_required for the green targets that also pass on the frozen plan tree. This is a confirm-only workload, not a value rewrite.",
+      "description": "config/accounts-config.yaml already existed on main (delivered by the prior workload lza-phase0-1-redo, PR #116) with example.com placeholder emails. The operator judged v1 and directed a content change (q-already-delivered option c; correction #119): the delivered file MUST use the operator's real sunstonesecure.com domain, not example.com. Because the delivered emails — and the spec section 6.5-aligned LogArchive/Audit descriptions — differ from what is on the frozen plan tree, this step now performs real, verifiable work: every verification target is written to fail on the pre-change tree, so this is no longer the no-op the v1 proposal warned of and build-verify should not report action_required.",
       "step_id": "step-accounts-config"
     },
     {
@@ -68,7 +68,7 @@
     },
     {
       "id": "bc-accounts-email-format",
-      "description": "Emails must be in valid EmailAddress form: LZA v1.16.1 offline validation rejects ${MANAGEMENT_ACCOUNT_EMAIL}-style tokens, so the working file uses real-format example.com placeholders that satisfy the schema while provisioning nothing under the Phase 0 credential-free posture.",
+      "description": "Emails MUST be in valid EmailAddress form on the operator's real sunstonesecure.com domain, tagged with the test-turtle-1 repository name (e.g. logarchive+test-turtle-1@sunstonesecure.com) — not example.com placeholders and not ${MANAGEMENT_ACCOUNT_EMAIL}-style tokens (correction #120; answer q-emails). LZA v1.16.1 offline validation rejects ${...} tokens; the sunstonesecure.com addresses satisfy the schema while provisioning nothing under the Phase 0 credential-free posture.",
       "step_id": "step-accounts-config"
     }
   ]
