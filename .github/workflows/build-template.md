@@ -261,6 +261,27 @@ steps:
         | tee "$RUNNER_TEMP/gh-aw/preflight/report.json"
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # STAGED HERE, RUN AFTER THE FROZEN CHECKOUT (GHI #274, and #107/#265 for the "here").
+  # The materializer has to run after the frozen checkout, because `actions/checkout` cleans
+  # the workspace and would delete anything vendored before it — but it must be the CURRENT
+  # harness copy, exactly as the gates above are: a tag frozen before this file existed carries
+  # no copy of it at all, and re-init cannot reach an already-frozen plan. Copying the one file
+  # out to RUNNER_TEMP is what lets a build on an OLD tag still get its vendored source. The
+  # file imports node builtins only, so it resolves nothing from the workspace it left behind.
+  #
+  # CONDITIONAL, because `gates_ref` may legitimately name a pinned gates release OLDER
+  # than this file (Codex P1 on PR #275). An unconditional `cp` would fail EVERY build
+  # dispatched with such a ref — including on targets that declare no vendored source at
+  # all — turning a supported input into a broken one. An absent materializer is reported
+  # as `unavailable` below instead, by name, so it can never read as "nothing declared".
+  - name: "stage the vendor materializer from CURRENT harness code (GHI #274)"
+    run: |
+      mkdir -p "$RUNNER_TEMP/gh-aw/vendor"
+      if [ -f scripts/materialize-vendor.ts ]; then
+        cp scripts/materialize-vendor.ts "$RUNNER_TEMP/gh-aw/vendor/materialize-vendor.ts"
+      else
+        echo "::warning::the gate set at this gates_ref predates scripts/materialize-vendor.ts — no vendored source will be materialized for this build"
+      fi
   - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     with:
       # The FROZEN TAG, not the dispatch ref (FR-007). Without this the worktree is
@@ -278,6 +299,36 @@ steps:
   # the gates checkout's node_modules went with it — and the agent must build against
   # the dependencies the approved commit pins, not the gate set's.
   - run: npm ci
+  # THE SOURCE THE PLAN SAYS TO CHECK AGAINST (GHI #274, live run 35236838549 2026-09-17).
+  # Work item #113's acceptance required every config key to be "confirmed against the checked-out
+  # release source under vendor/lza rather than from memory". Nothing put it there: the gates
+  # checkout and the frozen checkout are the only two this job had, and the subject ignores
+  # `vendor/`. The agent found zero files, correctly refused to invent the key, and a 9m41s
+  # 132.3-AIC build delivered nothing.
+  #
+  # Manifest-driven, never LZA-literal: this reads a `<name>.lock` the SUBJECT maintains at the
+  # frozen commit and vendors it at `vendor/<name>` — the subject's own REP-010 ("the pin is
+  # recorded exactly once; every workflow reads it from there") applied to the build environment
+  # rather than copied into it. A target that declares nothing gets nothing and says so. A lock
+  # whose tag and commit disagree fails the run HERE, before the agent spends anything.
+  - name: "materialize the vendored sources the frozen commit declares (GHI #274)"
+    run: |
+      MATERIALIZER="$RUNNER_TEMP/gh-aw/vendor/materialize-vendor.ts"
+      if [ ! -f "$MATERIALIZER" ]; then
+        # Said out loud, in the file the agent reads. A build that vendored nothing because
+        # the gate set predates the materializer must not be indistinguishable from one whose
+        # target declares nothing — the same rule the gate-set resolver follows for an absent
+        # gate. The run continues: an agent that needs the source will report `missing-data`
+        # naming this, which is the correct outcome for a deliberately old gate set.
+        mkdir -p "$RUNNER_TEMP/gh-aw/preflight"
+        printf '%s\n' '{"status":"unavailable","detail":"the gate set this build ran its preflight from predates scripts/materialize-vendor.ts, so no vendored source was materialized (GHI #274)","vendored":[]}' \
+          > "$RUNNER_TEMP/gh-aw/preflight/vendor.json"
+        echo "vendor: unavailable — the gate set predates the materializer"
+        exit 0
+      fi
+      npx tsx "$MATERIALIZER" \
+        --root "$GITHUB_WORKSPACE" \
+        --report "$RUNNER_TEMP/gh-aw/preflight/vendor.json"
 ---
 
 # build-template — dispatched agent build, gated by preflight
@@ -293,6 +344,23 @@ high-stakes step this build covers has its external confirmation on record, **B6
 carries no contradicting-evidence flag, **B7** the workload is `workload:active`, and **B8** the
 run was dispatched ON the frozen tag. A gate that did not apply to this dispatch says so in the
 report by name; none of them is ever silently absent.
+
+**The vendored upstream your plan may tell you to read** is already on disk. For every
+`<name>.lock` the frozen commit declares (`sourceRepository` + `commit`, optionally `version`),
+`vendor/<name>/` holds that source checked out at the pinned commit, tag-verified where a
+`version` is given. `${RUNNER_TEMP}/gh-aw/preflight/vendor.json` says exactly what was
+materialized — read it rather than assuming. Its `status` is one of `materialized`, `none` (this
+target declares no vendored source) or `unavailable` (this build's gate set predates the
+materializer, so nothing was vendored whatever the target declares). All three are stated by name:
+an absent vendor can never read as a present one.
+
+Use it as the source of truth whenever your step's acceptance says to confirm something against
+the upstream release rather than from memory. If it is genuinely absent or does not carry what
+the acceptance names, that is still a `missing-data` report — say which path you looked at and
+what `vendor.json` said. **`vendor/` is read-only reference and never a delivery target**: it is
+generated, and `vendor/**` is in the reserved path set, so a `deliverable.patch` naming any path
+under it is refused outright by D5 — before anything is written, exactly as for `plans/**` or
+`.github/**`.
 
 **Your executor identity**, for the provenance the deliverable records (FR-065):
 `executor_id` = `tracer-hello`, tier `in-sandbox`, engine `claude`. None of that is required by

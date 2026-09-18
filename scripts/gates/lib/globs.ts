@@ -166,6 +166,73 @@ export function pathsOutside(paths: readonly string[], globs: readonly string[])
   return paths.filter((p) => !matchesAny(p, globs, false));
 }
 
+/**
+ * The leading wildcard-free part of a glob: `config/**` → `config`,
+ * `config/*.yaml` → `config`, `src/app.py` → `src/app.py`, `**` → ``.
+ *
+ * It is what you can ASK A REPOSITORY about, because a glob has no existence and a
+ * path does. A glob with no literal prefix (`**`, `*.md`) yields the empty string,
+ * and the caller has to decide what to do with a question it cannot form.
+ */
+export function literalPrefix(glob: string): string {
+  const g = normalizePath(glob).replace(/\/$/, '');
+  const out: string[] = [];
+  for (const seg of g.split('/')) {
+    if (/[*?]/.test(seg)) break;
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+/**
+ * Does `cover` match everything `inner` could name? AN APPROXIMATION, AND SAID SO.
+ *
+ * Nothing in this repository answers glob-versus-glob exactly, and this does not
+ * either. `matchesGlob` compares a PATH to a glob. `reserved-paths.ts`'s private
+ * `globReaches` makes precisely this approximation for G16 and states the reason at
+ * its direction-2 comment: *a glob cannot be matched against a glob, only against
+ * paths*. This is that trick, factored out and named, so G20 and G16 approximate the
+ * same way instead of twice.
+ *
+ * `globReaches` is deliberately NOT rewritten on top of this. G16 REFUSES on its
+ * answer and G20 only reports on this one; a shared edit would move a refusal.
+ *
+ * `bareIsDirectory` is FIXED at the scope reading (false), because `cover` is always a
+ * step's declared `scope` and D2 will read it that way when the patch lands. Agreeing
+ * with D2 matters more than being generous: crediting a bare `docs` with providing
+ * `docs/lib/x.ts` would name a provider whose own deliverable D2 then refuses.
+ *
+ * WHAT IT MISSES, so no caller oversells it:
+ *   • A PARTIAL cover reads as NO cover. `globCovers('config/*.yaml', 'config/**')` is
+ *     false, though that scope does provide part of that read. The finding it produces
+ *     is a true statement about the rest of the read — tolerable in an advisory, and
+ *     not in a refusal.
+ *   • DEPTH IS MODELLED, not approximated away: a one-segment wildcard cover
+ *     (`config/*`) does not cover a recursive read (`config/**`), because it cannot
+ *     write `config/a/b`. Erring the other way would credit a provider that never
+ *     delivers, which is the only direction that produces a false pass.
+ *   • An `inner` whose first segment is a wildcard has no literal prefix and is never
+ *     covered by anything here.
+ */
+export function globCovers(cover: string, inner: string): boolean {
+  const c = normalizePath(cover);
+  const i = normalizePath(inner);
+  if (c === i) return true;
+  // A CONCRETE PATH is just a path: ask the matcher directly rather than probing.
+  if (!/[*?]/.test(i)) return matchesGlob(i, c);
+  const base = literalPrefix(i);
+  if (base.length === 0) return false;
+  // EVERY PROBE MUST MATCH, not any of them (Codex on PR #277). With `||`, a shallow
+  // `config/*` covered a recursive `config/**` because the one-level probe matched —
+  // and `config/*` cannot produce `config/a/b`, so a reader could declare `config/**`,
+  // be credited a provider, and find the files missing. The probes model the DEPTH the
+  // read demands, and over-crediting is the one direction that produces a false pass.
+  const recursive = /\*\*/.test(i) || inner.trim().endsWith('/');
+  return recursive
+    ? matchesGlob(`${base}/anything`, c) && matchesGlob(`${base}/nested/anything`, c)
+    : matchesGlob(`${base}/anything`, c);
+}
+
 /** The subset of `paths` that matches at least one of `globs` — the reserved-set
  *  question, which is the complement of the scope question and is asked by D5/G16. */
 export function pathsInside(paths: readonly string[], globs: readonly string[]): string[] {

@@ -143,6 +143,54 @@ async function oversizedInDirectory(
   return problems;
 }
 
+/**
+ * The boundary of a workload issue's `### Context` section: from the heading to the
+ * next `###` or the end of the body. Moved here from `scripts/intake-normalize.ts`
+ * (GHI #274) for the reason `violatesSpecialFolderRules` moved here (GHI #182):
+ * designation now has a READER as well as three writers, and a second parser of the
+ * same section is how two of them come to disagree about what the operator typed.
+ */
+const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
+
+/**
+ * The context lines a workload issue body designates — trimmed, blanks dropped, and
+ * the issue form's `_No response_` placeholder dropped because it is the form saying
+ * nothing rather than the operator designating a path called `_No response_`.
+ */
+export function contextLinesFromBody(body: string): string[] {
+  const section = CONTEXT_SECTION_RE.exec(body);
+  if (!section) return [];
+  return (section[1] ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== '_No response_');
+}
+
+/**
+ * Does the declared set designate this path? A designation covers the path itself and
+ * anything beneath it, because a FOLDER line means everything under it — the same
+ * reading `contextPathProblems` and `oversizedContextPaths` already walk.
+ */
+export function contextCovers(declared: readonly string[], path: string): boolean {
+  const p = posix.normalize(path).replace(/(?<=.)\/+$/, '');
+  return declared.some((line) => {
+    const d = posix.normalize(line).replace(/(?<=.)\/+$/, '');
+    return d === p || p.startsWith(`${d}/`);
+  });
+}
+
+/**
+ * What a workload designates as context, or why we do not know.
+ *
+ * TWO DIFFERENT FACTS, AND ONLY ONE OF THEM IS AN EMPTY LIST (ADR-0007).
+ * `{ known: true, paths: [] }` is AUTHORITATIVE — the operator designated nothing,
+ * which FR-053 makes a real mode: an agent then reads only the special folders' index
+ * files. `{ known: false }` is a degraded read and authorises no sentence at all.
+ * Shaped after `DispatchInputsCheck` in `subject-workflows.ts`, which draws the same
+ * line for the same reason.
+ */
+export type DeclaredContext = { known: true; paths: string[] } | { known: false; why: string };
+
 /** `bytes` as an MB figure, the way intake reports sizes. */
 export function megabytes(bytes: number, digits = 1): string {
   return (bytes / (1024 * 1024)).toFixed(digits);

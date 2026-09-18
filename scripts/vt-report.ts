@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha } from '../dashboard/lib/github/plans';
 import { errorMessage } from '../dashboard/lib/github/errors';
+import { AssuranceFile, assuranceBlockFor, ASSURANCE_FILE } from './verification-assurance';
 
 /**
  * vt-report (T154 + T211, FR-034 / FR-063) — the deterministic reporter that turns
@@ -161,6 +162,8 @@ export async function reportVtResults(
    *  the trusted provenance the artifact's claim is bound against. Omitted only by
    *  callers with no producing run (a local invocation); see the binding below. */
   expectSha?: string,
+  /** the assurance notes from this run's own artifact, or null — see `readAssuranceNotes` */
+  notes?: AssuranceFile | null,
 ): Promise<VtReportResult> {
   // The pre-extension artifact shape was a bare `[{ id, conclusion }]` array.
   // It is NOT accepted: it carries no plan_ref, and the reporter cannot derive
@@ -317,6 +320,10 @@ export async function reportVtResults(
   // would discard the results that WERE produced. "Every MUST-mapped target
   // concluded success" is L3's question, asked at the completion transition,
   // and it fails closed on a target with no check run.
+  // BOUND TO THIS PLAN AND THIS COMMIT, or ignored. Notes describing another delivery
+  // would annotate a check run with someone else's files and someone else's command.
+  const bound = notes && notes.plan_ref === planRef && notes.verified_commit === headSha ? notes : null;
+  if (notes && !bound) console.log('assurance notes describe a different plan or commit — ignored');
   const byId = new Map(plan.verification_targets.map((vt) => [vt.id, vt]));
   for (const result of results) {
     const target = byId.get(result.id)!; // membership proven above
@@ -339,12 +346,42 @@ export async function reportVtResults(
           `${target.run ? `Executed: \`${target.run}\`\n` : ''}` +
           `Frozen plan: ${planRef} (${tagSha})\n` +
           `Verified commit: ${headSha}${headSha === tagSha ? ' — the frozen tree itself (pre-US18 compatibility shim)' : ' — the merged deliverable'}\n` +
-          `Maps to: ${target.maps_to.join(', ')}`,
+          `Maps to: ${target.maps_to.join(', ')}` +
+          // APPENDED, NEVER INTERLEAVED: everything above is the record the completion
+          // gate's reader and the operator already rely on, and this is commentary
+          // beneath it. Empty string when there are no notes, so a build-verify that
+          // predates them writes exactly the body it writes today (GHI #271).
+          assuranceBlockFor(bound, result.id, target.maps_to, headSha),
       },
     });
   }
 
   return { planRef, headSha, reported: results };
+}
+
+/**
+ * The assurance notes this run's verify job wrote beside its results, or null
+ * (GHI #271).
+ *
+ * DEGRADES SILENTLY IN EVERY FAILURE MODE — absent, unreadable, unparseable or
+ * schema-invalid. It is prose appended to a check run's body; letting it refuse would
+ * give a cosmetic file the power to stop the check runs completion depends on, which is
+ * a far worse outcome than a summary that says less. `vt-results.json` refuses for the
+ * opposite reason: it decides conclusions.
+ *
+ * Read in the CLI, never inside `reportVtResults`, so the contract tests stay
+ * filesystem-free and a missing file is a value the caller passes rather than a branch
+ * only the disk can reach.
+ */
+export function readAssuranceNotes(dir: string): AssuranceFile | null {
+  const file = findNamed(dir, ASSURANCE_FILE);
+  if (file === null) return null;
+  try {
+    const parsed = AssuranceFile.safeParse(JSON.parse(readFileSync(file, 'utf8')));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -469,7 +506,16 @@ if (isMain) {
   // be a DESCENDANT of the frozen tag below. So the worst a wrong value can be is a
   // commit the approved plan led to.
   const boundSha = subject.verifiedCommit.length > 0 ? subject.verifiedCommit : expectSha;
-  reportVtResults(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(resultsFile, 'utf8')), boundSha)
+  // Found the same way the results file is — `findNamed` recurses, because
+  // download-artifact nests the uploaded directory one level.
+  const notes = readAssuranceNotes(dir);
+  reportVtResults(
+    createClient(),
+    { owner, repo: repoName },
+    JSON.parse(readFileSync(resultsFile, 'utf8')),
+    boundSha,
+    notes,
+  )
     .then((result) => {
       console.log(
         `reported ${result.reported.length} verification target(s) on ${result.planRef} (${result.headSha}): ` +

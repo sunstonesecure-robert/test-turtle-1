@@ -301,6 +301,44 @@ jobs:
           ref: refs/tags/${{ steps.subject.outputs.plan_ref }}
           path: base
           persist-credentials: false
+      # THE VENDORED UPSTREAM, IN BOTH TREES (GHI #274; the gap PR #275 left open).
+      #
+      # `build-template` materializes each root `<name>.lock`'s pinned upstream into
+      # `vendor/<name>/` so a plan step can require its work to be "confirmed against the
+      # checked-out release source rather than from memory". Verification ran in a tree
+      # that had none of it — so a target whose `run` reads `vendor/lza` PASSED during the
+      # build, where the agent had the source, and went red here, where nobody did. The
+      # deliverable is fine, the target is fine, and completion is refused: the same
+      # environment-not-work confusion in the one pipeline that must never have it.
+      #
+      # No staging dance is needed here, unlike `build-template`: this job's ROOT checkout
+      # is the default branch and it stays — `subject` and `base` are subdirectories — so
+      # the materializer is already the current one. It ships in the same install tree
+      # commit as this file, so there is no version of a target that has one and not the
+      # other.
+      #
+      # BOTH TREES, AND THAT IS THE LOAD-BEARING HALF. The negative control re-runs every
+      # GREEN target against the frozen plan tree and flags it if it passes there too:
+      # a target that cannot tell the two trees apart did not witness its step (GHI #230).
+      # That question is only meaningful while the ONLY difference between the trees is
+      # THE WORK. Materialize `subject` alone and every vendor-reading target goes red on
+      # `base` because the source is missing — reading as "it discriminated" when it
+      # discriminated on the environment, which is a control that passes a target it
+      # should have flagged. Each tree is read for its OWN manifests, deliberately: `base`
+      # is an earlier commit and may declare a different pin, or none.
+      #
+      # The two reports land in the uploaded results directory, so what was vendored for a
+      # verification is part of the record rather than a fact about a runner that is gone.
+      - name: materialize the vendored sources each tree declares (GHI #274)
+        if: steps.subject.outputs.plan_ref != ''
+        run: |
+          set -euo pipefail
+          npx tsx scripts/materialize-vendor.ts \
+            --root "$GITHUB_WORKSPACE/subject" \
+            --report "$RUNNER_TEMP/verify/vendor-subject.json"
+          npx tsx scripts/materialize-vendor.ts \
+            --root "$GITHUB_WORKSPACE/base" \
+            --report "$RUNNER_TEMP/verify/vendor-base.json"
       - name: execute every verification target with an executable form
         if: steps.subject.outputs.plan_ref != ''
         env:

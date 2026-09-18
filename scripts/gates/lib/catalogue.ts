@@ -103,6 +103,33 @@ export const PLAN_CATALOGUE: readonly DeclaredGate[] = [
   // the same — an advisory gate that is not declared is a finding nothing reconciles,
   // and `absent` would still fail the report if the implementation went missing.
   { id: 'G19', requirement: 'FR-011' },
+  // G20 — THE READ SIDE OF A STEP (FR-071; GHI #274 increment 2, added 2026-09-17).
+  // `scope` declares what a step's deliverable may WRITE and is enforced twice (G16 at
+  // approval, D2 at delivery); nothing declared what a step must READ, so a plan whose
+  // acceptance required a checked-out upstream under `vendor/lza` froze, dispatched,
+  // found nothing and cost a full agent run before anyone found out the environment had
+  // never been asked to provide it. A NEW ID rather than a wider G16: G16's remedy is
+  // "narrow the scope", and this is a different question about a different field. It
+  // does fold more than one clause — a malformed glob, a provider the step does not say
+  // it comes after, and a path nothing provides — which the one-id-one-remedy rule
+  // tolerates only because this row never refuses: an advisory is read, not acted on
+  // blind. Reports `advisory` and never refuses — a plan may legitimately
+  // name a path a later step delivers, and the operator is the one who knows (ADR-0007).
+  // Declared here all the same: an advisory gate that is not declared is a finding
+  // nothing reconciles, and `absent` would still fail the report if it went missing.
+  { id: 'G20', requirement: 'FR-071' },
+  // G21 — CONTEXT THE PLAN CLAIMS AND THE WORKLOAD NEVER GAVE (FR-071; GHI #274
+  // increment 1, added 2026-09-17). The harness has always asked "does this path
+  // exist?" of the lines the OPERATOR types into a workload's `### Context` (FR-053) and
+  // of nothing the agent writes. This asks the second half: when the plan's prose names
+  // a path under one of the four special folders that the workload never designated, the
+  // agent is claiming context it was never handed. A separate id from G20 because the
+  // remedy is the OPERATOR's, not the plan's — designate the path, or stop referring to
+  // it. `not-applicable`, never `pass`, when the workload could not be read: "designated
+  // nothing" and "we could not find out" are different facts and only one of them
+  // permits a sentence. If GHI #190 lands and `inputs/<slug>/` becomes implicit context,
+  // this gate's membership rule changes with it.
+  { id: 'G21', requirement: 'FR-071' },
 ];
 
 /**

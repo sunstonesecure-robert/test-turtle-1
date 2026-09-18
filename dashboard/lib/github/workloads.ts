@@ -13,7 +13,14 @@ import { WORKLOAD_TRANSITIONS, workloadState, type WorkloadState } from './label
 import { reopenPlan, tagExists, type ReopenResult, maxPlanVersion, planBranch } from './plans';
 import { findOpenAndonByPlanRef } from './andon';
 import { instructionProblems, listOpenCorrections, sendCorrection } from './corrections';
-import { contextPathProblems, megabytes, CONTEXT_FOLDERS, type ContextPathProblem } from './context-paths';
+import {
+  contextLinesFromBody,
+  contextPathProblems,
+  megabytes,
+  CONTEXT_FOLDERS,
+  type ContextPathProblem,
+  type DeclaredContext,
+} from './context-paths';
 import { plainLogin } from '../actor-identity';
 
 /**
@@ -106,6 +113,57 @@ export async function getWorkloadByIssue(gh: Octokit, repo: RepoRef, issueNumber
   if (!header) return null;
   const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
   return { issueNumber, slug: header.id, title: issue.title, state: workloadState(labels) };
+}
+
+/**
+ * The `### Context` a workload designates, read back — the FIRST reader there has ever
+ * been (GHI #274). Three surfaces write a designation and, until G21, nothing ever
+ * asked what one said: `getWorkload` deliberately reduces an issue to four fields and
+ * discards the body, so this re-reads the issue rather than widening `Workload`, which
+ * several call sites destructure.
+ *
+ * EVERY FAILURE IS `known: false`, INCLUDING THE ONES THAT WOULD NORMALLY RETHROW.
+ * The house rule elsewhere is "only a verified 404 means absent; anything else is a
+ * fault that fails the run", and that rule belongs to gates that REFUSE. This feeds an
+ * advisory. A 500 from GitHub must not turn a plan review red — and it must not produce
+ * a warning either. It produces silence with a reason, which is the whole of what an
+ * unknown is allowed to do (ADR-0007).
+ */
+export async function readDeclaredContext(
+  gh: Octokit,
+  repo: RepoRef,
+  slug: string | null,
+): Promise<DeclaredContext> {
+  if (slug === null) {
+    return {
+      known: false,
+      why: 'this plan does not name the workload it belongs to, so what that workload designates as context is unknown',
+    };
+  }
+  let workload: Workload | null;
+  try {
+    workload = await getWorkload(gh, repo, slug);
+  } catch {
+    return {
+      known: false,
+      why: 'the workload list could not be read, so what this workload designates as context is unknown',
+    };
+  }
+  if (workload === null) {
+    return {
+      known: false,
+      why: `no workload issue was found for "${slug}", so what it designates as context is unknown`,
+    };
+  }
+  try {
+    const { data: issue } = await gh.issues.get({ ...repo, issue_number: workload.issueNumber });
+    return { known: true, paths: contextLinesFromBody(issue.body ?? '') };
+  } catch {
+    return {
+      known: false,
+      why: 'the workload issue could not be read, so what it designates as context is unknown',
+    };
+  }
 }
 
 export interface IntroduceInput {

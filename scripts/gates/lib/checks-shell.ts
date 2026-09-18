@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { nestedShellBody } from './shell-text';
 import type { PlanDoc } from '../../../schemas/plan';
 
 /**
@@ -34,34 +35,12 @@ import type { PlanDoc } from '../../../schemas/plan';
  *  exists only so a pathological input cannot hang the gate job. */
 const PARSE_TIMEOUT_MS = 5000;
 
-/**
- * The inner program of a single `bash -c '…'` / `sh -c "…"` invocation, or null.
- *
- * `bash -n` does NOT recurse into a quoted string handed to another shell — it reads the
- * outer command and treats the inner program as one opaque word. So for the shape every
- * live target has, the syntax check was inspecting nothing:
- *
- *   printf '%s' "bash -c 'if then'" | bash -n   # exit 0
- *   bash -c 'if then'                           # exit 2, syntax error
- *
- * Extracting the body is therefore what makes the check mean anything (Codex on PR #252,
- * third review). Deliberately narrow: ONE outer command, `bash` or `sh`, a single `-c`,
- * and a wholly-quoted argument. Anything else — a pipeline, `python3 -c`, a body built by
- * expansion — returns null and only the outer command is parsed, because guessing at an
- * arbitrary nested program is the general shell-parsing problem this gate declines to
- * take on (the reason GHI #230 chose a negative control over a lint in the first place).
- */
-export function nestedShellBody(run: string): string | null {
-  const m = /^\s*(?:ba)?sh\s+-c\s+(['"])([\s\S]*)\1\s*$/.exec(run.trim());
-  if (!m) return null;
-  const body = m[2]!;
-  // A single-quoted body cannot contain an escaped quote, so what we sliced is exact.
-  // A double-quoted one may contain `\"` — and may also contain expansions we cannot
-  // resolve, so it is parsed as-is and a false pass is preferred to a false failure.
-  return body.length > 0 ? body : null;
-}
+/** The nested-shell reader, moved to `shell-text.ts` (GHI #271) so a classifier that
+ *  must be provably free of `child_process` can use it, and re-exported here because
+ *  this module and one test import it from this path. */
+export { nestedShellBody } from './shell-text';
 
-/** Syntax errors in the plan's `run` commands/** Syntax errors in the plan's `run` commands, in plan order — one clause per target,
+/** Syntax errors in the plan's `run` commands, in plan order — one clause per target,
  *  each carrying bash's own message so the operator sees what bash saw. Empty when
  *  every command parses, and ALSO empty when bash could not be run at all. */
 export function runSyntaxProblems(plan: PlanDoc): string[] {

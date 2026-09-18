@@ -9,6 +9,7 @@ import { getWorkload } from './workloads';
 import type { PlanStep } from '../../../schemas/plan';
 import type { MergeAuthority } from '../../../schemas/executor';
 import { checkpointPathsTouched, type CheckpointPath } from '../../../scripts/gates/lib/checkpoint-paths';
+import { machineryDriftReason } from '../../../scripts/gates/lib/buildability';
 import { checkB5ConfirmationRecorded, checkB6NotFlagged } from '../../../scripts/gates/lib/checks-preflight';
 import { AGENTIC_WORKFLOWS } from '../../../scripts/gates/lib/readiness';
 import { readCheckpointPaths } from './checkpoint-config';
@@ -155,7 +156,43 @@ const diffWarned = new Set<string>();
  * rule: taking the whole Builds view down because one read failed is a worse outcome
  * than the value it was fetching).
  */
-async function listPullRequestPathsOrNull(gh: Octokit, repo: RepoRef, prNumber: number): Promise<string[] | null> {
+/**
+ * The paths a pull request leaves BEHIND — what the merged tree actually holds.
+ *
+ * Deliberately not `listPullRequestPaths`, and the difference is load-bearing. That one
+ * answers "what did this patch touch?" and so includes deletions and the OLD side of a
+ * rename, because the scope gate must refuse a patch that moved a file out of bounds.
+ * A reader describing what a step DELIVERED wants the opposite: a deliverable that
+ * deletes or renames a test would otherwise be reported as having delivered the
+ * obsolete path, and the offline command printed beside it would name a file the
+ * verified commit does not contain (Codex on PR #277) — a command that fails, which is
+ * exactly what teaches an operator the panel lies.
+ *
+ * `null` on an unreadable diff, for the same reason its sibling degrades: a listing
+ * that cannot read one pull request must still produce a record.
+ */
+export async function listSurvivingPullRequestPathsOrNull(
+  gh: Octokit,
+  repo: RepoRef,
+  prNumber: number,
+): Promise<string[] | null> {
+  try {
+    const files = await gh.paginate(gh.pulls.listFiles, { ...repo, pull_number: prNumber, per_page: 100 });
+    return [...new Set(files.filter((f) => f.status !== 'removed').map((f) => f.filename))];
+  } catch (error: unknown) {
+    const key = `${repo.owner}/${repo.repo}#${prNumber}`;
+    if (!diffWarned.has(key)) {
+      diffWarned.add(key);
+      console.warn(
+        `Could not read the files of pull request ${key} (${errorStatus(error) ?? 'no status'}). What it delivered is ` +
+          'reported as unknown rather than guessed.',
+      );
+    }
+    return null;
+  }
+}
+
+export async function listPullRequestPathsOrNull(gh: Octokit, repo: RepoRef, prNumber: number): Promise<string[] | null> {
   try {
     return await listPullRequestPaths(gh, repo, prNumber);
   } catch (error: unknown) {
@@ -865,9 +902,9 @@ export interface UnmetPrerequisite {
  * surface that could not learn what has been delivered adds no sentence rather than
  * guessing at one.
  *
- * NOT A REFUSAL, deliberately (operator decision, 2026-09-16). Every `BlockedKind`
- * SUPPRESSES Dispatch, and an unmet prerequisite is a judgment the operator is allowed to
- * make: `depends_on` is the planning agent's declared order, not a fact about the
+ * NOT A REFUSAL, deliberately (operator decision, 2026-09-16 — the rule is ADR-0007).
+ * Every `BlockedKind` SUPPRESSES Dispatch, and an unmet prerequisite is a judgment the
+ * operator is allowed to make: `depends_on` is the planning agent's declared order, not a fact about the
  * repository, and a step can be legitimately buildable ahead of a prerequisite that turned
  * out not to matter. So the button stays live behind the confirm the row already has, the
  * cost is named before the click, and `build-verify` records what the order actually was.
@@ -1032,6 +1069,25 @@ export async function dispatchBuild(
   if (!completion.complete) {
     throw new Refusal(`${freezeIncompleteSentence(planRef)} No run was started.`);
   }
+
+  // 1c. The machinery frozen into this tag must still be what is installed (GHI #265,
+  //     ADR-0008). The buildability scan's own function, not a restatement of its
+  //     predicate: the card withholds Dispatch on this verdict, and the click has to
+  //     refuse for the same reason in the same words or the two surfaces disagree —
+  //     including the SKIP, which is why this asks `machineryDriftReason` and not the
+  //     comparison underneath it.
+  //     An UNKNOWN never refuses — a comparison that could not be made is not a
+  //     difference, and a degraded read must not close the only retry route there is.
+  //
+  //     BOTH SENTENCES, not just the drift one (Codex P1 on PR #277). The same call
+  //     answers two questions about one tag: whether the build workflow there is fit to
+  //     run at all (`workflowReason` — it is missing, or it predates running the checks
+  //     from current code), and whether it still matches what is installed (`reason`).
+  //     The card withholds Dispatch on EITHER, and refusing on only the second let the
+  //     click start exactly the missing-or-ancient workflow the card had greyed out.
+  const machinery = await machineryDriftReason(gh, repo, planRef);
+  const unfit = machinery.workflowReason ?? machinery.reason;
+  if (unfit !== null) throw new Refusal(`${unfit} No run was started.`);
 
   // 2. The workload must be active (B7 would refuse anyway — spend no run).
   const workload = await getWorkload(gh, repo, slug);

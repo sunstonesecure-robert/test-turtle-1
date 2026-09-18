@@ -18,6 +18,10 @@ import {
   checkG19RunsLintable,
   verifyTrackedWorkItems,
 } from './lib/checks-approval';
+import { checkG20ReadsProvided, checkG21ContextClaimed } from './lib/checks-reads';
+import { unprovidedReads } from './lib/reads-providers';
+import { readDeclaredContext } from '../../dashboard/lib/github/workloads';
+import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
 import { runSyntaxProblems } from './lib/checks-shell';
 
 /**
@@ -129,6 +133,34 @@ export async function planGate(
     // does not parse" and "your command discards its own assertions" are both
     // answered by editing the command before the plan freezes.
     { id: 'G19', skip: unparsed, run: () => checkG19RunsLintable(plan!, runSyntaxProblems(plan!)) },
+    // G20 is ADVISORY (GHI #274). The pure half reads the document — a malformed
+    // declared read, and one that another step writes without this step saying it comes
+    // after it. The repository half is folded into the SAME row through
+    // `unprovidedReads`, exactly as G19 folds in its `bash -n`: "the tree does not hold
+    // it" and "no step writes it before you" are one remedy.
+    //
+    // `planRef` is the approval BRANCH, not a frozen tag. G9 requires the freeze tag to
+    // be ABSENT at plan-gate time, so there is no frozen commit to read and the branch
+    // head is what the merge will freeze.
+    {
+      id: 'G20',
+      skip: unparsed,
+      run: async () => checkG20ReadsProvided(plan!, await unprovidedReads(gh, repo, plan!, planRef)),
+    },
+    // G21 is ADVISORY (GHI #274). The workload slug comes from the same two-source
+    // ladder G16 uses — `planRef` authoritative, `plan.feature` the fallback the
+    // publisher guarantees. UNLIKE G16, an unresolvable slug here is NOT the fail-closed
+    // direction: G16 with no slug reserves MORE, this one with no slug simply knows
+    // LESS, so it reports not-applicable and says nothing.
+    {
+      id: 'G21',
+      skip: unparsed,
+      run: async () =>
+        checkG21ContextClaimed(
+          plan!,
+          await readDeclaredContext(gh, repo, slugFromPlanRef(planRef) ?? plan!.feature ?? null),
+        ),
+    },
   ]);
   return { plan: planLabel, result: report.result, gates: report.gates };
 }
@@ -188,7 +220,7 @@ export async function sweepNonPlanPrs(gh: Octokit, repo: RepoRef): Promise<{ prN
         title: 'not an approval pull request — no plan document to gate',
         summary:
           `Pull request #${pr.number} has head \`${pr.head.ref}\`, which is not a \`plan/<slug>/v<N>\` approval ` +
-          'branch, so it carries no plan document and there is nothing for G1–G19 to read.\n\n' +
+          'branch, so it carries no plan document and there is nothing for G1–G21 to read.\n\n' +
           'Recorded as `skipped` rather than `success` deliberately: this pull request was not gated, and a green ' +
           '`plan-gate` here would claim it was. Whatever governs this pull request is its own required check — for a ' +
           '`build/**` deliverable that is `deliverable-gate` (D1–D6).',

@@ -9,13 +9,18 @@ import {
 } from '../dashboard/lib/github/markers';
 import { getWorkload, SLUG_RE } from '../dashboard/lib/github/workloads';
 import { errorMessage } from '../dashboard/lib/github/errors';
-import { CONTEXT_FOLDERS, contextMaxFileBytes, violatesSpecialFolderRules } from '../dashboard/lib/github/context-paths';
+import {
+  CONTEXT_FOLDERS,
+  contextLinesFromBody,
+  contextMaxFileBytes,
+  violatesSpecialFolderRules,
+} from '../dashboard/lib/github/context-paths';
 import { UNREPORTED_APPROVER_LOGIN } from '../dashboard/lib/actor-identity';
 
 // The FR-053 rules themselves live in `context-paths.ts` (dependency-free, so the
 // dashboard's Introduce writer can share them without a cycle through this
 // script); re-exported here so this module stays the intake-side entry point.
-export { CONTEXT_FOLDERS, contextMaxFileBytes, violatesSpecialFolderRules };
+export { CONTEXT_FOLDERS, contextLinesFromBody, contextMaxFileBytes, violatesSpecialFolderRules };
 
 /**
  * Intake normalizer — makes GitHub-UI intake (the "Workload intake" issue
@@ -47,16 +52,6 @@ export type IntakeResult =
   | { outcome: 'refused'; reason: string };
 
 const SLUG_SECTION_RE = /###\s*Workload slug\s*\n+\s*([^\n]+)/;
-const CONTEXT_SECTION_RE = /###\s*Context\s*\n([\s\S]*?)(?=\n###\s|$)/;
-
-/** Context lines from the `### Context` section, trimmed, minus blanks and the issue-form placeholder. */
-function contextLines(body: string): string[] {
-  const section = CONTEXT_SECTION_RE.exec(body)?.[1] ?? '';
-  return section
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line && line !== '_No response_');
-}
 
 /**
  * Designated context files exceeding the per-file limit (PB-004 hang guard).
@@ -94,13 +89,12 @@ export function oversizedContextPaths(body: string, rootDir: string, maxBytes = 
       offenders.push({ path: relPath, bytes: stat.size });
     }
   };
-  for (const line of contextLines(body)) check(posix.normalize(line));
+  for (const line of contextLinesFromBody(body)) check(posix.normalize(line));
   return offenders;
 }
 
-/** FR-053: paths from the `### Context` section that don't normalize to inside a special folder or don't exist. */
 export function invalidContextPaths(body: string, rootDir: string): string[] {
-  return contextLines(body).filter(
+  return contextLinesFromBody(body).filter(
     (line) => violatesSpecialFolderRules(line) || !existsSync(join(rootDir, posix.normalize(line))),
   );
 }

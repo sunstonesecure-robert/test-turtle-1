@@ -61,6 +61,11 @@
           "items": { "type": "string", "minLength": 1 },
           "description": "OPTIONAL (T223, FR-061). The path globs this step's deliverable may touch, relative to the repo root — `docs/**`, `src/app.py`, `site/*.html`. Deliverable-gate D2 validates the patch against exactly this set and names any straying path. OPTIONAL because a required field would break every plan frozen before 2026-08-24; D2 reports not-applicable (naming the absent field) for a step without one rather than passing silently, since a scope-less plan cannot make the containment promise. SUBJECT BOUNDARY (FR-068): scope is an INCLUSION allowlist and cannot widen what a build may touch — plan-gate G16 refuses a plan whose scope intersects the reserved path set, and deliverable-gate D5 refuses such a patch regardless of what this field says."
         },
+        "reads": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "OPTIONAL (GHI #274, FR-071). The path globs this step must READ in order to produce its deliverable \u2014 the read side of `scope`, same glob grammar. NOT an allowlist, and nothing is refused for violating it: a build step must read the repository it is editing, so \"may read only what it declared\" would make every step in every plan illegal. Plan-gate G20 reports, as an ADVISORY finding, any declared read that none of its three legitimate providers will supply \u2014 it exists at the approval ref, a step this one comes after writes it, or a root `<name>.lock` fetches it into `vendor/<name>`. OPTIONAL because a required field would break every plan frozen before 2026-09-17."
+        },
         "tracking_issue": {
           "type": ["integer", "null"],
           "minimum": 1,

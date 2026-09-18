@@ -40,6 +40,33 @@ export const PlanStep = z
      */
     scope: z.array(z.string().min(1)).optional(),
     /**
+     * The path globs this step must READ in order to write its deliverable — the read
+     * side of `scope` (GHI #274, FR-071).
+     *
+     * `scope` declares what a step's deliverable may WRITE, and it is enforced twice:
+     * G16 at approval, D2 at delivery. Nothing declared what a step must READ. What it
+     * must read lived only as English in `acceptance` — which is exactly where
+     * `vendor/lza` was on the run that cost a build: the step's acceptance required
+     * every config key to be confirmed against a checked-out release source, nothing in
+     * the environment provided one, the agent correctly emitted `missing_data`, and a
+     * 9m41s run delivered nothing (2026-09-17, work item #113).
+     *
+     * OPTIONAL, on `scope`'s own argument above: every plan frozen before this field
+     * existed lacks it, and a required field would make each of them unbuildable.
+     *
+     * IT IS NOT AN ALLOWLIST AND NOTHING IS REFUSED FOR VIOLATING IT. A build step must
+     * read the repository it is editing — `step-config` reads `config/global-config.yaml`
+     * in order to modify it — so "may read only what it declared" would make every step
+     * in every plan illegal. What the field buys is a question that can be asked BEFORE
+     * the spend: does anything actually provide this? A declared read has exactly three
+     * legitimate providers — it exists at the approval ref, a step this one comes after
+     * writes it, or a root `<name>.lock` fetches it into `vendor/<name>` — and plan-gate
+     * G20 names a read with none of the three as an ADVISORY finding, never a refusal.
+     *
+     * Globs, the same grammar as `scope`, read through the same matcher.
+     */
+    reads: z.array(z.string().min(1)).optional(),
+    /**
      * The WORK ITEM issue this step delivers — one field, one meaning
      * (clarified 2026-08-17, GHI #101). It is simultaneously the FR-025 mirror for
      * linkability and the FR-017 build binding, because in this system the issue

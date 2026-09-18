@@ -119,6 +119,25 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    every id stable unless a correction requires changing what an id describes. Change NOTHING
    a correction (or recorded answer) does not call for: the operator re-judges only the flagged
    items, so an unasked-for change would ship unreviewed.
+
+   **Declare `reads` on any step whose work depends on something it does not write** — the path
+   globs it must READ in order to produce its deliverable, e.g. `["vendor/lza"]`,
+   `["config/**", "docs/spec.md"]`. It is the read side of `scope`, it is optional, and the
+   harness cannot check what you do not declare. Before approval it asks, of every path you list,
+   whether anything will actually put it there: it exists in the repository, a step this one comes
+   after writes it (say so in `depends_on`), or a `<name>.lock` at the repository root fetches it
+   into `vendor/<name>`. A path with none of the three is reported to the operator beside your
+   plan. It is not an allowlist and nothing is refused for reading something you did not declare —
+   a step must read the repository it is editing.
+
+   **THE HARNESS CHECKS WHAT YOU DECLARED AND ALSO WHAT YOU WROTE IN PROSE — do not rely on either
+   to cover for the other.** Whatever you put in `reads`, the approval report separately scans your
+   `title`, `intent`, `acceptance`, every boundary case description and every verification target
+   `check` for paths under `runbooks/`, `useful-context/`, `inputs/` or `specs/`, and names any the
+   workload's `### Context` section does not designate. Referring to a context file nobody handed
+   you is reported whether or not you also listed it — so if you need a source, ask for it as a
+   `q-` question rather than naming it and hoping.
+
    **ANY `run` YOU WRITE OR CHANGE MUST FAIL ON A TREE THAT LACKS ITS STEP'S WORK.** A
    verification target whose command would pass with or without the step asserts something
    that was already true, so its green is not evidence about the step — and `build-verify`

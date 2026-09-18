@@ -9,6 +9,7 @@ import { CONTRADICTION_LABEL } from '../../../dashboard/lib/github/labels';
 import { ConfirmationRecord, Ledger, Legacy } from '../../../schemas/confirmation';
 import type { PlanStep } from '../../../schemas/plan';
 import { asApiUnavailable, type GateResult } from './runner';
+import { readTextAtRef } from './repo-read';
 
 /**
  * Build-preflight checks (gate-checks-cli.md §2):
@@ -310,9 +311,11 @@ export function legacyConfirmationPath(stepId: string): string {
  *   intent      — the business `what`, which is what was described to them
  *   acceptance  — the testable outcome, which is what they were promised
  *   authority   — who was asked; a re-route is a different question, not the same one
- * `priority`, `title`, `depends_on` and `tracking_issue` are deliberately OUT: none
- * of them changes what the authority said yes to, and including them would expire
- * good sign-offs on bookkeeping edits.
+ * `priority`, `title`, `depends_on`, `scope`, `reads` and `tracking_issue` are
+ * deliberately OUT: none of them changes what the authority said yes to, and including
+ * them would expire good sign-offs on bookkeeping edits. `reads` (GHI #274) is the
+ * newest and the clearest case — what a step must READ in order to write is a fact
+ * about the build environment, not about the outcome an authority approved.
  *
  * Serialization is canonical by construction — a fixed key order written out
  * literally, not `JSON.stringify(step)` over a whole object whose key order is an
@@ -328,20 +331,6 @@ export function stepDigest(step: Pick<PlanStep, 'id' | 'intent' | 'acceptance'> 
     ['authority', step.authority ?? null],
   ]);
   return `sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
-}
-
-/** One file at one ref, or null when absent. Local rather than reusing plans.ts's
- *  private reader: that one resolves the PLAN document (canonical path, guarded
- *  legacy fallback), and a confirmation has exactly one path with no history. */
-async function readTextAtRef(gh: Octokit, repo: RepoRef, path: string, ref: string): Promise<string | null> {
-  try {
-    const { data } = await gh.repos.getContent({ ...repo, path, ref });
-    if (Array.isArray(data) || !('content' in data)) return null;
-    return Buffer.from(data.content, 'base64').toString('utf8');
-  } catch (error: unknown) {
-    if (errorStatus(error) === 404) return null;
-    throw error;
-  }
 }
 
 /**

@@ -111,8 +111,36 @@ export const GOVERNANCE_RECORD_PATHS = ['plans/**', 'confirmations/**', 'evidenc
 export const REPOSITORY_CONTROL_PATHS = ['.github/**'] as const;
 
 /**
+ * `vendor/**` — GENERATED, and the harness writes here (GHI #274, Codex on PR #275).
+ *
+ * `build-template` materializes each root `<name>.lock`'s pinned upstream into
+ * `vendor/<name>/` before the agent starts, so a build's worktree contains an upstream
+ * release that nobody approved and nobody reviewed: it is the SOURCE the step checks its
+ * work against, never the step's output. The build prompt says so, and a prompt is a
+ * sentence to the agent rather than a control — `build-publish` validates
+ * `deliverable.patch` paths against this set and the step's declared scope, and the step
+ * scope check is skipped entirely when a step declares none, so without this entry a step
+ * scoped `vendor/lza/**` (which G16 would also have permitted) or a legacy unscoped step
+ * could publish tens of thousands of generated upstream files as its deliverable. The
+ * subject's `.gitignore` is no help: the publisher builds the git tree from the patch.
+ *
+ * WHOLESALE, on the `.github/**` precedent. The narrower rule — reserve only the
+ * destinations some lock file actually declares — is not decidable here: this module is
+ * pure and has no read of the frozen commit, and a plan can name `vendor/lza/**` before
+ * any lock exists. The cost of being wrong is asymmetric in the usual direction, so the
+ * whole directory is reserved.
+ *
+ * A SUBJECT THAT LEGITIMATELY TRACKS VENDORED SOURCE still has the route every reserved
+ * path has: a pull request opened by a person (`PRODUCT_PR_ROUTE`). What it loses is the
+ * ability to have an AGENT deliver there, which is the same thing `.github/**` gives up
+ * and for the same reason.
+ */
+export const GENERATED_VENDOR_PATHS = ['vendor/**'] as const;
+
+/**
  * The full reserved set AS A LIST: what `init` installs ∪ the governance record ∪ the
- * rest of the repository's control surface ∪ whatever the operator added.
+ * rest of the repository's control surface ∪ the generated vendored sources ∪ whatever
+ * the operator added.
  *
  * A function rather than a constant so the derivation is re-evaluated (and so tests
  * can prove it derives — extend `TOOLCHAIN_DIRS` and this grows with no edit here).
@@ -131,7 +159,7 @@ export function reservedPaths(extra: readonly string[] = []): string[] {
     // Where the templates land in the target: `.github/workflows`, `.github/ISSUE_TEMPLATE`.
     ...INSTALLED_TEMPLATE_DIRS,
   ];
-  return [...installed, ...GOVERNANCE_RECORD_PATHS, ...REPOSITORY_CONTROL_PATHS, ...extra];
+  return [...installed, ...GOVERNANCE_RECORD_PATHS, ...REPOSITORY_CONTROL_PATHS, ...GENERATED_VENDOR_PATHS, ...extra];
 }
 
 /**

@@ -9,6 +9,12 @@ import {
   checkG18MustTargetsExecutable,
   checkG19RunsLintable,
 } from '../../scripts/gates/lib/checks-approval';
+import {
+  checkG20ReadsProvided,
+  checkG21ContextClaimed,
+  PREVIEW_NO_REPOSITORY,
+  PREVIEW_NO_WORKLOAD,
+} from '../../scripts/gates/lib/checks-reads';
 
 /**
  * Scope-gate preview (T060, US2): G2/G3/G4 for the dashboard, REUSING the
@@ -28,7 +34,14 @@ import {
  * never verified — and both were met live as dead ends AFTER approval. The
  * name `scopeGatePreview` stays: it is what the review page imports, and the
  * set it previews has always been "the pure plan-gate checks", which now has
- * five members.
+ * seven members.
+ *
+ * TWO OF THE SEVEN CANNOT ANSWER THEIR OWN QUESTION HERE (GHI #274). G20 needs the
+ * repository tree and the root lock files; G21 needs the workload issue. A pure half
+ * that returned `pass` because it could not ask would be the very defect this wave is
+ * about — an absent check reading as a passing one. They report `not-applicable` with
+ * the reason instead, which is the status that already means "no verdict was reached,
+ * and here is why". The review page renders that as a dash, not a refusal.
  *
  * `workItemsPendingFor` is the one place the preview and the gate read
  * different inputs, on purpose. Under D2 the Commit-for-approval click is what
@@ -45,7 +58,7 @@ export interface ScopeGatePreview {
   /** findings that do NOT block approval (GHI #232) — read by the operator at the
    *  Andon break, where a bad command is still one edit away from being fixed */
   advisories: string[];
-  /** stable order G2, G3, G4, G17, G18, G19 — the same relative order plan-gate reports */
+  /** stable order G2, G3, G4, G17, G18, G19, G20, G21 — the same relative order plan-gate reports */
   gates: GateResult[];
   /** failing gates phrased for the disabled-button title: "G3: <detail> (FR-012)" */
   failures: string[];
@@ -72,6 +85,14 @@ export function scopeGatePreview(
     // both. Said in the review page's copy rather than left for a reader to discover
     // when the gate reports a G19 clause the preview never showed.
     checkG19RunsLintable(plan),
+    // G20 and G21 PARTIAL here for the same reason G19 is, one step further: their
+    // central question belongs to the repository and to the workload issue, and this
+    // function is pure and synchronous by contract. Handed an explicit "did not ask",
+    // each reports `not-applicable` carrying the reason rather than a tick it did not
+    // earn — and still shows any DOCUMENT-half finding it can compute, so an operator
+    // is never shown a partial finding as a complete one.
+    checkG20ReadsProvided(plan, { read: false, why: PREVIEW_NO_REPOSITORY }),
+    checkG21ContextClaimed(plan, { known: false, why: PREVIEW_NO_WORKLOAD }),
   ];
   // Deliberately NOT `refusalDetail`: this one appends `(FR-0NN)` for the
   // disabled-button title, which is a different string for a different reader.

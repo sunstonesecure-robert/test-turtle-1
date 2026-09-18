@@ -20,8 +20,18 @@ import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors'
  *
  *   pass            — ran, green
  *   fail            — ran, red
- *   not-applicable  — did not run, ON PURPOSE, and the reason says which purpose
- *                     (no --chunk given, attended run). Legitimate and deliberate.
+ *   not-applicable  — DID NOT RUN, and the reason says why. Two legitimate causes, and
+ *                     the reason is what tells them apart:
+ *                       • a deliberate skip — no --chunk given, an attended run, a
+ *                         preview that cannot spawn a shell or call GitHub;
+ *                       • WIDENED 2026-09-17 (GHI #274): the check tried and could not
+ *                         obtain what it needed — the workload issue answered 500, the
+ *                         repository root could not be listed. That is not a skip, but
+ *                         it is also not a verdict, and forcing it into `pass` would say
+ *                         "checked and fine" about a check that never ran, which is the
+ *                         defect this whole status exists to make visible. A gate in
+ *                         that position says so and refuses nothing (ADR-0007).
+ *                     Either way: no verdict was reached, and the report is not red.
  *   absent          — the gate the catalogue declares is NOT PRESENT in the code
  *                     that ran. Never legitimate; fails the report.
  *

@@ -1,14 +1,22 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { readPlanAtRef, slugFromPlanRef } from '../dashboard/lib/github/plans';
-import { listDeliverablePrs } from '../dashboard/lib/github/builds';
+import { listDeliverablePrs, listSurvivingPullRequestPathsOrNull } from '../dashboard/lib/github/builds';
 import { parseDeliverableMarker } from '../dashboard/lib/github/markers';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import type { PlanDoc } from '../schemas/plan';
 import type { CheckConclusion } from './vt-report';
+import {
+  ASSURANCE_FILE,
+  assurancePanel,
+  classify,
+  isExecutableDeliverable,
+  runnerFor,
+  type AssuranceNote,
+} from './verification-assurance';
 
 /**
  * build-verify (T211) — verification executed against the MERGED deliverable commit.
@@ -224,6 +232,29 @@ export interface VerifyOutcome {
    * and an order it cannot observe is one it must not assert.
    */
   outOfOrder: { stepId: string; pendingPrerequisiteIds: string[] }[];
+  /**
+   * WHAT `verified` ACTUALLY MEANT, per delivered step — the kind of check each of its
+   * targets made, what the step delivered, and the command that would check it for real
+   * (GHI #271).
+   *
+   * DESCRIBED, NEVER SCORED. A step proved by running its suite and one proved by
+   * `test -f` reported identically on every surface an operator reads, and the ladder
+   * has no rung for "the target exercised the deliverable" because weak agent output is
+   * fixed by another workload, not refused by the harness (operator decision
+   * 2026-09-16). So this changes no conclusion, demotes no target, withholds no result
+   * and gates no completion — it is the line that lets an operator reading a green tell
+   * "this ran the code" from "this checked the file was there".
+   *
+   * IT NEVER CALLS A TARGET STRONG. A command it cannot characterise is recorded as
+   * uncharacterised, which is an honest non-claim: a target reaching outside its step's
+   * scope may be guarding an invariant that predates the plan, and that is not weakness.
+   * The positive claim is made only when every command, option and path can be read.
+   *
+   * Empty when `delivery` was not supplied: the by-hand CLI path knows neither what was
+   * delivered nor which files came with it, and an assurance it cannot observe is one it
+   * must not describe — the same rule `outOfOrder` above follows.
+   */
+  assurance: AssuranceNote[];
 }
 
 /** One merged deliverable, reduced to what delivery scope needs. */
@@ -235,6 +266,19 @@ export interface MergedDelivery {
   /** the commit this deliverable landed as — how the subject recognises ITSELF, which a
    *  timestamp comparison cannot do at one-second resolution (see `asOf` below) */
   mergeCommitSha: string | null;
+  /** the deliverable pull request's number, named in the degraded read so an operator
+   *  whose diff could not be read still knows where to look */
+  prNumber?: number;
+  /**
+   * Every path this deliverable's diff touched; `null` when the diff could not be read;
+   * ABSENT when nobody asked. Three values, not two: an authoritative empty list is a
+   * real live state — PR #104 merged one commit and zero files, because the agent
+   * re-emitted byte-identical content — and folding "not asked" into "could not read"
+   * would put *"the files this step delivered could not be read"* in front of an
+   * operator about a read nobody attempted. Optional because several tests build this
+   * literal by hand and a required field would make them record something they never had.
+   */
+  paths?: readonly string[] | null;
 }
 
 /**
@@ -251,6 +295,16 @@ export interface DeliveryRecord {
   /** steps whose deliverable merged BEFORE the frozen tag was cut, so the negative
    *  control's baseline already contains their work (GHI #234) */
   inBaseline: ReadonlySet<string>;
+  /**
+   * Per DELIVERED step: which deliverable pull requests landed it, and every path their
+   * diffs touched. `paths: null` is the UNREADABLE answer and is a different value from
+   * `[]`, which is an authoritative "these deliverables changed no file". An ABSENT KEY
+   * is "not asked", and reads as unknown — never as none.
+   *
+   * Required rather than optional on purpose: every constructor is then forced to
+   * answer, and the one hand-built literal in the suite becomes a visible `new Map()`.
+   */
+  deliveredFiles: ReadonlyMap<string, { prNumbers: number[]; paths: readonly string[] | null }>;
 }
 
 /**
@@ -317,6 +371,31 @@ export function deriveDeliveryRecord(
           const ms = Date.parse(d.mergedAt);
           return Number.isNaN(ms) ? false : ms < asOfMs;
         });
+  // WHAT LANDED, FROM THE SAME FILTERED LIST, for the reason stated above: a second pass
+  // could include a deliverable this one excluded, and the panel would then name files
+  // the commit under verification does not contain.
+  //
+  // UNKNOWN IS STICKY, AND "NOT ASKED" IS NOT UNKNOWN. One unreadable diff makes the
+  // step's path list INCOMPLETE, and an incomplete list rendered as complete would hand
+  // the operator a command that runs a subset of the delivery and call it the delivery
+  // — so any `null` makes the whole step's answer `null`. A delivery nobody asked about
+  // (`paths` absent) contributes no key at all, which reads as unknown further down and
+  // never as "nothing was delivered".
+  const files = new Map<string, { prNumbers: number[]; paths: readonly string[] | null }>();
+  for (const d of asOfDeliveries) {
+    if (d.paths === undefined && d.prNumber === undefined) continue;
+    const seen = files.get(d.stepId);
+    const prNumbers = seen?.prNumbers ?? [];
+    if (d.prNumber !== undefined && !prNumbers.includes(d.prNumber)) prNumbers.push(d.prNumber);
+    const incoming = d.paths ?? null;
+    const paths =
+      seen === undefined
+        ? incoming
+        : seen.paths === null || incoming === null
+          ? null
+          : [...new Set([...seen.paths, ...incoming])];
+    files.set(d.stepId, { prNumbers, paths });
+  }
   for (const { stepId, mergedAt } of asOfDeliveries) {
     delivered.add(stepId);
     const mergedMs = Date.parse(mergedAt);
@@ -329,7 +408,7 @@ export function deriveDeliveryRecord(
       inBaseline.add(stepId);
     }
   }
-  return { delivered, inBaseline };
+  return { delivered, inBaseline, deliveredFiles: files };
 }
 
 /** When the frozen tag's own commit was made, read from the control's checkout — no
@@ -728,6 +807,11 @@ export function runVerification(
     controlSkipped,
     reportedWithPendingOptional,
     outOfOrder,
+    // DESCRIBED FROM WHAT WAS ACTUALLY REPORTED, not from the plan: `results` is the set
+    // of targets that ran, so a step whose targets were suppressed for not-yet-delivered
+    // gets no note rather than a note about checks nobody made. The declared-order line
+    // is a LOOKUP into `outOfOrder` above, never a second derivation of it.
+    assurance: assuranceFor(plan, results, delivery, outOfOrder),
   };
 }
 
@@ -750,13 +834,80 @@ export function runVerification(
  * ask" is not an answer here either.
  */
 /**
+ * One note per DELIVERED step whose targets were reported (GHI #271).
+ *
+ * Pure. Everything it needs is already in hand: the plan holds each step's `scope`, the
+ * results hold which targets ran, and the delivery record holds what landed and which
+ * files came with it. Nothing here reads a tree or spawns a shell — the reporter that
+ * renders this runs in a different job from the checkout.
+ */
+function assuranceFor(
+  plan: PlanDoc,
+  results: { id: string; conclusion: CheckConclusion }[],
+  delivery: DeliveryRecord | undefined,
+  outOfOrder: { stepId: string; pendingPrerequisiteIds: string[] }[],
+): AssuranceNote[] {
+  if (delivery === undefined) return [];
+  const reported = new Set(results.map((r) => r.id));
+  const byStep = new Map<string, AssuranceTargetDraft[]>();
+  for (const target of plan.verification_targets) {
+    if (!reported.has(target.id)) continue;
+    // The UNION of every mapped step's scope, or null when any one declares none — a
+    // union with a hole cannot answer "inside its own scope".
+    const mapped = target.maps_to.map((id) => plan.steps.find((st) => st.id === id));
+    const scope = mapped.some((st) => st === undefined || (st.scope ?? []).length === 0)
+      ? null
+      : mapped.flatMap((st) => st!.scope ?? []);
+    const verdict = classify(target.run, scope);
+    for (const stepId of target.maps_to) {
+      if (!delivery.delivered.has(stepId)) continue;
+      const list = byStep.get(stepId) ?? [];
+      list.push({ id: target.id, strength: verdict.strength, detail: verdict.strength === 'presence-only' ? verdict.evidence : verdict.reason });
+      byStep.set(stepId, list);
+    }
+  }
+  const notes: AssuranceNote[] = [];
+  for (const [stepId, targets] of byStep) {
+    const landed = delivery.deliveredFiles.get(stepId);
+    // NO KEY IS "NOT ASKED", which reads the same way as "could not read" here — both
+    // are unknown, and neither is an empty delivery.
+    const paths = landed === undefined ? null : landed.paths;
+    const executablePaths = (paths ?? []).filter(isExecutableDeliverable);
+    notes.push({
+      stepId,
+      targets,
+      deliveredPaths: paths === null ? null : [...paths],
+      deliverablePrNumbers: landed?.prNumbers ?? [],
+      executablePaths: executablePaths.filter((pth) => runnerFor(pth) !== null),
+      unrunnablePaths: executablePaths.filter((pth) => runnerFor(pth) === null),
+      pendingPrerequisiteIds: outOfOrder.find((o) => o.stepId === stepId)?.pendingPrerequisiteIds ?? [],
+    });
+  }
+  return notes;
+}
+
+interface AssuranceTargetDraft {
+  id: string;
+  strength: 'presence-only' | 'unclassified';
+  detail: string;
+}
+
+/**
  * What a step PROMISES, as one comparable string (Codex on PR #252, third review).
  *
  * Deliberately excludes `tracking_issue` and `depends_on`: re-binding a work item or
  * re-ordering the plan does not change what was built, and treating either as a
  * redefinition would un-deliver steps on an ordinary re-open. Includes everything that
  * describes the WORK — what it is, what it must achieve, how wide it may reach, and
- * whether it was promised at all.
+ * whether it was promised at all. *
+ * `reads` IS OUT (GHI #274), and the reason is the one this docblock already gives for
+ * `depends_on`. `scope` is IN because D2 validates the delivered patch against it, so a
+ * change to it changes what may have been written; `reads` bounds nothing about the
+ * output and no delivered artifact differs because of it. And it is a NEW field: the
+ * planning prompts now tell the agent to emit it, so the first re-open after this ships
+ * would add it to steps that had none and re-judge every already-merged step as
+ * redefined — un-delivering real work for a bookkeeping edit, which is exactly what the
+ * exclusions above exist to prevent.
  */
 export function stepDefinitionDigest(step: PlanDoc['steps'][number]): string {
   return JSON.stringify([
@@ -800,6 +951,7 @@ export async function readDeliveryRecord(
       mergedAt: pr.mergedAt!,
       mergeCommitSha: pr.mergeCommitSha,
       deliveredUnder: pr.marker!.planRef,
+      prNumber: pr.number,
     }));
   // A STEP ID IS NOT A PROMISE — THE STEP DEFINITION IS (Codex on PR #252, third review).
   //
@@ -840,7 +992,22 @@ export async function readDeliveryRecord(
         continue;
       }
     }
-    deliveries.push({ stepId: c.stepId, mergedAt: c.mergedAt, mergeCommitSha: c.mergeCommitSha });
+    deliveries.push({
+      stepId: c.stepId,
+      mergedAt: c.mergedAt,
+      mergeCommitSha: c.mergeCommitSha,
+      prNumber: c.prNumber,
+      // ONE EXTRA DIFF READ per counted merged deliverable — the DEGRADING form, because
+      // `resolveVerifiedCommit` and completion depend on this call and never needed the
+      // diff: a listing that cannot read one pull request's files must still produce a
+      // record. A failed read is `null` here and stays `null` all the way to the panel,
+      // where it renders as "could not be read" and never as "nothing was delivered".
+      //
+      // SURVIVING paths, not every touched one: a deliverable that deletes or renames a
+      // test must not be described as having delivered the path it removed, and the
+      // command printed beside it must not name a file the verified commit lacks.
+      paths: await listSurvivingPullRequestPathsOrNull(gh, repo, c.prNumber),
+    });
   }
   // The subject's own merge, found by sha among the deliverables just listed — its
   // `mergedAt` is the instant this commit came into being, and everything that merged
@@ -1038,14 +1205,32 @@ if (isMain) {
         }
         return ref;
       });
+  // `commit` is the subject when the caller named one; otherwise the checkout's own HEAD
+  // is the commit being verified, which is the same thing by construction. Hoisted so
+  // the assurance notes can be bound to the very commit they describe.
+  const verifiedCommit = commit ?? subjectHeadOrUndefined(cwd) ?? '';
   resolve
-    // `commit` is the subject when the caller named one; otherwise the checkout's own
-    // HEAD is the commit being verified, which is the same thing by construction.
-    .then((planRef) => buildVerify(gh, repo, planRef, cwd, baseCwd, commit ?? subjectHeadOrUndefined(cwd)))
+    .then((planRef) => buildVerify(gh, repo, planRef, cwd, baseCwd, verifiedCommit === '' ? undefined : verifiedCommit))
     .then((outcome) => {
       mkdirSync(dirname(out) === '' ? '.' : dirname(out), { recursive: true });
       writeFileSync(out, `${JSON.stringify({ plan_ref: outcome.planRef, results: outcome.results }, null, 2)}\n`);
       console.log(`wrote ${out}: ${outcome.results.length} result(s)`);
+      // THE SIBLING, in the same directory as the results it describes — derived from
+      // `--out` rather than given its own flag, deliberately. The workflow uploads that
+      // whole directory (`vendor-subject.json` is the precedent), so this needs no
+      // workflow change; and a notes file that could be pointed somewhere else is one
+      // that can go stale against the results it claims to annotate.
+      //
+      // Written on EVERY run, even with no notes, so an absent file means "an older
+      // build-verify produced this artifact" and never "this run had nothing to say".
+      // `vt-results.json` is untouched and still `.strict()` — the artifact that decides
+      // conclusions gains nothing that does not.
+      const assuranceOut = join(dirname(out) === '' ? '.' : dirname(out), ASSURANCE_FILE);
+      writeFileSync(
+        assuranceOut,
+        `${JSON.stringify({ plan_ref: outcome.planRef, verified_commit: verifiedCommit, notes: outcome.assurance }, null, 2)}\n`,
+      );
+      console.log(`wrote ${assuranceOut}: ${outcome.assurance.length} step note(s)`);
       if (outcome.unexecutable.length > 0) {
         // Loud, and NOT a failure of this run: the targets exist and were not
         // checked, which is a fact completion needs to act on rather than a crash.
@@ -1140,6 +1325,15 @@ if (isMain) {
             .join(' | ')}. A verification target must leave the tree as the merge commit has it; ` +
             'make the target read-only, or re-open the plan to move the build step out of verification.',
         );
+      }
+      // WHAT THIS VERIFICATION EXERCISED — placed LAST because every other block above
+      // reports a problem with this run and this one does not. Nothing below changes a
+      // conclusion or refuses anything (GHI #271).
+      if (outcome.assurance.length > 0) {
+        console.log('WHAT THIS VERIFICATION EXERCISED — nothing below changes a conclusion or refuses anything:');
+        for (const note of outcome.assurance) {
+          for (const line of assurancePanel(note, verifiedCommit)) console.log(line);
+        }
       }
       // THIS SCRIPT's exit status reflects whether verification could be PERFORMED,
       // not whether the deliverable passed: a failing target is a real result that
