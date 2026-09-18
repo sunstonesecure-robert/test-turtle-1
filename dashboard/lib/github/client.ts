@@ -21,7 +21,43 @@ export interface ClientOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-const etagCache = new Map<string, { etag: string; body: unknown; status: number }>();
+/**
+ * THE CACHED BODY IS A SNAPSHOT, NEVER A REFERENCE, AND THE HEADERS ARE KEPT.
+ *
+ * Both of those are load-bearing, and both were wrong (live, lza-phase0-2,
+ * 2026-09-18: L3 refused a passing completion naming a check run `'undefined'`).
+ *
+ * `@octokit/plugin-paginate-rest` NORMALIZES an envelope response IN PLACE —
+ * `normalize-paginated-list-response.js` does `delete data.total_count` and then
+ * `response.data = data.check_runs`. Storing `response.data` by reference handed that
+ * mutation the cache entry: the stored body lost the very `total_count` the normalizer
+ * uses to recognise an envelope, so the next 304 replayed `{check_runs: […]}`, the
+ * normalizer skipped it, and `paginate`'s `results.concat(data)` appended the OBJECT as
+ * a single element. Every caller then saw one nameless "check run" and zero real rows —
+ * on the second and every subsequent read, which is every render after the first.
+ *
+ * The clone goes BOTH ways: storing a copy protects the cache from the normalizer, and
+ * replaying a copy protects it from the next one. One direction alone still rots.
+ *
+ * `headers` is retained for `link`: the iterator reads `rel="next"` off the response it
+ * is handed, so replaying `{}` ended pagination after page one. A silently truncated
+ * page reads as "unverified" — a wrong refusal, the failure `listVtCheckRuns` paginates
+ * to avoid in the first place.
+ */
+const etagCache = new Map<
+  string,
+  { etag: string; body: unknown; status: number; headers: Record<string, unknown> }
+>();
+
+/** A structural copy, falling back to the value itself for anything unclonable (a body
+ *  carrying a function or a stream is not a body this cache can protect anyway). */
+function snapshot<T>(value: T): T {
+  try {
+    return structuredClone(value);
+  } catch {
+    return value;
+  }
+}
 
 export function createClient(opts: ClientOptions = {}): Octokit {
   const token = opts.token ?? process.env.GITHUB_TOKEN;
@@ -105,13 +141,25 @@ export function createClient(opts: ClientOptions = {}): Octokit {
       try {
         const response = await request(options);
         const etag = response.headers?.etag;
-        if (etag) etagCache.set(key, { etag, body: response.data, status: response.status });
+        if (etag) {
+          etagCache.set(key, {
+            etag,
+            body: snapshot(response.data),
+            status: response.status,
+            headers: { ...response.headers },
+          });
+        }
         return response;
       } catch (error: unknown) {
         const status = errorStatus(error);
         const cached = etagCache.get(key);
         if (status === 304 && cached) {
-          return { data: cached.body, status: cached.status, headers: {}, url: options.url } as never;
+          return {
+            data: snapshot(cached.body),
+            status: cached.status,
+            headers: { ...cached.headers },
+            url: options.url,
+          } as never;
         }
         throw error;
       }
