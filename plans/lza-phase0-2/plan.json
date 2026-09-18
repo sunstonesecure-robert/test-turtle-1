@@ -23,7 +23,7 @@
         "inputs/lza-phase0/config/accounts-config.yaml",
         "specs/lza-01/spec.md"
       ],
-      "tracking_issue": null
+      "tracking_issue": 121
     }
   ],
   "verification_targets": [
