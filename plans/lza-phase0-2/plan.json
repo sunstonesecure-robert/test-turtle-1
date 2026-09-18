@@ -1,0 +1,75 @@
+{
+  "feature": "lza-phase0-2",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "35352718686",
+  "andon_issue": 118,
+  "steps": [
+    {
+      "id": "step-accounts-config",
+      "title": "Deliver config/accounts-config.yaml with the three mandatory LZA accounts and empty workloadAccounts",
+      "intent": "Deliver, at the repository-root config/accounts-config.yaml, the LZA accounts-config declaring EXACTLY the three mandatory accounts — Management (organizationalUnit Root), LogArchive and Audit (both organizationalUnit Security) — each carrying a non-empty description and a placeholder email in valid EmailAddress form, with workloadAccounts as an empty list (issue #117; LZACFG-010..013). The file keeps the Phase 0 credential-free posture: the emails are example.com placeholders that deploy nothing (REQ-049/REQ-051). NOTE FOR THE OPERATOR: this exact file already exists on main (delivered by the prior workload lza-phase0-1-redo as part of the six-file config set, PR #116) and is byte-for-byte identical to the reviewed example prototype inputs/lza-phase0/config/accounts-config.yaml, so absent a directed content change this step is a no-op — see q-already-delivered, q-emails, q-descriptions and bc-accounts-already-present. The prototype under inputs/lza-phase0/ is read-only reference; the reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, package manifests) and the governance record (plans/**, confirmations/**, evidence/**) are out of scope and must not be touched.",
+      "acceptance": "config/accounts-config.yaml exists at the repository root, parses as YAML, declares exactly three mandatoryAccounts mapping name to organizationalUnit as {Management: Root, LogArchive: Security, Audit: Security}, each account has a non-empty string description and a syntactically valid placeholder email, and workloadAccounts is an empty list.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "The reviewed accounts-config.yaml already on main (delivered by lza-phase0-1-redo, PR #116) and identical to inputs/lza-phase0/config/accounts-config.yaml: three mandatory accounts Management (Root)/LogArchive (Security)/Audit (Security) with example.com placeholder emails (management+govcloud@example.com, logarchive+govcloud@example.com, audit+govcloud@example.com), current descriptions, and workloadAccounts: []. Used as the defaulted content pending q-already-delivered, q-emails and q-descriptions.",
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "config/accounts-config.yaml"
+      ],
+      "reads": [
+        "inputs/lza-phase0/config/accounts-config.yaml",
+        "specs/lza-01/spec.md"
+      ],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-accounts-three-mandatory",
+      "kind": "exact-copy",
+      "check": "config/accounts-config.yaml declares exactly the three mandatory accounts mapping name to organizationalUnit as {Management: Root, LogArchive: Security, Audit: Security}, and workloadAccounts is an empty list (LZACFG-010..013).",
+      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); m={x[\"name\"]:x[\"organizationalUnit\"] for x in a[\"mandatoryAccounts\"]}; assert m=={\"Management\":\"Root\",\"LogArchive\":\"Security\",\"Audit\":\"Security\"}, m; assert a[\"workloadAccounts\"]==[]'",
+      "maps_to": [
+        "step-accounts-config"
+      ]
+    },
+    {
+      "id": "vt-accounts-descriptions",
+      "kind": "expected-output",
+      "check": "Each of the three mandatory accounts in config/accounts-config.yaml has a non-empty string description.",
+      "run": "python3 -c 'import yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); ma=a[\"mandatoryAccounts\"]; assert len(ma)==3, len(ma); assert all(isinstance(x.get(\"description\"),str) and x[\"description\"].strip() for x in ma)'",
+      "maps_to": [
+        "step-accounts-config"
+      ]
+    },
+    {
+      "id": "vt-accounts-emails",
+      "kind": "expected-output",
+      "check": "Each of the three mandatory accounts has a syntactically valid placeholder email address (a form the pinned LZA v1.16.1 EmailAddress schema accepts), not a ${...} token.",
+      "run": "python3 -c 'import re,yaml; a=yaml.safe_load(open(\"config/accounts-config.yaml\")); pat=re.compile(r\"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$\"); assert all(pat.match(str(x.get(\"email\",\"\"))) for x in a[\"mandatoryAccounts\"])'",
+      "maps_to": [
+        "step-accounts-config"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-accounts-already-present",
+      "description": "The deliverable config/accounts-config.yaml ALREADY exists on main (delivered by the prior workload lza-phase0-1-redo as part of its six-file config set, PR #116) and already satisfies issue #117 byte-for-byte. Every verification target above is therefore expected to already hold on the current/frozen plan tree; unless the operator directs a specific content change (see q-already-delivered / q-emails / q-descriptions), the build step is a no-op and build-verify will report action_required for the green targets that also pass on the frozen plan tree. This is a confirm-only workload, not a value rewrite.",
+      "step_id": "step-accounts-config"
+    },
+    {
+      "id": "bc-accounts-exactly-three",
+      "description": "config/accounts-config.yaml must declare EXACTLY three mandatoryAccounts — no fourth account and none omitted. A build that adds or drops an account fails delivery even if each account present is individually valid.",
+      "step_id": "step-accounts-config"
+    },
+    {
+      "id": "bc-accounts-email-format",
+      "description": "Emails must be in valid EmailAddress form: LZA v1.16.1 offline validation rejects ${MANAGEMENT_ACCOUNT_EMAIL}-style tokens, so the working file uses real-format example.com placeholders that satisfy the schema while provisioning nothing under the Phase 0 credential-free posture.",
+      "step_id": "step-accounts-config"
+    }
+  ]
+}
