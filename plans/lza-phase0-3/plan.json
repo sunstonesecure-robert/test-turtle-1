@@ -1,0 +1,67 @@
+{
+  "feature": "lza-phase0-3",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "35382578467",
+  "andon_issue": 128,
+  "steps": [
+    {
+      "id": "step-organization-config",
+      "title": "Deliver config/organization-config.yaml: LZA organization config with enable true, exactly the Security and Infrastructure OUs, and no custom policies",
+      "intent": "Deliver the LZA organization-config file for workload lza-phase0-3 (issue #126) at the repository-root working path config/organization-config.yaml, the location the spec layout (spec section 5) and spec section 6.6 assign to this of the six mandatory LZA files. Per LZACFG-020..023 and spec section 6.6 the file MUST set enable: true, represent EXACTLY the two initial OUs Security and Infrastructure (Security holds the Control Tower shared accounts; Infrastructure is registered but initially empty), set serviceControlPolicies to an empty list, and define no custom SCP, RCP, tag, backup, chatbot, or declarative policy for the first release (empty arrays declare none and are acceptable where the pinned LZA v1.16.1 schema requires them). The identical phase-0 reference at inputs/lza-phase0/config/organization-config.yaml is read-only prior art. TWO matters need operator judgment before this step is buildable: (1) the workload body both names inputs/lza-phase0-3/ as the delivery folder AND states that delivered work lands in the main repo and that example paths must be adjusted to the working repo paths, so the delivery target is genuinely ambiguous (q-delivery-path); (2) config/organization-config.yaml already exists on main from repository initialization with content identical to this target, so as drafted the step is a no-op that build-verify would flag action_required (q-already-delivered). The reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, and the root package/tsconfig manifests) and the governance record (plans/**, confirmations/**, evidence/**, runs/**) are out of scope and are not touched.",
+      "acceptance": "config/organization-config.yaml exists at the repository root, parses as YAML, sets enable to boolean true, declares organizationalUnits as exactly the two entries with name Security then name Infrastructure in that order, sets serviceControlPolicies to an empty list, and defines no custom SCP/RCP/tag/backup/chatbot/declarative policy (any of taggingPolicies, backupPolicies, chatbotPolicies, resourceControlPolicies, declarativePolicies that are present are empty lists).",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "config/organization-config.yaml"
+      ],
+      "reads": [
+        "specs/lza-01/spec.md",
+        "inputs/lza-phase0/config/organization-config.yaml",
+        "inputs/lza-phase0-3/organization-config.yaml"
+      ],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-org-enable-ous",
+      "kind": "exact-copy",
+      "check": "config/organization-config.yaml sets enable: true and declares organizationalUnits as EXACTLY the two OUs Security then Infrastructure, in that order (LZACFG-020, LZACFG-021; spec section 6.6).",
+      "run": "test -f config/organization-config.yaml && python3 -c 'import yaml; d=yaml.safe_load(open(\"config/organization-config.yaml\")); assert d.get(\"enable\") is True, d.get(\"enable\"); assert [o[\"name\"] for o in d[\"organizationalUnits\"]]==[\"Security\",\"Infrastructure\"], d.get(\"organizationalUnits\")'",
+      "maps_to": [
+        "step-organization-config"
+      ]
+    },
+    {
+      "id": "vt-org-no-custom-policies",
+      "kind": "expected-output",
+      "check": "config/organization-config.yaml declares serviceControlPolicies as an empty list and defines no custom SCP, RCP, tag, backup, chatbot, or declarative policy — every such policy list is empty or absent (LZACFG-022; spec section 6.6).",
+      "run": "test -f config/organization-config.yaml && python3 -c 'import yaml; d=yaml.safe_load(open(\"config/organization-config.yaml\")); ks=[\"serviceControlPolicies\",\"taggingPolicies\",\"backupPolicies\",\"chatbotPolicies\",\"resourceControlPolicies\",\"declarativePolicies\"]; assert d.get(\"serviceControlPolicies\")==[], d.get(\"serviceControlPolicies\"); bad=[k for k in ks if d.get(k) not in (None, [])]; assert not bad, bad'",
+      "maps_to": [
+        "step-organization-config"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-org-exactly-two-ous",
+      "description": "organizationalUnits MUST be EXACTLY Security and Infrastructure — no third OU (for example no Workloads), none omitted, and neither nested below Root. A build that adds or drops an OU fails delivery even if each OU present is individually valid (ARC-002; LZACFG-021).",
+      "step_id": "step-organization-config"
+    },
+    {
+      "id": "bc-org-empty-arrays-schema",
+      "description": "LZACFG-022 permits empty policy arrays only where the pinned LZA v1.16.1 schema requires them. The file on main carries serviceControlPolicies plus taggingPolicies, backupPolicies, chatbotPolicies, resourceControlPolicies, and declarativePolicies, all empty; spec section 6.6's semantic target lists only enable, organizationalUnits, and serviceControlPolicies: []. Whether the extra empty arrays must be present, may be omitted, or must be dropped is a schema question for the operator or the authoritative validator (q-canonical-shape).",
+      "step_id": "step-organization-config"
+    },
+    {
+      "id": "bc-org-already-on-main",
+      "description": "config/organization-config.yaml already exists on main (from repository initialization) with content identical to this step's target. If the delivery target is config/ and no content change is directed, the built patch reproduces the existing file, the step performs no observable work, and both verification targets pass on the frozen plan tree — build-verify re-runs greens against the plan tree and records action_required for any that passes there, blocking completion. Resolution requires operator judgment (q-already-delivered, q-delivery-path).",
+      "step_id": "step-organization-config"
+    }
+  ]
+}
