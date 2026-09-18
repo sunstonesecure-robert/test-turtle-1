@@ -49,18 +49,32 @@ export interface VtCheckRun {
 /**
  * Per-target verdict.
  *
- * `unverified` means no result was ever reported and the step it maps to HAS been
- * delivered — something should have reported and did not. `not-built` means no result
- * was reported because the step has no merged deliverable yet, which is not a problem
- * with the target at all (GHI #231). Both are unmet and both keep completion refused;
- * they are separated because their remedies are opposites — one is "find out why the
- * verification did not report", the other is "build the step".
+ * FOUR absences, four remedies — because a target with no result is not one state.
  *
- * They were one word until 2026-09-13, and the cost of that was an 8-step plan
- * stamping ~15 red check runs on its first deliverable, each telling the operator to
- * "fix the step and re-run the build" for a step nobody had dispatched.
+ *   `not-built`   no result because the step has no merged deliverable yet. Not a
+ *                 problem with the target at all (GHI #231). Remedy: build the step.
+ *   `reporting`   the step IS delivered and verification is STILL RUNNING on this
+ *                 commit. Remedy: none — wait.
+ *   `unverified`  the step is delivered, nothing is running, and nothing reported.
+ *                 Something should have and did not. Remedy: find out why.
+ *   `failing`     a result exists and it is not a success. Remedy: fix the step.
+ *
+ * All four but `passing` are unmet and all keep completion refused. They are separated
+ * because their remedies are opposites, and naming two of them with one word has now
+ * cost this product twice:
+ *
+ *   2026-09-13 (GHI #231) — `unverified` and `not-built` were one word, and an 8-step
+ *   plan stamped ~15 red rows on its first deliverable, each telling the operator to
+ *   "fix the step and re-run the build" for a step nobody had dispatched.
+ *
+ *   2026-09-18 — `unverified` and `reporting` were one word. `build-verify` writes the
+ *   `vt-*` runs about a minute after the deliverable merges (observed on lza-phase0-2:
+ *   merged 15:22:49Z, reported 15:23:50Z), and for that minute every target read
+ *   "no vt-<id> check run exists … re-run the build so its result is reported". The
+ *   operator re-ran the build. The panel is not polled, so the sentence then sat on
+ *   the screen long after it had stopped being true.
  */
-export type VtStatus = 'passing' | 'failing' | 'unverified' | 'not-built';
+export type VtStatus = 'passing' | 'failing' | 'unverified' | 'not-built' | 'reporting';
 
 export interface VtTargetStatus {
   vtId: string;
@@ -95,16 +109,53 @@ export interface DeliveryContext {
   /** stepId → the work item that tracks it (plan `tracking_issue`), so the remedy can
    *  name the thing the operator dispatches rather than the step id alone */
   trackingIssueByStepId: ReadonlyMap<string, number>;
+  /**
+   * Check runs on the verified commit that have NOT reached `completed` — the
+   * evidence that a missing `vt-*` result may simply not have arrived yet.
+   *
+   * Empty means nothing is in flight, which is what turns "no result" from "not
+   * yet" into "something should have reported and did not". Named, not counted,
+   * because the remedy is a judgment the operator makes by looking: a pending
+   * `report` job is the verification arriving, and a pending unrelated check is
+   * not, and only the name distinguishes them.
+   *
+   * Free, like every other field here: `listCheckRunsOnCommit` reads the whole
+   * check-run page that `listVtCheckRuns` was already paginating and simply stops
+   * discarding the non-`vt-` rows.
+   */
+  pendingCheckNames: readonly string[];
 }
 
-/** Build a `DeliveryContext` from a plan and the delivered step ids — the one place
- *  the `tracking_issue` mapping is formed, so three callers cannot form it three ways. */
-export function deliveryContext(plan: PlanDoc, deliveredStepIds: readonly string[]): DeliveryContext {
+/**
+ * Build a `DeliveryContext` — the one place the `tracking_issue` mapping is formed, so
+ * three callers cannot form it three ways.
+ *
+ * `pendingCheckNames` is REQUIRED, and that is the whole guard. This repository has
+ * four times shipped a pure derivation that was wired and tested while its loader
+ * handed it nothing, and `delivery` itself is the standing example — an optional
+ * argument whose absence silently buys the weaker sentence. An optional third
+ * argument here would have been the fifth occurrence. A caller with genuinely no
+ * knowledge of what is in flight passes `[]` and says so at its own call site.
+ */
+export function deliveryContext(
+  plan: PlanDoc,
+  deliveredStepIds: readonly string[],
+  pendingCheckNames: readonly string[],
+): DeliveryContext {
   const trackingIssueByStepId = new Map<string, number>();
   for (const step of plan.steps) {
     if (typeof step.tracking_issue === 'number') trackingIssueByStepId.set(step.id, step.tracking_issue);
   }
-  return { deliveredStepIds: new Set(deliveredStepIds), trackingIssueByStepId };
+  return {
+    deliveredStepIds: new Set(deliveredStepIds),
+    trackingIssueByStepId,
+    // DISTINCT, and normalized HERE rather than trusted from the caller: this is the
+    // one place the context is formed, so it is the one place that can guarantee the
+    // sentence never counts a name twice. Two queued shards of one job say nothing
+    // more than one does, and "3 check runs are still running ('verify', 'report',
+    // 'verify')" reads as a malfunction.
+    pendingCheckNames: [...new Set(pendingCheckNames)],
+  };
 }
 
 export interface CompletionVerdict {
@@ -157,8 +208,35 @@ function isNewer(a: RankedRun, b: RankedRun): boolean {
  * so only the newest run per name counts.
  */
 export async function listVtCheckRuns(gh: Octokit, repo: RepoRef, sha: string): Promise<Map<string, VtCheckRun>> {
+  return (await listCheckRunsOnCommit(gh, repo, sha)).vt;
+}
+
+/**
+ * The same single read, keeping BOTH answers it always contained: the latest `vt-*`
+ * run per name, and the names of every check run on this commit that has not reached
+ * `completed`.
+ *
+ * The second answer was being thrown away one line into the loop. It is what tells a
+ * missing result "not yet" from "never" — `build-verify` writes the `vt-*` runs about
+ * a minute after a deliverable merges, and for that minute the panel, the lifecycle
+ * gate and the subject verifier all told the operator to re-run a build that was
+ * working correctly (live, lza-phase0-2, 2026-09-18).
+ *
+ * No additional request: the endpoint returns every check run on the ref and the
+ * pagination was already being paid for.
+ */
+export async function listCheckRunsOnCommit(
+  gh: Octokit,
+  repo: RepoRef,
+  sha: string,
+): Promise<{ vt: Map<string, VtCheckRun>; pendingCheckNames: string[] }> {
   const listed = await gh.paginate(gh.checks.listForRef, { ...repo, ref: sha, per_page: 100 });
   const latest = new Map<string, RankedRun>();
+  // Distinct, in listing order — the same rule `deliveryContext` applies when it forms
+  // the context, stated here too because this value is returned to anyone who asks.
+  const pendingCheckNames = [
+    ...new Set(listed.filter((raw) => raw.status !== 'completed').map((raw) => raw.name)),
+  ];
   listed.forEach((raw, index) => {
     if (!VT_NAME_RE.test(raw.name)) return;
     const startedMs = raw.started_at ? Date.parse(raw.started_at) : Number.NaN;
@@ -176,7 +254,7 @@ export async function listVtCheckRuns(gh: Octokit, repo: RepoRef, sha: string): 
     const incumbent = latest.get(raw.name);
     if (!incumbent || isNewer(candidate, incumbent)) latest.set(raw.name, candidate);
   });
-  return new Map([...latest.entries()].map(([name, ranked]) => [name, ranked.run]));
+  return { vt: new Map([...latest.entries()].map(([name, ranked]) => [name, ranked.run])), pendingCheckNames };
 }
 
 /** How a non-success run reads in a refusal: the conclusion, or why there is none. */
@@ -296,13 +374,35 @@ export function deriveCompletionStatus(
       continue;
     }
     if (!run) {
-      // The step WAS delivered and nothing reported — a different fault from the one
-      // above, wanting a different action: find out why the verification did not report.
+      // THE STEP WAS DELIVERED AND NOTHING REPORTED — and that is still two states,
+      // not one (GHI #281). `build-verify` writes the `vt-*` runs about a minute after
+      // `build-merge` merges the deliverable, so for that minute a correct, healthy
+      // build looks identical to a verification that never came. The remedies are
+      // opposites: wait, or intervene. Telling an operator to intervene while the
+      // thing they would intervene in is running is how a correct build got dispatched
+      // twice (live, lza-phase0-2, 2026-09-18).
+      //
+      // The evidence is on the commit itself — a check run that has not completed —
+      // and it is read from the same page the `vt-*` runs came from.
+      const pending = delivery?.pendingCheckNames ?? [];
+      if (pending.length > 0) {
+        targets.push({ vtId, mustStepIds, status: 'reporting', conclusion: null, detailsUrl: null });
+        unmet.push(
+          `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) has not reported YET — its ` +
+            `${stepsPhrase(mustStepIds)} ${mustStepIds.length > 1 ? 'have' : 'has'} been delivered and ` +
+            `${pending.length === 1 ? 'a check run is' : `${pending.length} check runs are`} still running on the ` +
+            `commit these results are read on (${pending.map((n) => `'${n}'`).join(', ')}). ` +
+            'Wait for it and refresh — do NOT dispatch another build; this target has nothing wrong with it',
+        );
+        continue;
+      }
+      // Nothing is in flight, so nothing is coming: something should have reported and
+      // did not, and that DOES want the operator.
       targets.push({ vtId, mustStepIds, status: 'unverified', conclusion: null, detailsUrl: null });
       unmet.push(
         `verification target '${vtId}' (${stepsPhrase(mustStepIds)}) is unverified — its ${stepsPhrase(mustStepIds)} ` +
-          `${mustStepIds.length > 1 ? 'have' : 'has'} been delivered but no ${vtId} check run exists on the commit ` +
-          'these results are read on; re-run the build so its result is reported',
+          `${mustStepIds.length > 1 ? 'have' : 'has'} been delivered, no ${vtId} check run exists on the commit ` +
+          'these results are read on, and nothing is still running there; re-run the build so its result is reported',
       );
       continue;
     }

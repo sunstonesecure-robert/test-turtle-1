@@ -5,7 +5,7 @@ import { scanDeferralContradictions } from '../../dashboard/lib/github/evidence'
 import { WORKLOAD_TRANSITIONS } from '../../dashboard/lib/github/labels';
 import { findLiveAndonsBySlug } from '../../dashboard/lib/github/andon';
 import { resolveCurrent, tagTargetSha, tryReadPlanAtRef } from '../../dashboard/lib/github/plans';
-import { deriveCompletionStatus, deliveryContext, listVtCheckRuns } from '../../dashboard/lib/github/checks';
+import { deriveCompletionStatus, deliveryContext, listCheckRunsOnCommit } from '../../dashboard/lib/github/checks';
 import { resolveVerifiedCommit } from '../../dashboard/lib/github/builds';
 import { commitmentScope } from './lib/checks-scope';
 import { cliMain, runGateCatalogue, UsageError, type GateReport, type GateResult } from './lib/runner';
@@ -85,11 +85,18 @@ async function checkL3Completion(gh: Octokit, repo: RepoRef, slug: string): Prom
   // — but the gate's refusal sentence is the one the operator reads on the workload
   // card, and a gate and a preview that word the same refusal differently is exactly
   // the drift this repository forbids.
+  // ONE read, both answers (GHI #281): the latest `vt-*` run per name, and what is
+  // still running on the same commit. The gate refuses a completion whose targets have
+  // not reported — and for the minute after a deliverable merges that is because
+  // `build-verify` has not written them yet, not because anything is wrong. The gate's
+  // refusal is the sentence the operator reads on the card, so it gets the same
+  // distinction the panel does or the two drift.
+  const checks = await listCheckRunsOnCommit(gh, repo, verified.sha);
   const verdict = deriveCompletionStatus(
     slug,
     commitmentScope(plan),
-    await listVtCheckRuns(gh, repo, verified.sha),
-    deliveryContext(plan, verified.deliveredStepIds),
+    checks.vt,
+    deliveryContext(plan, verified.deliveredStepIds, checks.pendingCheckNames),
   );
   const where =
     verified.source === 'merged-deliverable'

@@ -2,7 +2,7 @@ import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { errorMessage } from '../dashboard/lib/github/errors';
 import { planRefForMergedCommit } from './build-verify';
 import { listDeliverablePrs } from '../dashboard/lib/github/builds';
-import { deriveCompletionStatus, deliveryContext, listVtCheckRuns } from '../dashboard/lib/github/checks';
+import { deriveCompletionStatus, deliveryContext, listCheckRunsOnCommit } from '../dashboard/lib/github/checks';
 import { readPlanAtRef, slugFromPlanRef } from '../dashboard/lib/github/plans';
 import { commitmentScope } from './gates/lib/checks-scope';
 import type { Octokit } from '@octokit/rest';
@@ -89,11 +89,15 @@ export async function sweepUnverifiedMerge(
     const deliveredStepIds = merged
       .filter((p) => slugFromPlanRef(p.marker!.planRef) === slug)
       .map((p) => p.marker!.stepId);
+    // One read, both answers (GHI #281) — see the lifecycle gate's note. This verifier
+    // walks merge commits looking for the newest COMPLETE one, so a commit whose
+    // verification is still in flight must read as "not yet", never as "never".
+    const checks = await listCheckRunsOnCommit(gh, repo, sha);
     const verdict = deriveCompletionStatus(
       slug,
       commitmentScope(plan),
-      await listVtCheckRuns(gh, repo, sha),
-      deliveryContext(plan, deliveredStepIds),
+      checks.vt,
+      deliveryContext(plan, deliveredStepIds, checks.pendingCheckNames),
     );
     if (!verdict.complete) return { sha, planRef };
   }
