@@ -1,14 +1,14 @@
 mandatoryAccounts:
   - name: Management
     description: GovCloud organization management account
-    email: management+govcloud@example.com
+    email: management+test-turtle-1@sunstonesecure.com
     organizationalUnit: Root
   - name: LogArchive
-    description: Control Tower centralized log archive account
-    email: logarchive+govcloud@example.com
+    description: AWS Control Tower and platform log archive account
+    email: logarchive+test-turtle-1@sunstonesecure.com
     organizationalUnit: Security
   - name: Audit
-    description: Control Tower security audit account
-    email: audit+govcloud@example.com
+    description: AWS Control Tower security, Config aggregator, and audit account
+    email: audit+test-turtle-1@sunstonesecure.com
     organizationalUnit: Security
 workloadAccounts: []
