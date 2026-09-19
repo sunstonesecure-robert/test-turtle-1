@@ -60,4 +60,4 @@ subsequent phases.
 
 ## Misc
 
-Add misc stuff here if needed.
+Add misc instructions here if needed.
