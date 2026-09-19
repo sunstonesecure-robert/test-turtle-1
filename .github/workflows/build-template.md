@@ -79,8 +79,10 @@ network: defaults
 # deleting it, and the recompile that finally published that (T267) is what put an
 # unpinned gate half on main. Established against v0.81.6 rather than assumed — the
 # same source compiled six ways: a step asking for 20, or for 22, survives wherever it
-# is written; one asking for 24 is removed whether it is pinned by the SHA below, by
-# the `v6.4.0` tag, or by a different setup-node SHA entirely.
+# is written; one asking for 24 is removed whether it is pinned by the SHA below, by a
+# version tag, or by a different setup-node SHA entirely. Re-checked on the v0.88.7
+# upgrade (2026-09-19) the only way it can be — `tests/unit/node-runtime-pins.test.ts`
+# asserts the ORDER in the compiled output, and it still holds.
 #
 # `pre-steps:` is not subject to that, and runs before every built-in step, so it is
 # where a Node pin for the gate half can be authored and survive a compile. The managed
@@ -90,12 +92,21 @@ network: defaults
 # have shown it.
 pre-steps:
   - name: Node 24 before the gate toolchain installs anything
-    uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+    uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
     with:
       node-version: 24
       # Nothing is checked out yet at this point in the job, so there is no lockfile
-      # for setup-node v6's default package-manager cache to hash. gh-aw's own managed
+      # for setup-node's default package-manager cache to hash. gh-aw's own managed
       # setup-node steps disable it for the same reason.
+      #
+      # THE PIN TRACKS gh-aw's OWN MANAGED SHA, and that is not cosmetic (2026-09-19).
+      # v0.88.7 stopped passing a hand-written version comment through and now resolves
+      # it from its own action registry, writing the BARE SHA when it cannot — so this
+      # step compiled to `@48b55a01 # 48b55a01`, and zizmor's `ref-version-mismatch`
+      # failed CI on generated output naming no version at all. Moving the pin from
+      # v6.4.0 to the v7.0.0 SHA gh-aw itself manages makes the comment resolvable
+      # again. On the next upgrade, if CI reports this audit, read the managed SHA out
+      # of the recompiled lock and match it here rather than re-pinning by hand.
       package-manager-cache: false
 steps:
   # THE WORKTREE AND THE RULES ARE CHECKED OUT SEPARATELY, and only one of them is
@@ -225,7 +236,7 @@ steps:
         exit 1
       fi
   - name: current gate code, NOT the frozen copy (GHI 107)
-    uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+    uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     with:
       # A pinned gates release when the dispatch names one, else the default branch.
       # Deliberately never inputs.plan_ref: that is the defect this exists to remove.
@@ -282,7 +293,7 @@ steps:
       else
         echo "::warning::the gate set at this gates_ref predates scripts/materialize-vendor.ts — no vendored source will be materialized for this build"
       fi
-  - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     with:
       # The FROZEN TAG, not the dispatch ref (FR-007). Without this the worktree is
       # whatever `main` is at dispatch time, so the agent verifies its targets against
