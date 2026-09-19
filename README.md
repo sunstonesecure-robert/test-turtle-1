@@ -57,3 +57,7 @@ first change to any pinned value or desired-state declaration is reviewed.
 Phase 0 delivers configuration and the offline gate only — no AWS resource, no
 OIDC, and no later-phase workflows. Live validation and deployment belong to
 subsequent phases.
+
+## Misc
+
+Add misc stuff here if needed.
