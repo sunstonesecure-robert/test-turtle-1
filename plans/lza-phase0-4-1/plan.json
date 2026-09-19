@@ -1,0 +1,82 @@
+{
+  "feature": "lza-phase0-4-1",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "35407543065",
+  "andon_issue": 131,
+  "steps": [
+    {
+      "id": "step-baselines-yaml",
+      "title": "Deliver control-tower/baselines.yaml: AWSControlTowerBaseline version 5.0 targeting the Infrastructure OU",
+      "intent": "Deliver control-tower/baselines.yaml at the repository root declaring AWSControlTowerBaseline version \"5.0\" on the Infrastructure OU with required: true and includeChildrenVerification: true, deriving the version from controlTowerOuBaselineVersion in lza.lock (\"5.0\"). Per spec section 6.3 and CTCFG-020A, landing-zone version 4.0 pairs with AWSControlTowerBaseline version 5.0; the spec locks this pairing and requires failure rather than silent substitution if the service no longer advertises or accepts it. The file has schemaVersion: 1, validates against deployment/schemas/baselines.schema.json (JSON Schema Draft 2020-12), contains no additional properties, no comments with unresolved decisions, no placeholders, and no duplicate declarations. Infrastructure exists exactly once in config/organization-config.yaml (ARC-004; CTCFG-021). The prototype at inputs/lza-phase0/control-tower/baselines.yaml matches the target verbatim. Note: control-tower/baselines.yaml was placed on main by PR #129 (branch feature/lza-phase0-4-1-control-tower-baseline) before this plan was proposed, with content identical to the target; the schema's additionalProperties: false leaves no additional field to create a distinguishable deliverable. Two matters require operator judgment before this step is buildable: (1) the file already on main has the target content, so the build step is a no-op and build-verify will record action_required for targets that pass on the frozen plan tree (q-already-delivered); (2) AWS GovCloud support for AWSControlTowerBaseline version 5.0 in aws-us-gov / us-gov-west-1 cannot be verified offline (q-govcloud-support). The reserved machinery (.github/**, scripts/**, schemas/**, dashboard/**, root manifests) and governance record (plans/**, confirmations/**, evidence/**, runs/**) are out of scope and must not be touched.",
+      "acceptance": "control-tower/baselines.yaml exists at the repository root, parses as YAML without error, has schemaVersion: 1, declares a non-empty baselines array with exactly one entry where name is \"AWSControlTowerBaseline\", version is the string \"5.0\" (matching controlTowerOuBaselineVersion in lza.lock), targetOu is \"Infrastructure\", required is true, and includeChildrenVerification is true; the file contains no additional properties; and Infrastructure appears exactly once as an organizationalUnit name in config/organization-config.yaml.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "control-tower/baselines.yaml"
+      ],
+      "reads": [
+        "lza.lock",
+        "deployment/schemas/baselines.schema.json",
+        "config/organization-config.yaml",
+        "inputs/lza-phase0/control-tower/baselines.yaml"
+      ],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-baselines-schema-valid",
+      "kind": "exact-copy",
+      "check": "control-tower/baselines.yaml exists, parses as YAML, and validates against deployment/schemas/baselines.schema.json using JSON Schema Draft 2020-12 with no validation errors (spec section 6.3; REP-004; CTCFG-020A).",
+      "run": "test -f control-tower/baselines.yaml && test -f deployment/schemas/baselines.schema.json && python3 -c 'import json,yaml; from jsonschema import validate; validate(yaml.safe_load(open(\"control-tower/baselines.yaml\")), json.load(open(\"deployment/schemas/baselines.schema.json\")))'",
+      "maps_to": [
+        "step-baselines-yaml"
+      ]
+    },
+    {
+      "id": "vt-baselines-version-from-lock",
+      "kind": "exact-copy",
+      "check": "The version field of the first baseline entry in control-tower/baselines.yaml equals controlTowerOuBaselineVersion in lza.lock; both must be the string \"5.0\" (spec section 6.3; CTCFG-020A; REP-010).",
+      "run": "test -f control-tower/baselines.yaml && test -f lza.lock && python3 -c 'import yaml; d=yaml.safe_load(open(\"control-tower/baselines.yaml\")); v=str(d[\"baselines\"][0][\"version\"]); lock=next(l.split(\":\",1)[1].strip().strip(chr(34)) for l in open(\"lza.lock\") if l.startswith(\"controlTowerOuBaselineVersion:\")); assert v==lock, repr(v)+\" != \"+repr(lock)'",
+      "maps_to": [
+        "step-baselines-yaml"
+      ]
+    },
+    {
+      "id": "vt-infrastructure-ou-present",
+      "kind": "expected-output",
+      "check": "Infrastructure appears exactly once as an organizationalUnit name in config/organization-config.yaml, confirming the baseline target OU is present in the repository org config (ARC-004; CTCFG-021; spec section 2.2).",
+      "run": "test -f config/organization-config.yaml && python3 -c 'import yaml; d=yaml.safe_load(open(\"config/organization-config.yaml\")); names=[o[\"name\"] for o in d.get(\"organizationalUnits\",[])] ; assert names.count(\"Infrastructure\")==1, names'",
+      "maps_to": [
+        "step-baselines-yaml"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-already-on-main",
+      "description": "control-tower/baselines.yaml already exists on main (placed by PR #129, branch feature/lza-phase0-4-1-control-tower-baseline) with content identical to this step's target. The schema uses additionalProperties: false, so no additional field can create a distinguishable deliverable. If the build step reproduces the file unchanged, all three verification targets pass on the frozen plan tree and build-verify records action_required — blocking completion. Resolution requires operator judgment on q-already-delivered.",
+      "step_id": "step-baselines-yaml"
+    },
+    {
+      "id": "bc-govcloud-version-support",
+      "description": "The workload issue requires verifying that AWSControlTowerBaseline version 5.0 is available in the aws-us-gov partition and us-gov-west-1 home region. This cannot be verified offline. If version 5.0 is not available in GovCloud, the spec requires reporting the precise blocker rather than silently substituting another version (CTCFG-020A). Operator confirmation is required on q-govcloud-support.",
+      "step_id": "step-baselines-yaml"
+    },
+    {
+      "id": "bc-version-quoted-string",
+      "description": "The baselines schema requires version to be a YAML string matching pattern ^[0-9]+\\.[0-9]+$. Unquoted 5.0 is parsed by YAML as a float and fails schema validation. The delivered file must quote the version as \"5.0\". The file on main and the prototype both already quote it correctly.",
+      "step_id": "step-baselines-yaml"
+    },
+    {
+      "id": "bc-no-deployment-consumer",
+      "description": "The workload issue asks to confirm a deployment consumer that resolves AWSControlTowerBaseline to an AWS API baseline ARN and Infrastructure to an Organizations OU ARN. That consumer (deploy/scripts/ensure-control-tower-baselines.sh) belongs to Phase 3 and is not delivered by this Phase 0 credential-free workload (REQ-051). Deployability in Phase 0 context means schema-valid and internally consistent, not live-resolvable; the Phase 3 consumer will be delivered in a later workload.",
+      "step_id": "step-baselines-yaml"
+    }
+  ]
+}
