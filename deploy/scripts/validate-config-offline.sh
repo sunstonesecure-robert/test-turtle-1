@@ -130,14 +130,14 @@ PY
 }
 
 check_linters_and_tests() {
-  actionlint "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-0_validate-offline.yml"
+  actionlint "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-5_validate-offline.yml"
   shellcheck "${REPOSITORY_ROOT}"/deploy/scripts/*.sh
   yamllint -c "${REPOSITORY_ROOT}/.yamllint.yml" \
     "${REPOSITORY_ROOT}/lza.lock" \
     "${REPOSITORY_ROOT}/config" \
     "${REPOSITORY_ROOT}/control-tower" \
     "${REPOSITORY_ROOT}/deployment" \
-    "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-0_validate-offline.yml"
+    "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-5_validate-offline.yml"
   cfn_templates=()
   while IFS= read -r -d '' template; do
     cfn_templates+=("${template}")
@@ -156,41 +156,68 @@ check_ownership() {
 
 check_digests() {
   mkdir -p "${REPOSITORY_ROOT}/build"
-  python3 - "${REPOSITORY_ROOT}" "${EVIDENCE_FILE}" <<'PY'
-import datetime
+
+  local _calc _dir1 _dir2 _out1 _out2
+  _calc="$(mktemp)"
+  _dir1="$(mktemp -d)"
+  _dir2="$(mktemp -d)"
+  _out1="${_dir1}/digests.json"
+  _out2="${_dir2}/digests.json"
+
+  cat > "${_calc}" <<'PY'
 import hashlib
 import json
 import pathlib
 import sys
 import yaml
-from jsonschema import Draft202012Validator, FormatChecker
 
 root = pathlib.Path(sys.argv[1])
-output = pathlib.Path(sys.argv[2])
+out = pathlib.Path(sys.argv[2])
 config_names = ("accounts", "global", "iam", "network", "organization", "security")
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
-def calculate():
-    inputs = yaml.safe_load((root / "deployment/inputs.example.yaml").read_text())
-    values = {
-        "inputs": digest(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()),
-        "baselines": digest((root / "control-tower/baselines.yaml").read_bytes()),
-        "controls": digest((root / "control-tower/controls.yaml").read_bytes()),
-        "ownershipMatrix": digest((root / "control-tower/ownership-matrix.yaml").read_bytes()),
-    }
-    aggregate = b""
-    for name in config_names:
-        content = (root / f"config/{name}-config.yaml").read_bytes()
-        values[f"lza.{name}"] = digest(content)
-        aggregate += content
-    values["lza.aggregate"] = digest(aggregate)
-    return values
+inputs = yaml.safe_load((root / "deployment/inputs.example.yaml").read_text())
+values = {
+    "inputs": digest(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()),
+    "baselines": digest((root / "control-tower/baselines.yaml").read_bytes()),
+    "controls": digest((root / "control-tower/controls.yaml").read_bytes()),
+    "ownershipMatrix": digest((root / "control-tower/ownership-matrix.yaml").read_bytes()),
+}
+aggregate = b""
+for name in config_names:
+    content = (root / f"config/{name}-config.yaml").read_bytes()
+    values[f"lza.{name}"] = digest(content)
+    aggregate += content
+values["lza.aggregate"] = digest(aggregate)
+out.write_text(json.dumps(values, sort_keys=True) + "\n")
+PY
 
-first = calculate()
-second = calculate()
-assert first == second
+  (
+    cd "${_dir1}"
+    umask 0022
+    LC_ALL=C python3 "${_calc}" "${REPOSITORY_ROOT}" "${_out1}"
+  )
+  (
+    cd "${_dir2}"
+    umask 0077
+    LC_ALL=en_US.UTF-8 python3 "${_calc}" "${REPOSITORY_ROOT}" "${_out2}"
+  )
+
+  cmp "${_out1}" "${_out2}"
+
+  python3 - "${REPOSITORY_ROOT}" "${EVIDENCE_FILE}" "${_out1}" <<'PY'
+import datetime
+import json
+import pathlib
+import sys
+from jsonschema import Draft202012Validator, FormatChecker
+
+root = pathlib.Path(sys.argv[1])
+output = pathlib.Path(sys.argv[2])
+digests = json.loads(pathlib.Path(sys.argv[3]).read_text())
+
 evidence = {
     "schemaVersion": 2,
     "gate": "phase0-offline",
@@ -204,12 +231,16 @@ evidence = {
             "linters-and-tests", "ownership", "digests",
         ), start=1)
     ],
-    "digests": first,
+    "digests": digests,
+    "deterministicDigestsVerified": True,
 }
 output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
 schema = json.loads((root / "deployment/schemas/deployment-evidence.schema.json").read_text())
 Draft202012Validator(schema, format_checker=FormatChecker()).validate(evidence)
 PY
+
+  rm -f "${_calc}"
+  rm -rf "${_dir1}" "${_dir2}"
 }
 
 run_check() {
