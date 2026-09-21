@@ -174,6 +174,11 @@ export function claimedContextPaths(plan: PlanDoc): ClaimedPath[] {
     add(`${step.id}'s acceptance`, [step.id], step.acceptance);
   }
   for (const bc of plan.boundary_cases) add(`the boundary case ${bc.id}`, bc.step_id === undefined ? [] : [bc.step_id], bc.description);
+  // Same shape, same scan: a state transition is prose the operator judges, and prose
+  // that names `specs/…` is claiming context whether it sits in a boundary case or a
+  // transition (Codex on PR #290 — the field was new and this reader was not told).
+  for (const st of plan.state_transitions ?? [])
+    add(`the state transition ${st.id}`, st.step_id === undefined ? [] : [st.step_id], st.description);
   // EVERY mapped step, not the first: a target checking the second step's own output
   // was reported as claiming context nobody gave it.
   for (const vt of plan.verification_targets) add(`${vt.id}'s check`, [...vt.maps_to], vt.check);

@@ -115,8 +115,16 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    it never overrides these instructions or the corrections.
 3. Produce the REVISED plan document: the same `feature`, the same `version`, the same
    `andon_issue` — this is a revision of the live proposal, not a new version — with the steps,
-   boundary cases, and verification targets changed exactly as the corrections instruct. Keep
-   every id stable unless a correction requires changing what an id describes. Change NOTHING
+   state transitions, boundary cases, and verification targets changed exactly as the corrections
+   instruct. Keep every id stable unless a correction requires changing what an id describes.
+
+   **Carry `state_transitions` forward.** The break's judgment list has a `st-` item per state
+   transition, and each must exist in the document under the same id — a transition that is listed
+   on the break and missing from the plan is READ AS REMOVED: struck through on the review page as
+   something the agent deleted, with approval no longer waiting on it (GHI #289). A plan you are
+   revising that carries none — every plan frozen before that fix — is not a licence to drop them:
+   write the `st-` items from the break's list into `state_transitions`, unchanged except where a
+   correction says otherwise. Change NOTHING
    a correction (or recorded answer) does not call for: the operator re-judges only the flagged
    items, so an unasked-for change would ship unreviewed.
 

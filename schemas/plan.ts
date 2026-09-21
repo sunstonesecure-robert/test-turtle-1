@@ -131,6 +131,29 @@ export const BoundaryCase = z
   })
   .strict();
 
+/**
+ * A STATE TRANSITION the operator has to agree with — the other half of FR-002,
+ * and until GHI #289 the half with nowhere to live (found live 2026-09-21 on
+ * Andon #136).
+ *
+ * The prompt has always told the agent to raise one judgment item per state
+ * transition AND per boundary case, with `st-` and `bc-` ids. Only boundary cases
+ * had a home in this document, so every `st-` item was absent from the plan by
+ * construction — which the review page read as "the agent removed it" and G8 read
+ * as "not my business". Eight of the fourteen items on the first LZA plan anyone
+ * reviewed were written off that way, and approval unlocked without them.
+ *
+ * Same shape as a boundary case deliberately: the two differ in what they say, not
+ * in what the product does with them — both are presented, judged, and gated.
+ */
+export const StateTransition = z
+  .object({
+    id: z.string().regex(/^st-[a-z0-9-]+$/),
+    description: z.string().min(1),
+    step_id: stepId.optional(),
+  })
+  .strict();
+
 export const PlanDoc = z
   .object({
     feature: z.string().regex(/^[0-9]{3}-[a-z0-9-]+$|^[a-z0-9-]+$/),
@@ -141,10 +164,43 @@ export const PlanDoc = z
     steps: z.array(PlanStep).min(1),
     verification_targets: z.array(VerificationTarget),
     boundary_cases: z.array(BoundaryCase),
+    /**
+     * OPTIONAL, and it must stay optional. Every plan frozen before GHI #289 landed
+     * carries none, and a frozen tag is immutable (FR-042) — so absent means "this
+     * plan has no state transitions", never "they are unjudged". A required field
+     * here would retroactively refuse every plan that could not have had it.
+     */
+    state_transitions: z.array(StateTransition).optional(),
   })
-  .strict();
+  .strict()
+  /**
+   * ONE JUDGMENT ID, ONE JUDGMENT (Codex on PR #290).
+   *
+   * `renderAndonBody` emits a checklist row per entry and `checkJudgmentItem` ticks
+   * EVERY row whose id matches, so two entries sharing an id are judged by one click —
+   * the operator agrees with a sentence they were never shown, and G8 (which collapses
+   * judged ids into a Set) reports both satisfied. The hole predates state transitions:
+   * `boundary_cases` never had a uniqueness rule either. Both lists are checked here,
+   * and across each other, because the break's list is one namespace.
+   */
+  .superRefine((plan, ctx) => {
+    const seen = new Set<string>();
+    const duplicates = new Set<string>();
+    for (const entry of [...plan.boundary_cases, ...(plan.state_transitions ?? [])]) {
+      if (seen.has(entry.id)) duplicates.add(entry.id);
+      seen.add(entry.id);
+    }
+    if (duplicates.size > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `judgment ids must be unique across boundary_cases and state_transitions: ${[...duplicates].sort().join(', ')}`,
+        path: ['boundary_cases'],
+      });
+    }
+  });
 
 export type PlanDoc = z.infer<typeof PlanDoc>;
 export type PlanStep = z.infer<typeof PlanStep>;
 export type VerificationTarget = z.infer<typeof VerificationTarget>;
 export type BoundaryCase = z.infer<typeof BoundaryCase>;
+export type StateTransition = z.infer<typeof StateTransition>;

@@ -24,6 +24,11 @@
     "boundary_cases": {
       "type": "array",
       "items": { "$ref": "#/$defs/BoundaryCase" }
+    },
+    "state_transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/StateTransition" },
+      "description": "OPTIONAL and must stay so: every plan frozen before GHI #289 carries none, and absent means the plan has no state transitions, never that they are unjudged (FR-042)"
     }
   },
   "$defs": {
@@ -116,6 +121,17 @@
         "description": { "type": "string", "minLength": 1 },
         "step_id": { "type": "string", "pattern": "^step-[a-z0-9-]+$" }
       }
+    },
+    "StateTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^st-[a-z0-9-]+$" },
+        "description": { "type": "string", "minLength": 1 },
+        "step_id": { "type": "string", "pattern": "^step-[a-z0-9-]+$" }
+      },
+      "description": "The other half of FR-002 (GHI #289): a state transition the operator judges, same shape as a boundary case because the product does the same things to both"
     }
   }
 }

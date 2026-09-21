@@ -4,7 +4,7 @@ import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../dashboard/lib/github/client';
 import { PlanDoc } from '../schemas/plan';
 import { alignLegacyPlanFileWithBase, planBranch, planPath, tagExists } from '../dashboard/lib/github/plans';
-import { parseAndonHeader, serializeAndonHeader } from '../dashboard/lib/github/markers';
+import { parseAndonHeader, parseJudgmentItems, serializeAndonHeader } from '../dashboard/lib/github/markers';
 import { getWorkload, getWorkloadByIssue } from '../dashboard/lib/github/workloads';
 import { findOpenAndonByPlanRef } from '../dashboard/lib/github/andon';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
@@ -154,6 +154,31 @@ export async function publishPlan(
   if (!andon && opts.runId) {
     andon = await findLiveBreakByRunLink(gh, repo, opts.runId);
     if (andon) {
+      // THE FIRST PUBLISH OF A PROPOSAL IS WHERE THE TWO HALVES MUST AGREE (Codex on PR
+      // #290). `state_transitions` is optional for frozen-artifact compatibility, and
+      // that optionality is a hole at exactly this moment: a run that lists `st-` items
+      // on the break and omits them from the document would publish, G8 would pass on
+      // the boundary cases alone, and the review page would strike every transition
+      // through as removed — GHI #289 reproduced in full, by omission rather than by
+      // design. Refuse instead: this is a fresh break (no header yet), so nothing has
+      // been removed by a correction and every listed item MUST be in the document.
+      //
+      // Only here. A REVISION lands on a break whose body legitimately outlives items a
+      // correction asked to delete (GHI #139), so the same rule there would refuse the
+      // removal flow it exists to support.
+      const listed = parseJudgmentItems(andon.body ?? '')
+        .filter((item) => item.id.startsWith('st-'))
+        .map((item) => item.id);
+      const inDocument = new Set((parsed.data.state_transitions ?? []).map((st) => st.id));
+      const missing = listed.filter((id) => !inDocument.has(id));
+      if (missing.length > 0) {
+        throw new Error(
+          `refusing to publish ${planRef}: Andon #${andon.number} lists state transitions the plan document does not ` +
+            `contain (${missing.join(', ')}). They would be judged by nobody — the review page reports an item the ` +
+            `document lacks as removed, and the approval gate never asks about it. Re-run plan-propose so the ` +
+            `document carries a state_transitions entry for every st- item it raises.`,
+        );
+      }
       const header = serializeAndonHeader({ runId: parsed.data.run_id, planRef });
       await gh.issues.update({ ...repo, issue_number: andon.number, body: `${header}\n${andon.body ?? ''}` });
     }

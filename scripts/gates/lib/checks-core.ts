@@ -37,6 +37,22 @@ export async function checkG7NoOpenCorrections(
     : { id: 'G7', status: 'fail', requirement: 'FR-005', detail: `${open} correction:open issue(s) linked to Andon #${andonIssue}` };
 }
 
+/**
+ * BOTH HALVES OF FR-002, since 2026-09-21 (GHI #289).
+ *
+ * This gate declared `requirement: 'FR-002'` — *"present every state transition and
+ * boundary case for judgment"* — while iterating boundary cases alone. State
+ * transitions had no home in the plan document at all, so the half of the
+ * requirement that names them was enforced nowhere, and the review page (reading
+ * the same emptiness) told the operator the agent had REMOVED them. On the first
+ * LZA plan anyone reviewed that was eight of fourteen items, and approval unlocked
+ * without any of them.
+ *
+ * `state_transitions` is optional and stays optional: a plan frozen before the field
+ * existed carries none, and a frozen tag is immutable (FR-042). ABSENT MEANS THE PLAN
+ * HAS NONE — never "unjudged" — so this gate can be added without retroactively
+ * refusing every plan that could not have had it.
+ */
 export async function checkG8AllJudged(
   gh: Octokit,
   repo: RepoRef,
@@ -44,10 +60,20 @@ export async function checkG8AllJudged(
 ): Promise<GateResult> {
   const andon = await getAndon(gh, repo, plan.andon_issue);
   const judgedIds = new Set(andon.items.filter((i) => i.judged).map((i) => i.id));
-  const unjudged = plan.boundary_cases.map((bc) => bc.id).filter((id) => !judgedIds.has(id));
-  return unjudged.length === 0
-    ? { id: 'G8', status: 'pass', requirement: 'FR-002' }
-    : { id: 'G8', status: 'fail', requirement: 'FR-002', detail: `unjudged boundary cases: ${unjudged.join(', ')}` };
+  const unjudgedCases = plan.boundary_cases.map((bc) => bc.id).filter((id) => !judgedIds.has(id));
+  const unjudgedTransitions = (plan.state_transitions ?? []).map((st) => st.id).filter((id) => !judgedIds.has(id));
+  if (unjudgedCases.length === 0 && unjudgedTransitions.length === 0) {
+    return { id: 'G8', status: 'pass', requirement: 'FR-002' };
+  }
+  // Named separately in the detail: they are different kinds of judgment, and an
+  // operator reading a refusal should not have to work out which list an id came from.
+  const detail = [
+    unjudgedCases.length > 0 ? `unjudged boundary cases: ${unjudgedCases.join(', ')}` : null,
+    unjudgedTransitions.length > 0 ? `unjudged state transitions: ${unjudgedTransitions.join(', ')}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join('; ');
+  return { id: 'G8', status: 'fail', requirement: 'FR-002', detail };
 }
 
 export async function checkG9VersionMonotonic(

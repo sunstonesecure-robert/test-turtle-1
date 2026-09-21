@@ -53,7 +53,11 @@ export interface AndonBreak {
 }
 
 export function renderAndonBody(plan: PlanDoc, planRef: string): string {
+  // STATE TRANSITIONS FIRST, then boundary cases — the order the prompt asks the
+  // production agent for, and the order FR-002 names them in. Both are judged; the
+  // document carrying only one of them is what GHI #289 fixed.
   const items: JudgmentItem[] = [
+    ...(plan.state_transitions ?? []).map((st) => ({ id: st.id, description: st.description, judged: false })),
     ...plan.boundary_cases.map((bc) => ({ id: bc.id, description: bc.description, judged: false })),
   ];
   return [

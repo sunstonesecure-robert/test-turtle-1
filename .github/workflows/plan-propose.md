@@ -122,7 +122,15 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
 
 4. Derive a structured plan document conforming to `schemas/plan.schema.json`: steps with
    intent/acceptance/priority/evidence tags, verification targets (single pass/fail checks),
-   and boundary cases.
+   **state transitions** and boundary cases.
+
+   **`state_transitions` and `boundary_cases` are what the operator judges** (FR-002), one
+   judgment item each, and they answer different questions. A STATE TRANSITION is a change this
+   plan makes to the world that the operator must agree with — what moves, in what order, and
+   what it is afterwards. A BOUNDARY CASE is a condition at an edge of the work whose handling
+   they must agree with. Write both into the document, `st-` and `bc-` ids respectively; the
+   judgment list in step 8 has one line per entry and every line must name an id that is
+   actually in the document.
 
    **Every step MUST declare `scope`** — the path globs its deliverable may touch, e.g.
    `["docs/**"]`, `["src/app.py", "tests/test_app.py"]`. It is what deliverable gate **D2**
@@ -249,7 +257,13 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
    machine-readable `andon:v1` header afterwards (it locates your issue via this run's footer
    link). The body MUST contain a `## Proposed plan` link section and a `## Judgments required`
    task list with one item per state transition and boundary case
-   (`- [ ] \`st-<id>\` — <transition>` / `- [ ] \`bc-<id>\` — <description>`). Pose every
+   (`- [ ] \`st-<id>\` — <transition>` / `- [ ] \`bc-<id>\` — <description>`).
+   **Every one of those ids MUST also exist in the plan document** — `st-` ids in
+   `state_transitions`, `bc-` ids in `boundary_cases`, with the same text. An item listed
+   here and missing there is READ AS REMOVED: the review page strikes it through as
+   something you deleted and approval stops waiting on it, so a transition that exists only
+   in this list is one nobody judges (GHI #289, live on Andon #136 — eight of fourteen items
+   went that way). Pose every
    GENUINE question — information only the operator has (authoritative sources, business
    rules, timezone/format choices) — as a first-class item in the same list
    (`- [ ] \`q-<id>\` — <question>`), never buried in an assumption: a live run flagged its
