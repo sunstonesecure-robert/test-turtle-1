@@ -17,7 +17,7 @@ repository is internally consistent before any AWS resource exists.
 | `deployment/` | Example inputs and state, plus the repository JSON Schemas under `deployment/schemas/`. |
 | `deploy/scripts/` | `common.sh` (the single `lza.lock` reader) and `validate-config-offline.sh` (the offline gate). |
 | `tests/` | The Bats suites the offline gate runs. |
-| `.github/workflows/` | The Phase 0 workflow `lza-phase0-0_validate-offline.yml`. |
+| `.github/workflows/` | The Phase 0 workflow `lza-phase0-5_validate-offline.yml`. |
 
 ## The provenance lock
 
@@ -43,7 +43,7 @@ make test               # run the Bats suites under tests/
 ```
 
 The same script (`deploy/scripts/validate-config-offline.sh`) runs unchanged in
-CI via `.github/workflows/lza-phase0-0_validate-offline.yml` on pull requests
+CI via `.github/workflows/lza-phase0-5_validate-offline.yml` on pull requests
 and on pushes to `main`.
 
 ## Review protection

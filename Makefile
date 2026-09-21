@@ -2,7 +2,7 @@
 #
 # The offline gate is Phase 0's deliverable (Section 7.1). Both targets below
 # are thin wrappers so that a developer runs locally exactly what the workflow
-# .github/workflows/lza-phase0-0_validate-offline.yml runs in CI — one
+# .github/workflows/lza-phase0-5_validate-offline.yml runs in CI — one
 # implementation of the eight checks, never a second copy.
 
 SHELL := /usr/bin/env bash
