@@ -94,6 +94,7 @@ evidence_fixture = {
     "liveValidatorRan": False,
     "checks": [{"number": n, "name": f"check-{n}", "status": "passed"} for n in range(1, 9)],
     "digests": {f"digest-{n}": "0" * 64 for n in range(1, 12)},
+    "deterministicDigestsVerified": True,
 }
 validate_schema = load(schemas / "deployment-evidence.schema.json")
 Draft202012Validator(validate_schema, format_checker=FormatChecker()).validate(evidence_fixture)
@@ -156,15 +157,12 @@ check_ownership() {
 
 check_digests() {
   mkdir -p "${REPOSITORY_ROOT}/build"
+  local tmpdir1 tmpdir2
+  tmpdir1=$(mktemp -d)
+  tmpdir2=$(mktemp -d)
 
-  local _calc _dir1 _dir2 _out1 _out2
-  _calc="$(mktemp)"
-  _dir1="$(mktemp -d)"
-  _dir2="$(mktemp -d)"
-  _out1="${_dir1}/digests.json"
-  _out2="${_dir2}/digests.json"
-
-  cat > "${_calc}" <<'PY'
+  # Digest calculation script — written once, invoked twice in separate subprocesses
+  cat > "${tmpdir1}/calculate.py" <<'PYEOF'
 import hashlib
 import json
 import pathlib
@@ -172,15 +170,15 @@ import sys
 import yaml
 
 root = pathlib.Path(sys.argv[1])
-out = pathlib.Path(sys.argv[2])
+out  = pathlib.Path(sys.argv[2])
 config_names = ("accounts", "global", "iam", "network", "organization", "security")
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
-inputs = yaml.safe_load((root / "deployment/inputs.example.yaml").read_text())
+inputs_raw = yaml.safe_load((root / "deployment/inputs.example.yaml").read_text())
 values = {
-    "inputs": digest(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()),
+    "inputs": digest(json.dumps(inputs_raw, sort_keys=True, separators=(",", ":")).encode()),
     "baselines": digest((root / "control-tower/baselines.yaml").read_bytes()),
     "controls": digest((root / "control-tower/controls.yaml").read_bytes()),
     "ownershipMatrix": digest((root / "control-tower/ownership-matrix.yaml").read_bytes()),
@@ -191,31 +189,27 @@ for name in config_names:
     values[f"lza.{name}"] = digest(content)
     aggregate += content
 values["lza.aggregate"] = digest(aggregate)
-out.write_text(json.dumps(values, sort_keys=True) + "\n")
-PY
+out.write_text(json.dumps(values, sort_keys=True))
+PYEOF
 
-  (
-    cd "${_dir1}"
-    umask 0022
-    LC_ALL=C python3 "${_calc}" "${REPOSITORY_ROOT}" "${_out1}"
-  )
-  (
-    cd "${_dir2}"
-    umask 0077
-    LC_ALL=en_US.UTF-8 python3 "${_calc}" "${REPOSITORY_ROOT}" "${_out2}"
-  )
+  # First independent subprocess: umask 022, locale C
+  (umask 022; LC_ALL=C python3 "${tmpdir1}/calculate.py" "${REPOSITORY_ROOT}" "${tmpdir1}/digests.json")
 
-  cmp "${_out1}" "${_out2}"
+  # Second independent subprocess: umask 077, locale en_US.UTF-8
+  (umask 077; LC_ALL=en_US.UTF-8 python3 "${tmpdir1}/calculate.py" "${REPOSITORY_ROOT}" "${tmpdir2}/digests.json")
 
-  python3 - "${REPOSITORY_ROOT}" "${EVIDENCE_FILE}" "${_out1}" <<'PY'
+  # Byte-for-byte comparison — assert outputs are identical
+  diff -q "${tmpdir1}/digests.json" "${tmpdir2}/digests.json" >/dev/null
+
+  python3 - "${REPOSITORY_ROOT}" "${EVIDENCE_FILE}" "${tmpdir1}/digests.json" <<'PY'
 import datetime
 import json
 import pathlib
 import sys
 from jsonschema import Draft202012Validator, FormatChecker
 
-root = pathlib.Path(sys.argv[1])
-output = pathlib.Path(sys.argv[2])
+root    = pathlib.Path(sys.argv[1])
+output  = pathlib.Path(sys.argv[2])
 digests = json.loads(pathlib.Path(sys.argv[3]).read_text())
 
 evidence = {
@@ -239,8 +233,7 @@ schema = json.loads((root / "deployment/schemas/deployment-evidence.schema.json"
 Draft202012Validator(schema, format_checker=FormatChecker()).validate(evidence)
 PY
 
-  rm -f "${_calc}"
-  rm -rf "${_dir1}" "${_dir2}"
+  rm -rf "${tmpdir1}" "${tmpdir2}"
 }
 
 run_check() {
