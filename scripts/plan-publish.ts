@@ -152,17 +152,7 @@ export async function publishPlan(
     }
   }
   if (!andon && opts.runId) {
-    // Boundary-anchored: a bare .includes() would let run 123 claim the break
-    // for run 123456 when both are open concurrently.
-    const runLink = new RegExp(`/actions/runs/${opts.runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`);
-    const liveBreaks = (
-      await Promise.all(
-        ['andon:open', 'andon:under-review'].map((label) =>
-          gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'open', per_page: 100 }),
-        ),
-      )
-    ).flat();
-    andon = liveBreaks.find((issue) => runLink.test(issue.body ?? ''));
+    andon = await findLiveBreakByRunLink(gh, repo, opts.runId);
     if (andon) {
       const header = serializeAndonHeader({ runId: parsed.data.run_id, planRef });
       await gh.issues.update({ ...repo, issue_number: andon.number, body: `${header}\n${andon.body ?? ''}` });
@@ -173,6 +163,135 @@ export async function publishPlan(
   }
   const plan = PlanDoc.parse({ ...parsed.data, andon_issue: andon.number });
   return writePlanBranch(gh, repo, plan, planRef, opts.base, opts.addresses);
+}
+
+/**
+ * The live break a given run raised, found through gh-aw's own footer link.
+ *
+ * ONE definition, two callers: the publish path uses it to locate the break it is
+ * about to stamp, and `reportUnpublishable` uses it to find the break it has to tell
+ * that no plan is coming (GHI #286). Two spellings of "which break did this run
+ * raise" could disagree, and the disagreement would be invisible — a break stamped
+ * by one rule and reported to by another.
+ *
+ * Boundary-anchored: a bare .includes() would let run 123 claim the break for run
+ * 123456 when both are open concurrently. LIVE = open OR under-review, because the
+ * operator may already have picked the break up.
+ */
+export async function findLiveBreakByRunLink(
+  gh: Octokit,
+  repo: RepoRef,
+  runId: string,
+): Promise<{ number: number; body?: string | null } | undefined> {
+  const runLink = new RegExp(`/actions/runs/${runId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`);
+  const liveBreaks = (
+    await Promise.all(
+      ['andon:open', 'andon:under-review'].map((label) =>
+        gh.paginate(gh.issues.listForRepo, { ...repo, labels: label, state: 'open', per_page: 100 }),
+      ),
+    )
+  ).flat();
+  return liveBreaks.find((issue) => runLink.test(issue.body ?? ''));
+}
+
+/** The live break carrying a plan ref, in the shape the reporter wants. One call into
+ *  the same `findOpenAndonByPlanRef` the publish path uses, so "which break owns this
+ *  plan" has one answer in this file. */
+async function findBreakByPlanRef(
+  gh: Octokit,
+  repo: RepoRef,
+  planRef: string,
+): Promise<{ number: number } | undefined> {
+  const found = await findOpenAndonByPlanRef(gh, repo, planRef);
+  return found === null ? undefined : { number: found };
+}
+
+/** Why a run produced nothing to publish — the probe knows which, and each one
+ *  reads differently to the operator. */
+export type UnpublishableReason = 'no-artifact' | 'expired' | 'revision-incomplete';
+
+/** Idempotency key: the publisher may be re-delivered or re-dispatched for the same
+ *  run, and a break that collects the same notice three times is noise, not a record. */
+export function unpublishableMarker(runId: string): string {
+  return `<!-- plan-publish:nothing-to-publish:${runId} -->`;
+}
+
+/**
+ * What the break is told. Written here, as a pure function over the reason, so the
+ * sentence an operator reads is a tested value rather than a string built inside a
+ * workflow step nothing can run.
+ */
+export function unpublishableComment(input: { runId: string; reason: UnpublishableReason; liveArtifacts: string[] }): string {
+  const why: Record<UnpublishableReason, string> = {
+    'no-artifact':
+      `**No plan document came out of that run.** The agent finished and raised this review, but it uploaded no ` +
+      `\`plan.json\`, so there is nothing to publish and no plan to judge. Publishing this run again cannot change ` +
+      `that answer.`,
+    expired:
+      `**The plan document has expired.** The agent did upload it, but GitHub keeps run files only for a limited ` +
+      `time and this one has aged past that — it is still listed on the run and can no longer be downloaded. ` +
+      `Nothing was wrong with the plan; it is simply gone.`,
+    'revision-incomplete':
+      `**The revision is incomplete.** That run uploaded the revised plan but not the list of corrections it carries ` +
+      `out, and a revision published without it leaves every correction it addressed unmarkable. Re-run the revision ` +
+      `agent for this review.`,
+  };
+  const route =
+    input.reason === 'revision-incomplete'
+      ? `**What to do**: run the revision agent again for this review.`
+      : `**What to do**: withdraw this review — it has nothing to judge — and let the agent propose again. The next ` +
+        `proposal takes the next version number; this one is never reused.`;
+  return [
+    unpublishableMarker(input.runId),
+    `### This review has no plan`,
+    ``,
+    why[input.reason],
+    ``,
+    route,
+    ``,
+    `_Checked by the publisher against run ${input.runId}; the files it found there were: ` +
+      `${input.liveArtifacts.length > 0 ? input.liveArtifacts.map((a) => `\`${a}\``).join(', ') : 'none'}._`,
+  ].join('\n');
+}
+
+/**
+ * SAY IT WHERE THE OPERATOR IS LOOKING (GHI #286; live 2026-09-19, test-turtle-1
+ * run 35455533939).
+ *
+ * The publisher already detects this perfectly — it probes for the artifact, finds
+ * none, and exits clean. But it said so only in its own run log, in a `::notice`
+ * nobody had a reason to open: the planning run was GREEN, the break was OPEN, and
+ * the review page explained the silence with a cause that was false. The fact was
+ * known and unpublished, in both senses.
+ *
+ * So the publisher now comments on the break it would have stamped. It does not
+ * withdraw it: ending a review is the operator's act, with a cause of their own, and
+ * the harness's job here is to make the state legible before the click rather than to
+ * decide it (ADR-0007). Idempotent by marker — a re-delivery or a re-dispatch for the
+ * same run adds nothing.
+ */
+export async function reportUnpublishable(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { runId: string; reason: UnpublishableReason; liveArtifacts: string[]; planRef?: string | null },
+): Promise<{ outcome: 'commented' | 'already_reported' | 'no_break'; issueNumber?: number }> {
+  // TWO LOCATORS, because a revision's break does not link the revision's run (Codex on
+  // PR #287). The run-link search finds the break a PROPOSAL raised, because gh-aw's
+  // footer on that issue names that run. A plan-revise run raises no issue and edits
+  // none, so the break it revises still carries the ORIGINAL proposal's footer and the
+  // run-link search can only ever return nothing for it — the incomplete-revision
+  // explanation would have been posted nowhere. When the caller can name the plan ref
+  // (the revision DID upload plan.json; that is what makes it "incomplete" rather than
+  // absent), find the live break by ref the way the publish path already does.
+  const andon =
+    (input.planRef ? await findBreakByPlanRef(gh, repo, input.planRef) : undefined) ??
+    (await findLiveBreakByRunLink(gh, repo, input.runId));
+  if (!andon) return { outcome: 'no_break' };
+  const marker = unpublishableMarker(input.runId);
+  const existing = await gh.paginate(gh.issues.listComments, { ...repo, issue_number: andon.number, per_page: 100 });
+  if (existing.some((c) => (c.body ?? '').includes(marker))) return { outcome: 'already_reported', issueNumber: andon.number };
+  await gh.issues.createComment({ ...repo, issue_number: andon.number, body: unpublishableComment(input) });
+  return { outcome: 'commented', issueNumber: andon.number };
 }
 
 /** The deterministic branch write both publish paths share. RESUMABLE: a
@@ -293,6 +412,27 @@ export function findPlanFile(dir: string): string | null {
   return null;
 }
 
+/**
+ * The plan ref an artifact directory names, or null for every way that can fail.
+ *
+ * Deliberately total: no directory, no plan.json, unreadable bytes, invalid JSON or a
+ * document that does not satisfy the schema all mean "no ref", not a thrown error. The
+ * caller is a REPORTER — its job is to leave a sentence on a review — and failing it
+ * because a plan it was never going to publish is malformed would swallow the report
+ * over the very defect the report exists to describe.
+ */
+export function planRefFromDir(dir: string | undefined): string | null {
+  if (!dir) return null;
+  try {
+    const file = findPlanFile(dir);
+    if (!file) return null;
+    const parsed = PlanDoc.safeParse(JSON.parse(readFileSync(file, 'utf8')));
+    return parsed.success ? planBranch(parsed.data.feature, parsed.data.version) : null;
+  } catch {
+    return null;
+  }
+}
+
 const isMain = process.argv[1]?.endsWith('plan-publish.ts');
 if (isMain) {
   const argv = process.argv.slice(2);
@@ -300,24 +440,69 @@ if (isMain) {
     const i = argv.indexOf(`--${name}`);
     return i >= 0 ? argv[i + 1] : undefined;
   };
-  const dir = get('dir');
   const repoArg = get('repo');
   const [owner, repoName] = (repoArg ?? '').split('/');
-  if (!dir || !owner || !repoName) {
-    console.error('usage: plan-publish --dir <artifacts-dir> --repo <owner/repo> [--base <branch>] [--run-id <workflow_run id>]');
-    process.exit(2);
-  }
-  const planFile = findPlanFile(dir);
-  if (!planFile) {
-    console.error(`no plan.json found under ${dir} — the plan-propose run uploaded no plan artifact`);
-    process.exit(1);
-  }
-  publishPlan(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(planFile, 'utf8')), { base: get('base'), runId: get('run-id'), addresses: readAddressesFile(dir) })
-    .then((result) => {
-      console.log(result.outcome === 'published' ? `published ${result.planRef} (Andon #${result.andonIssue})` : `already published: ${result.planRef}`);
+  // TWO MODES. The publish path needs an artifact directory; the report path (GHI #286)
+  // exists precisely because there is no artifact, so it must not require one — and it
+  // writes no contents, only a comment on the break the run raised.
+  const reportReason = get('report-absence');
+  if (reportReason !== undefined) {
+    const runId = get('run-id');
+    const reasons: UnpublishableReason[] = ['no-artifact', 'expired', 'revision-incomplete'];
+    if (!owner || !repoName || !runId || !/^[0-9]+$/.test(runId) || !reasons.includes(reportReason as UnpublishableReason)) {
+      console.error(`usage: plan-publish --report-absence <${reasons.join('|')}> --repo <owner/repo> --run-id <digits> [--artifacts "a,b"]`);
+      process.exit(2);
+    }
+    // `--dir` is OPTIONAL here and never required: on the incomplete-revision path the
+    // plan document IS present, and reading its ref is the only way to find the break
+    // that revision belongs to. On the other two paths there is nothing to read, and a
+    // missing, empty or unparsable directory simply yields no ref — the run-link
+    // locator then answers, exactly as before.
+    const planRef = planRefFromDir(get('dir'));
+    reportUnpublishable(createClient(), { owner: owner!, repo: repoName! }, {
+      runId: runId!,
+      reason: reportReason as UnpublishableReason,
+      liveArtifacts: (get('artifacts') ?? '')
+        .split(/[\n,]/)
+        .map((a) => a.trim())
+        .filter((a) => a.length > 0),
+      planRef,
     })
-    .catch((error) => {
-      console.error(errorMessage(error));
+      .then((result) => {
+        // Every outcome is a normal one. `no_break` in particular: a re-dispatch for a run
+        // whose break was already withdrawn is exactly the case where there is nobody left
+        // to tell, and failing the job for it would turn a tidy record into a red run the
+        // operator has to interpret.
+        console.log(
+          result.outcome === 'commented'
+            ? `told Andon #${result.issueNumber} that run ${runId} has no plan to publish`
+            : result.outcome === 'already_reported'
+              ? `Andon #${result.issueNumber} was already told about run ${runId} — nothing added`
+              : `no live Andon break references run ${runId} — nothing to tell`,
+        );
+      })
+      .catch((error) => {
+        console.error(errorMessage(error));
+        process.exit(1);
+      });
+  } else {
+    const dir = get('dir');
+    if (!dir || !owner || !repoName) {
+      console.error('usage: plan-publish --dir <artifacts-dir> --repo <owner/repo> [--base <branch>] [--run-id <workflow_run id>]');
+      process.exit(2);
+    }
+    const planFile = findPlanFile(dir);
+    if (!planFile) {
+      console.error(`no plan.json found under ${dir} — the plan-propose run uploaded no plan artifact`);
       process.exit(1);
-    });
+    }
+    publishPlan(createClient(), { owner, repo: repoName }, JSON.parse(readFileSync(planFile, 'utf8')), { base: get('base'), runId: get('run-id'), addresses: readAddressesFile(dir) })
+      .then((result) => {
+        console.log(result.outcome === 'published' ? `published ${result.planRef} (Andon #${result.andonIssue})` : `already published: ${result.planRef}`);
+      })
+      .catch((error) => {
+        console.error(errorMessage(error));
+        process.exit(1);
+      });
+  }
 }

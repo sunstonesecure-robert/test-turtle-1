@@ -22,7 +22,11 @@ import { approvalPrMerged, closeOpenApprovalPr } from './approval';
 // The live/terminal split of the andon:* family, and the one predicate that reads it —
 // taken from the taxonomy rather than re-spelled, so a query here can never disagree with
 // the break page about which labels mean "still waiting on you".
-import { ANDON_LABELS, isLiveAndon, LIVE_ANDON_LABELS } from './labels';
+import { ANDON_LABELS, isLiveAndon, LIVE_ANDON_LABELS, TERMINAL_ANDON_LABELS } from './labels';
+// The publisher decides what is publishable by listing the planning run's artifacts;
+// the review page answers the same question from the same listing, through the same
+// helper, so the page and the workflow can never tell the operator different things.
+import { listRunArtifacts } from './artifacts';
 import { inertLogin } from '../actor-identity';
 import {
   parseAndonHeader,
@@ -98,7 +102,83 @@ export type UnpublishedAndon = {
   /** the plan ref the agent named in prose, when it did */
   planRef: string | null;
   labels: string[];
+  /**
+   * LIVE or TERMINAL, and the difference is a page and a retry (Codex on PR #287).
+   *
+   * A headerless break used to be loadable only while live, which was right while it
+   * could not be withdrawn. Now that it can, the two states that follow a withdrawal —
+   * the finished one, and the half-torn-down one a retry has to converge — were both
+   * unloadable: the operator's successful withdrawal redirected to a page that threw,
+   * and `withdrawProposal`'s idempotent recovery branch could never be reached for a
+   * headerless break, so a transient failure mid-teardown stranded it permanently.
+   * Terminal breaks load; what they do NOT get is any offer to act.
+   */
+  state: 'live' | 'terminal';
 };
+
+/**
+ * WHY A BREAK HAS NO PLAN — and there are THREE answers, not one (GHI #286;
+ * live 2026-09-19, test-turtle-1 run 35455533939).
+ *
+ * The page used to give every headerless break the same explanation — the
+ * planning run concluded `failure` so the publisher was skipped — and the same
+ * remedy, publish by run id. On the break that prompted this, both were false:
+ * the run SUCCEEDED, the publisher RAN, and it declined because the agent's
+ * `upload_artifact` call reported success for a file it never staged. Offering
+ * "publish this run" there sends the operator to re-run a probe that has already
+ * been answered, and the answer will not change.
+ *
+ * The discriminator is the same fact the publisher itself probes — is there a
+ * live `plan.json` artifact on that run — so the two readers cannot disagree
+ * about what is publishable:
+ *
+ *   publishable      a live plan.json exists; the publisher has not run, was
+ *                    skipped, or failed → publish by run id (the old path)
+ *   nothing-uploaded the run produced no plan.json at all → publishing cannot
+ *                    help; withdraw and propose again
+ *   expired          plan.json is listed but past GitHub's retention, so it can
+ *                    no longer be served → same route, different cause, and
+ *                    worth saying separately: nothing was ever wrong with the
+ *                    plan, it simply aged out
+ *   unknown          we could not read the run's artifacts, or the break names
+ *                    no run → say so and offer both routes
+ *
+ * `unknown` is a value, not a default (ADR-0007): a listing that failed must
+ * never read as "the agent uploaded nothing", which would tell the operator to
+ * throw away a plan that exists.
+ */
+export type Publishability = 'publishable' | 'nothing-uploaded' | 'expired' | 'unknown';
+
+/** The artifact name the publisher probes for; one spelling, both readers. */
+export const PLAN_ARTIFACT_NAME = 'plan.json';
+
+/**
+ * Pure: decide from an artifact listing alone. `artifacts === null` means the
+ * listing could not be read (or there was no run to read) — `unknown`, never
+ * `nothing-uploaded`.
+ */
+export function publishability(artifacts: { name: string; expired: boolean }[] | null): Publishability {
+  if (artifacts === null) return 'unknown';
+  const named = artifacts.filter((a) => a.name === PLAN_ARTIFACT_NAME);
+  if (named.some((a) => !a.expired)) return 'publishable';
+  if (named.length > 0) return 'expired';
+  return 'nothing-uploaded';
+}
+
+/**
+ * The loader that feeds it. A failed listing degrades to `unknown` and is named
+ * in the log — the page's first job is to render the break, and a hiccup in an
+ * explanatory read must not replace it with a stack trace.
+ */
+export async function readPublishability(gh: Octokit, repo: RepoRef, runId: string | null): Promise<Publishability> {
+  if (runId === null || !/^[0-9]+$/.test(runId)) return 'unknown';
+  try {
+    return publishability(await listRunArtifacts(gh, repo, Number(runId)));
+  } catch (error: unknown) {
+    console.warn(`plan review: run ${runId}'s artifacts could not be listed — reported as unknown rather than guessed`, errorMessage(error));
+    return 'unknown';
+  }
+}
 
 export function isUnpublishedAndon(x: AndonBreak | UnpublishedAndon): x is UnpublishedAndon {
   return 'kind' in x && x.kind === 'unpublished';
@@ -129,6 +209,22 @@ export function isRecoverableHeaderless(labels: string[], isPullRequest: boolean
 }
 
 /**
+ * Loadable as an unpublished break — live OR terminal (Codex on PR #287).
+ *
+ * `isRecoverableHeaderless` answers a different question: may this break be ACTED on.
+ * Keep them apart. A withdrawn break must render (it is the record of a review that
+ * happened) and must be re-enterable by a retry that failed partway through its own
+ * teardown; neither of those is an invitation to publish or withdraw it again.
+ *
+ * A pull request and an ordinary issue are still neither: they carry no andon:* label
+ * at all and stay the refusal `getAndon` throws.
+ */
+export function isHeaderlessAndon(labels: string[], isPullRequest: boolean): boolean {
+  if (isPullRequest) return false;
+  return isLiveAndon(labels) || labels.some((l) => (TERMINAL_ANDON_LABELS as readonly string[]).includes(l));
+}
+
+/**
  * `getAndon` that tells "not published yet" apart from a fault. A header → the
  * break; no header → an `UnpublishedAndon` describing what is missing; anything
  * else (404, 5xx, no permission) stays a throw — unreadable is not unpublished.
@@ -139,10 +235,18 @@ export async function getAndonOrUnpublished(gh: Octokit, repo: RepoRef, issueNum
   const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
   const header = parseAndonHeader(body);
   if (!header) {
-    if (!isRecoverableHeaderless(labels, 'pull_request' in issue && issue.pull_request != null)) {
+    const isPr = 'pull_request' in issue && issue.pull_request != null;
+    if (!isHeaderlessAndon(labels, isPr)) {
       throw new Refusal(`issue #${issueNumber} has no andon:v1 header`);
     }
-    return { kind: 'unpublished', issueNumber, title: issue.title, labels, ...unpublishedAndonFromBody(body) };
+    return {
+      kind: 'unpublished',
+      issueNumber,
+      title: issue.title,
+      labels,
+      state: isRecoverableHeaderless(labels, isPr) ? 'live' : 'terminal',
+      ...unpublishedAndonFromBody(body),
+    };
   }
   return { issueNumber, runId: header.runId, planRef: header.planRef, items: parseJudgmentItems(body), labels };
 }
@@ -381,8 +485,21 @@ export async function withdrawProposal(
   if (cause.length === 0) {
     throw new Refusal('withdrawal refused: a cause must be recorded (issue-tracker-contract.md §Andon Break)');
   }
-  const andon = await getAndon(gh, repo, issueNumber); // throws if the issue is not an Andon break
-  const version = parsePlanRef(andon.planRef);
+  // NOT `getAndon`: that throws on a break with no `andon:v1` header, and a
+  // headerless break is exactly the one an operator most needs to withdraw —
+  // the plan was never published, so there is nothing to judge and no route
+  // forward but withdrawing and proposing again (GHI #286). `getAndonOrUnpublished`
+  // still refuses anything that is not a LIVE break, so the guard this call
+  // carries is intact.
+  const loaded = await getAndonOrUnpublished(gh, repo, issueNumber);
+  const andon = isUnpublishedAndon(loaded)
+    ? { planRef: null as string | null, labels: loaded.labels }
+    : { planRef: loaded.planRef as string | null, labels: loaded.labels };
+  // An unpublished break's ref is AGENT PROSE, not a published ref, and no plan
+  // branch or approval pull request was ever created for it — so there is no
+  // version here to close a pull request for, and reading one from the prose could
+  // only point the teardown at some earlier proposal's leftovers.
+  const version = andon.planRef === null ? null : parsePlanRef(andon.planRef);
   // The approval pull request Commit for approval opened for this version. It is
   // closed WITH the proposal: left open it stays mergeable — every required check is
   // green once the cascade has withdrawn the corrections — and a merge would freeze a

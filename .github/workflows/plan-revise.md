@@ -171,5 +171,18 @@ every open correction is carried out. You are read-only beyond safe outputs; the
      the operator confirm each correction with ✓ (FR-004). Claiming an unimplemented correction
      defrauds the review; omitting an implemented one strands it.
 
+   **Stage both files first, and check that you did.** The `upload-artifact` safe output
+   uploads what is sitting in the run's staging directory — it does not fetch your files. Copy
+   each one there with Bash, to exactly `"$RUNNER_TEMP/gh-aw/safeoutputs/upload-artifacts/"`,
+   and NEVER `mkdir` that directory: it already exists, while `/tmp/gh-aw/...` is a different
+   directory — writable, named by the upload tool's own description, and never collected. A
+   `mkdir -p` that "succeeds" there means you have just written your only deliverables where
+   nothing will read them, and at this gh-aw pin the upload then reports success anyway (live
+   loss, 2026-09-19, test-turtle-1 run 35455533939; github/gh-aw#60383). A revision that loses
+   `addresses.json` this way is refused whole — the publisher requires the pair. Confirm with
+   `ls -l "$RUNNER_TEMP/gh-aw/safeoutputs/upload-artifacts/"` that BOTH files are listed at
+   their full size, then call the safe output once per file with the BARE FILENAME —
+   `plan.json` and `addresses.json`, no directory part.
+
 Then STOP. Do not push, do not comment, do not open issues. The operator confirms your revision
 item by item on the review page — nothing you produced takes effect until they do.

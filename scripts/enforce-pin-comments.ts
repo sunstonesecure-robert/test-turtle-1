@@ -53,6 +53,41 @@ const SOURCES = [
 const PIN = /([\w.-]+\/[\w.-]+)@([0-9a-f]{40})(\s*#\s*(\S+))?/g;
 
 /**
+ * The manifest header gh-aw writes as line 2 of every lock:
+ * `# gh-aw-manifest: {"version":1,"actions":[{"repo":…,"sha":…,"version":…}],…}`.
+ *
+ * READING IT IS THE WHOLE POINT OF THE SECOND EVIDENCE SOURCE (Codex on PR #284). The
+ * paragraph above has always claimed the manifest as evidence, and `main` has always
+ * passed the lock text in — but the only reader was `PIN`, which matches
+ * `owner/action@sha`, a shape the manifest does not contain: it states `repo` and `sha`
+ * as separate JSON fields. So the lock contributed evidence ONLY through its other
+ * `uses:` lines, and a compiler-owned pin stripped in every lock and named in no
+ * authored source was unrecoverable — while the version sat in the header of the very
+ * file that lost it. `lock:enforce` then reported "pin comments already intact", which
+ * is the failure mode worth naming: not a missing restore, but a missing restore
+ * reported as a clean one.
+ *
+ * Malformed or absent manifest → no entries, never a throw. This script runs after
+ * every compile and must not be what fails a build.
+ */
+export function versionsFromManifest(text: string): [string, string][] {
+  const line = /^#\s*gh-aw-manifest:\s*(\{.*\})\s*$/m.exec(text);
+  if (!line?.[1]) return [];
+  try {
+    const parsed: unknown = JSON.parse(line[1]);
+    const actions = (parsed as { actions?: unknown }).actions;
+    if (!Array.isArray(actions)) return [];
+    return actions.flatMap((entry): [string, string][] => {
+      const { sha, version } = entry as { sha?: unknown; version?: unknown };
+      if (typeof sha !== 'string' || typeof version !== 'string') return [];
+      return [[sha, version]];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
  * SHA → version, from every place that already states it. A SHA that two sources
  * describe differently is DROPPED rather than resolved by precedence: this script may
  * only restore a version the tree already agrees on, and a disagreement is a thing to
@@ -60,14 +95,19 @@ const PIN = /([\w.-]+\/[\w.-]+)@([0-9a-f]{40})(\s*#\s*(\S+))?/g;
  */
 export function versionsBySha(sources: readonly string[]): Map<string, string> {
   const seen = new Map<string, Set<string>>();
+  const record = (sha: string | undefined, version: string | undefined): void => {
+    // A "version" that just repeats the SHA is the v0.88.7 rewrite, not a version — and
+    // the manifest carries that degenerate form too (build-template's own header states
+    // `actions/checkout` with its SHA as the version), so the same filter has to guard
+    // both readers.
+    if (!sha || !version || version === sha || !/^v\d/.test(version)) return;
+    const bucket = seen.get(sha) ?? new Set<string>();
+    bucket.add(version);
+    seen.set(sha, bucket);
+  };
   for (const text of sources) {
-    for (const [, , sha, , version] of text.matchAll(PIN)) {
-      // A comment that just repeats the SHA is the v0.88.7 rewrite, not a version.
-      if (!sha || !version || version === sha || !/^v\d/.test(version)) continue;
-      const bucket = seen.get(sha) ?? new Set<string>();
-      bucket.add(version);
-      seen.set(sha, bucket);
-    }
+    for (const [, , sha, , version] of text.matchAll(PIN)) record(sha, version);
+    for (const [sha, version] of versionsFromManifest(text)) record(sha, version);
   }
   const resolved = new Map<string, string>();
   for (const [sha, versions] of seen) {

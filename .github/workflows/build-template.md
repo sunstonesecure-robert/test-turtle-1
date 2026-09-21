@@ -408,6 +408,17 @@ the ONLY channel by which your work reaches the repository: you hold `contents: 
 commit, push, open a pull request, or move a label. A deterministic workflow (`build-publish`)
 validates the artifact and does the writing.
 
+**Stage it first, and check that you did.** The `upload-artifact` safe output uploads what is
+sitting in the run's staging directory — it does not fetch your file. Copy it there with Bash, to
+exactly `"$RUNNER_TEMP/gh-aw/safeoutputs/upload-artifacts/deliverable.patch"`, and NEVER `mkdir`
+that directory: it already exists, while `/tmp/gh-aw/...` is a different directory — writable,
+named by the upload tool's own description, and never collected. A `mkdir -p` that "succeeds"
+there means you have just written the whole build where nothing will read it, and at this gh-aw
+pin the upload then reports success anyway (live loss, 2026-09-19, test-turtle-1 run 35455533939;
+github/gh-aw#60383). Confirm with `ls -l "$RUNNER_TEMP/gh-aw/safeoutputs/upload-artifacts/"` that
+the file is listed at its full size, then call the safe output with the BARE FILENAME —
+`deliverable.patch`, no directory part.
+
 `deliverable.patch` is a JSON document in exactly this shape (`schemas/deliverable.schema.json`):
 
 ```json

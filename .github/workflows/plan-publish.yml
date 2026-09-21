@@ -93,11 +93,30 @@ jobs:
           expired="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID/artifacts" --jq '.artifacts[] | select(.expired == true) | .name')"
           run_name="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PP_RUN_ID" --jq '.name')"
           has() { grep -qx -- "$1" <<<"$2"; }
+          # The reason travels to the reporting step below: a ::notice in this log was the
+          # ONLY record of the absence, and it is the one place the operator has no reason
+          # to look — the planning run is green and the break is open (GHI #286).
+          # `artifacts` is newline-joined here and split on commas OR newlines by the
+          # reporter; it is repository data (GitHub's own artifact names), quoted into an
+          # env var and never interpolated into a script.
+          # RANDOM DELIMITER, not a fixed one (Codex on PR #287): artifact names are chosen
+          # by the AGENT, and an artifact named exactly like the delimiter would close the
+          # heredoc early and make the rest of the listing parse as invalid $GITHUB_OUTPUT
+          # records — failing the probe, so a misnamed upload could still leave the break
+          # silent. This is GitHub's own documented practice for untrusted multiline output.
+          delim="PP_EOF_$(openssl rand -hex 16)"
+          {
+            echo "artifacts<<$delim"
+            echo "${live:-}"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
           if ! has plan.json "$live"; then
             echo "present=false" >> "$GITHUB_OUTPUT"
             if has plan.json "$expired"; then
+              echo "reason=expired" >> "$GITHUB_OUTPUT"
               echo "::notice::run $PP_RUN_ID's plan.json artifact has EXPIRED (GitHub's artifact retention) — nothing can be published from it; re-dispatch plan-propose for the workload and, if a headerless Andon still stands for it, withdraw that break first"
             else
+              echo "reason=no-artifact" >> "$GITHUB_OUTPUT"
               echo "::notice::run $PP_RUN_ID uploaded no plan.json artifact (live artifacts: ${live:-none}) — the agent did not finish, so there is nothing to publish; that run's own failure is the record"
             fi
             exit 0
@@ -108,30 +127,58 @@ jobs:
           # file as "none"); require the pair before publishing a plan-revise run (Codex on PR #209).
           if [[ "$run_name" == *plan-revise* ]] && ! has addresses.json "$live"; then
             echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "reason=revision-incomplete" >> "$GITHUB_OUTPUT"
             echo "::notice::run $PP_RUN_ID is a plan-revise run that uploaded plan.json but no addresses.json — the revision is incomplete (the agent stopped between its two uploads); not published. Re-run plan-revise for the review"
             exit 0
           fi
           echo "present=true" >> "$GITHUB_OUTPUT"
           echo "run $PP_RUN_ID ($run_name) uploaded what a publish needs — publishing"
-      - if: steps.probe.outputs.present == 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # BOTH paths need the toolchain now: publishing runs the writer, and NOT publishing
+      # runs the reporter that tells the break so (GHI #286). The probe is the only step
+      # that can end this job early, and it does that by failing on a malformed run id.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           # No git credentials in .git/config: every write here goes through
           # octokit + GITHUB_TOKEN, never `git push` (zizmor artipacked).
           persist-credentials: false
-      - if: steps.probe.outputs.present == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 24
-      - if: steps.probe.outputs.present == 'true'
-        run: npm ci
+      - run: npm ci
+      # ALSO on the incomplete-revision path, which is the one case where NOT publishing
+      # still needs the document: a plan-revise run raises no issue and edits none, so the
+      # break it revises carries the original proposal's run link and can only be found by
+      # the plan ref inside plan.json (Codex on PR #287). The other two reasons have
+      # nothing to download — an absent artifact cannot be fetched, and an expired one
+      # cannot be served — so they stay off this step.
       - name: download the proposed plan artifact
-        if: steps.probe.outputs.present == 'true'
+        if: steps.probe.outputs.present == 'true' || steps.probe.outputs.reason == 'revision-incomplete'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           run-id: ${{ env.PP_RUN_ID }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}/plan-artifacts
+      # SAY IT WHERE THE OPERATOR IS LOOKING. The probe above already knows the plan is
+      # not coming; before this step that fact lived only in this log, while the break
+      # stayed open and the review page explained the silence with a cause that was false
+      # on the break that prompted this (test-turtle-1 #134, run 35455533939). Idempotent
+      # by marker, so a workflow_run re-delivery or a re-dispatch adds nothing. It does not
+      # withdraw the break: ending a review is the operator's act, with their own cause.
+      # `--dir` is how it finds a REVISION's break; it publishes nothing, and the publish
+      # step below stays gated on an artifact being there.
+      - name: tell the break that nothing is coming
+        if: steps.probe.outputs.present != 'true' && steps.probe.outputs.reason != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PP_REASON: ${{ steps.probe.outputs.reason }}
+          PP_ARTIFACTS: ${{ steps.probe.outputs.artifacts }}
+        run: >-
+          npx tsx scripts/plan-publish.ts
+          --report-absence "$PP_REASON"
+          --repo "$GITHUB_REPOSITORY"
+          --run-id "$PP_RUN_ID"
+          --artifacts "$PP_ARTIFACTS"
+          --dir "$RUNNER_TEMP/plan-artifacts"
       - name: publish plan branch (validate, patch andon_issue, branch + commit)
         if: steps.probe.outputs.present == 'true'
         env:
