@@ -3,6 +3,10 @@ import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { getChunk } from '../../../dashboard/lib/github/chunks';
 import { errorStatus } from '../../../dashboard/lib/github/errors';
 import type { PlanDoc } from '../../../schemas/plan';
+// The PURE shell reader (GHI #271). `checks-shell.ts` spawns processes and is
+// deliberately unreachable from the review page's preview; this module is not, which is
+// exactly why the reader was factored out into a module with no `child_process` in it.
+import { nestedShellBody } from './shell-text';
 import type { GateResult } from './runner';
 
 /**
@@ -304,13 +308,288 @@ function topLevelSeparators(command: string): number {
   return /[;\n]\s*$/.test(command) ? Math.max(0, count - 1) : count;
 }
 
+/**
+ * PURE: does this `run` assert that a count is ZERO, through a substitution that can
+ * never produce one?
+ *
+ * `count=$(grep -c PATTERN "$f" || echo 0); test "$count" -eq 0` looks careful and is
+ * unsatisfiable. With NO matches, `grep -c` prints `0` **and exits 1** — the exit status
+ * is about matching, not about failure — so `|| echo 0` appends a second line and the
+ * variable holds `"0\n0"`. `test` then says *integer expression expected* and exits 2,
+ * which the target reports as `failure`. With matches, the count is non-zero and the
+ * `-eq 0` assertion fails on its own. **No repository state passes it**, and the shape
+ * fails LOUDEST exactly when the delivered work is correct.
+ *
+ * Live on 2026-09-21 (test-turtle-1, `plan/lza-phase0-5/v1`): `vt-script-filename` and
+ * `vt-consistency-updated` both red against files that satisfied every word of their
+ * prose `check`, with a third target — `vt-workflow-pinned` — carrying the same idiom
+ * and waiting for its step to be delivered. Three of eleven targets, unsatisfiable, in a
+ * plan already frozen: the remedy is a re-open, which is why this belongs at the Andon
+ * break rather than after.
+ *
+ * NEITHER EXISTING HALF OF G19 CAN SEE IT. The shape rule asks about separators outside
+ * quotes, and every live target hides its body inside `bash -c '…'`; `bash -n` parses
+ * the command and it is perfectly valid shell. This one is a semantic trap in text that
+ * parses — so it is a third rule, not a fix to either.
+ *
+ * THREE CONDITIONS, ALL REQUIRED (each one closes a false positive Codex found on PR
+ * #292, and every one of them is a way an operator learns to dismiss a gate):
+ *
+ *   1. the substitution really is one — `$(` inside SINGLE quotes expands nothing, so a
+ *      target searching a document for the literal idiom is not writing it;
+ *   2. the `|| echo <n>` is the counted grep's OWN fallback — adjacent in the same
+ *      command list, not merely somewhere in the same substitution beside an unrelated
+ *      `$(probe || echo 0)`;
+ *   3. the result is compared to ZERO. `n=$(grep -c foo f || echo 0); test "$n" -eq 2`
+ *      is satisfiable: two matches means grep exits 0, the fallback never fires, and the
+ *      target passes. Only a zero-comparison can never be reached.
+ *
+ * `|| true` is the correct spelling of the same intention — grep has already printed the
+ * count — and is never flagged.
+ */
+export function lintCountSubstitution(run: string): string | null {
+  const flagged = [run, nestedShellBody(run) ?? ''].some(hasUnsatisfiableZeroCount);
+  if (!flagged) return null;
+  return (
+    '`run` asserts a count is zero through `$(grep -c … || echo 0)`, which can never pass: with no matches ' +
+    '`grep -c` PRINTS `0` and EXITS 1, so `|| echo 0` appends a second line and the variable holds two — `test` ' +
+    'then answers "integer expression expected" and the target fails EXACTLY WHEN the work is correct. Write ' +
+    '`|| true` instead (grep has already printed the count), or assert it directly with `! grep -q … <path>` ' +
+    'after `test -f <path>`'
+  );
+}
+
+/** A `grep` invocation carrying a count flag — `-c`, `-cF`, `-Fc`, `--count`. */
+const GREP_COUNT = /\bgrep\b.*?(?:\s-[A-Za-z]*c[A-Za-z]*\b|\s--count\b)/;
+/** `echo 0`, `echo "0"`, `echo '0'`, `echo -n 0` — the second print, however spelled. */
+const ECHO_NUMBER = /^echo\s+(?:-n\s+)?(?:"-?\d+"|'-?\d+'|-?\d+)\s*$/;
+/** A comparison of this text to zero: `-eq 0`, `-le 0`, `-lt 1`. */
+const ZERO_COMPARISON = /-eq\s+0\b|-le\s+0\b|-lt\s+1\b/;
+
+/** Does this text contain a zero-asserted count substitution? */
+function hasUnsatisfiableZeroCount(text: string): boolean {
+  return substitutions(text).some(({ body, start, end }) => {
+    if (!countFallbackPaired(body)) return false;
+    return comparedToZero(text, start, end);
+  });
+}
+
+/**
+ * Is the `|| echo <n>` the counted grep's OWN fallback?
+ *
+ * The body is split into top-level segments at `;`, a newline, `&&`, `||` and `|`, with
+ * the operator that ended each one recorded. A counted grep counts only when the very
+ * next operator is `||` and the very next segment is nothing but `echo <number>`. That
+ * is what makes `$(printf '%s %s' "$(grep -c x f || true)" "$(probe || echo 0)")` — a
+ * counted grep and an unrelated numeric fallback in ONE substitution — read correctly
+ * as two unrelated things (Codex on PR #292).
+ */
+function countFallbackPaired(body: string): boolean {
+  const segments = topLevelSegments(body);
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const here = segments[i]!;
+    const next = segments[i + 1]!;
+    if (here.operator !== '||') continue;
+    if (!GREP_COUNT.test(here.text)) continue;
+    if (ECHO_NUMBER.test(next.text.trim())) return true;
+  }
+  return false;
+}
+
+/**
+ * Is the substitution's value compared to zero?
+ *
+ * Two shapes, and nothing else counts. INLINE: the substitution sits inside the same
+ * command as the comparison, `test "$(grep -c … || echo 0)" -eq 0`. ASSIGNED:
+ * `n=$(grep -c … || echo 0)` and a later `-eq 0` on `$n` / `"$n"` / `${n}`.
+ *
+ * Anything we cannot read this way is NOT flagged. The claim in the message is that no
+ * repository state passes, and a claim that strong is only made where it is provable
+ * from the text.
+ */
+function comparedToZero(text: string, start: number, end: number): boolean {
+  const before = text.slice(0, start);
+  const after = text.slice(end);
+  // INLINE — the rest of this command, up to the next separator.
+  const restOfCommand = after.split(/[;\n]|&&|\|\|/)[0] ?? '';
+  if (ZERO_COMPARISON.test(restOfCommand)) return true;
+  // ASSIGNED — `name=$(…)`, then any later comparison of that name to zero.
+  const assignment = /([A-Za-z_][A-Za-z0-9_]*)=\s*$/.exec(before);
+  const name = assignment?.[1];
+  if (name === undefined) return false;
+  const reference = new RegExp(`\\$\\{?${name}\\}?|"\\$\\{?${name}\\}?"`);
+  for (const command of after.split(/[;\n]|&&|\|\|/)) {
+    if (reference.test(command) && ZERO_COMPARISON.test(command)) return true;
+  }
+  return false;
+}
+
+interface Segment {
+  text: string;
+  /** the operator that ENDED this segment, or null at the end of the body */
+  operator: ';' | '&&' | '||' | '|' | null;
+}
+
+/**
+ * Top-level segments of one substitution body, quote-aware and substitution-aware: a
+ * separator inside quotes, or inside a NESTED substitution, does not split anything.
+ */
+function topLevelSegments(body: string): Segment[] {
+  const out: Segment[] = [];
+  let current = '';
+  let quote: "'" | '"' | null = null;
+  let depth = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i]!;
+    const next = body[i + 1];
+    if (quote !== null) {
+      if (quote === '"' && ch === '\\') {
+        current += ch + (next ?? '');
+        i += 1;
+      } else {
+        if (ch === quote) quote = null;
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '\\' && next !== undefined) {
+      current += ch + next;
+      i += 1;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+    if (depth > 0) {
+      current += ch;
+      continue;
+    }
+    if (ch === ';' || ch === '\n') {
+      out.push({ text: current, operator: ';' });
+      current = '';
+      continue;
+    }
+    if ((ch === '&' || ch === '|') && next === ch) {
+      out.push({ text: current, operator: ch === '&' ? '&&' : '||' });
+      current = '';
+      i += 1;
+      continue;
+    }
+    if (ch === '|') {
+      out.push({ text: current, operator: '|' });
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  out.push({ text: current, operator: null });
+  return out;
+}
+
+interface Substitution {
+  body: string;
+  /** index in the scanned text where `$(` or the opening backtick begins */
+  start: number;
+  /** index just past the closing `)` or backtick */
+  end: number;
+}
+
+/**
+ * Every command substitution in this text, nested ones included as entries of their own.
+ *
+ * QUOTE-AWARE ON THE WAY IN, which is the part a regex cannot do: `$(` inside SINGLE
+ * quotes is literal text — `grep -F '$(grep -c x f || echo 0)' docs.md` searches a file
+ * for that string and runs nothing — while inside DOUBLE quotes it expands normally. A
+ * backslash outside quotes escapes it too. Reported by Codex on PR #292, and the shape
+ * that makes it matter is ordinary: the outer `bash -c '…'` every live target uses.
+ */
+function substitutions(text: string): Substitution[] {
+  const out: Substitution[] = [];
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue; // nothing expands inside single quotes
+    }
+    if (quote === '"' && ch === '\\') {
+      i += 1;
+      continue;
+    }
+    if (quote === '"' && ch === '"') {
+      quote = null;
+      continue;
+    }
+    if (quote === null) {
+      if (ch === '\\') {
+        i += 1; // an escaped `$` is a dollar sign
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        continue;
+      }
+    }
+    if (ch === '`') {
+      const close = text.indexOf('`', i + 1);
+      if (close === -1) break;
+      out.push({ body: text.slice(i + 1, close), start: i, end: close + 1 });
+      i = close;
+      continue;
+    }
+    if (ch !== '$' || text[i + 1] !== '(') continue;
+    const close = matchingParen(text, i + 1);
+    if (close === null) continue;
+    const body = text.slice(i + 2, close);
+    out.push({ body, start: i, end: close + 1 });
+    // Nested substitutions are their own entries, with positions in THIS text so a
+    // comparison outside them can still be found.
+    for (const inner of substitutions(body)) {
+      out.push({ body: inner.body, start: i + 2 + inner.start, end: i + 2 + inner.end });
+    }
+    i = close;
+  }
+  return out;
+}
+
+/** The index of the `)` closing the `(` at `open`, or null when it is unbalanced. */
+function matchingParen(text: string, open: number): number | null {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let i = open; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (quote !== null) {
+      if (quote === '"' && ch === '\\') i += 1;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
 /** Every target whose `run` discards its own commands' status, in plan order. */
 export function unlintableRuns(plan: PlanDoc): { vtId: string; reason: string }[] {
   const out: { vtId: string; reason: string }[] = [];
   for (const vt of plan.verification_targets) {
     if (!vt.run) continue;
-    const reason = lintRunShape(vt.run);
-    if (reason !== null) out.push({ vtId: vt.id, reason });
+    // Both pure rules, and a target can trip both: one clause per problem, so the
+    // operator reads what is wrong rather than only what was noticed first.
+    for (const reason of [lintRunShape(vt.run), lintCountSubstitution(vt.run)]) {
+      if (reason !== null) out.push({ vtId: vt.id, reason });
+    }
   }
   return out;
 }

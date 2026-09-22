@@ -154,7 +154,10 @@ every open correction is carried out. You are read-only beyond safe outputs; the
    shapes cause nearly all of it, and the approval gate G19 reports both as an advisory:
    a `;`-list or a `for` loop reports only its LAST command's status (chain with `&&`, or
    begin with `set -e`), and `! grep … <path>` turns grep's exit 2 on a MISSING FILE into
-   a pass (assert the file exists first). `run` must also be valid shell: G19 parses every
+   a pass (assert the file exists first). A third shape is not vacuous but UNSATISFIABLE:
+   `$(grep -c … || echo 0)` holds `0\n0` when there are no matches, because `grep -c`
+   prints the 0 AND exits 1, so `test "$n" -eq 0` errors and the target fails exactly when
+   the work is correct — write `|| true`, or `! grep -q … <path>` after `test -f <path>`. `run` must also be valid shell: G19 parses every
    command with `bash -n` — including the body inside `bash -c '…'` — because one that does
    not parse concludes `failure` on every build with an error that reads like the step's fault.
    **`tracking_issue` is inherited, never created.** It names the work item (a `chunk:*`

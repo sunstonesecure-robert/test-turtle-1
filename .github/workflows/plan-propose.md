@@ -194,6 +194,15 @@ You are the planning agent for the workload `${{ inputs.workload }}`.
      exits 2 — not "no match" — and `!` inverts that into success, and a `!`-negated
      command is exempt from `set -e` so nothing catches it. Assert the file exists first
      (`test -f <path> && ! grep -q … <path>`).
+   - **`$(grep -c … || echo 0)` can never pass.** With NO matches `grep -c` PRINTS `0`
+     and EXITS 1 — its status is about matching, not about failure — so `|| echo 0`
+     appends a SECOND line and the variable holds `0\n0`. `test "$n" -eq 0` then answers
+     *integer expression expected* and the target concludes `failure`; with matches, the
+     count is non-zero and the assertion fails on its own. No repository state passes it,
+     and it fails loudest exactly when the delivered work is correct (live 2026-09-21:
+     three of one plan's eleven targets, unsatisfiable, in an already-frozen plan — the
+     remedy was a re-open). Write `|| true` instead, since grep has already printed the
+     count, or assert it directly with `! grep -q … <path>` after `test -f <path>`.
 
    Also: `run` must be valid shell. G19 parses every command with `bash -n` — including the
    body inside `bash -c '…'`, which an outer parse treats as one opaque word — because one
