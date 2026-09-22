@@ -20,7 +20,7 @@
       "reads": [
         "inputs/lza-phase0/.github/workflows/lza-phase0_validate-offline.yml"
       ],
-      "tracking_issue": null
+      "tracking_issue": 152
     },
     {
       "id": "step-script",
@@ -34,7 +34,7 @@
       "scope": [
         "deploy/scripts/validate-config-offline.sh"
       ],
-      "tracking_issue": null
+      "tracking_issue": 153
     },
     {
       "id": "step-refs",
@@ -55,7 +55,7 @@
       "reads": [
         "deploy/scripts/validate-config-offline.sh"
       ],
-      "tracking_issue": null
+      "tracking_issue": 154
     },
     {
       "id": "step-schema",
@@ -69,7 +69,7 @@
       "scope": [
         "deployment/schemas/deployment-evidence.schema.json"
       ],
-      "tracking_issue": null
+      "tracking_issue": 155
     },
     {
       "id": "step-tests",
@@ -91,7 +91,7 @@
         "deploy/scripts/validate-config-offline.sh",
         "deployment/schemas/deployment-evidence.schema.json"
       ],
-      "tracking_issue": null
+      "tracking_issue": 156
     }
   ],
   "verification_targets": [
