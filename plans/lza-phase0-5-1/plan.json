@@ -1,0 +1,252 @@
+{
+  "feature": "lza-phase0-5-1",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "lza-phase0-5-1-v1-plan-propose-35762252918",
+  "andon_issue": 151,
+  "steps": [
+    {
+      "id": "step-workflow",
+      "title": "Deliver .github/workflows/lza-phase0-5-1_validate-offline.yml",
+      "intent": "Recover the workflow from commit 1be1e3c (the pre-relocation version with root-relative paths) and deliver it as .github/workflows/lza-phase0-5-1_validate-offline.yml with exactly four changes and no others: (a) rename the file and update its two self-references in the paths: lists from lza-phase0_validate-offline.yml to lza-phase0-5-1_validate-offline.yml; (b) add branches: [main] to on.pull_request (the recovered file has paths: but no branches: there); (c) replace the concurrency group lza-phase0_validate-offline-${{ github.workflow }}-${{ github.ref }} with the literal string lza-phase0-5-1_validate-offline and set cancel-in-progress: false; (d) nothing else. All permissions (contents: read only, no id-token: write), actions pinned to their existing 40-character commit SHAs, timeout-minutes: 30, runs-on: ubuntu-latest, and the full step sequence remain verbatim. The paths: filter entries in both push and pull_request are root-relative (lza.lock, config/**, control-tower/**, etc.) since the Phase 0 content lives at the repository root — not under inputs/lza-phase0/. workflow_dispatch retains its optional plan_ref and commit string inputs unchanged.",
+      "acceptance": ".github/workflows/lza-phase0-5-1_validate-offline.yml exists; permissions declares only contents: read; concurrency.group is the literal string lza-phase0-5-1_validate-offline with no ${{ expression and cancel-in-progress: false; on.pull_request carries branches: [main] and a non-empty root-relative paths filter; on.push carries branches: [main] and a non-empty root-relative paths filter; workflow_dispatch has plan_ref and commit inputs; both third-party actions are pinned to 40-character commit SHAs; the file contains no id-token:, no environment:, and no inputs/lza-phase0/ path.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [],
+      "scope": [
+        ".github/workflows/lza-phase0-5-1_*.yml"
+      ],
+      "reads": [
+        "inputs/lza-phase0/.github/workflows/lza-phase0_validate-offline.yml"
+      ],
+      "tracking_issue": 152
+    },
+    {
+      "id": "step-script",
+      "title": "Update validate-config-offline.sh: filename references and DONE-090 check 8",
+      "intent": "Make exactly two categories of change to deploy/scripts/validate-config-offline.sh. First, change the occurrences of lza-phase0-0_validate-offline.yml in check_linters_and_tests (the actionlint invocation and the yamllint invocation) to lza-phase0-5-1_validate-offline.yml. Second, close the DONE-090 digest-determinism gap in check_digests: replace the two same-process calculate() calls with two genuine independent subprocess invocations, each in a distinct temporary directory created with mktemp -d, each with a distinct umask set before launch and a distinct locale environment variable, producing a JSON digest output; compare the two outputs byte-for-byte; assert they are identical; write the agreed digest set plus a deterministicDigestsVerified: true field to the evidence JSON. Also add deterministicDigestsVerified: True to the inline evidence_fixture dict in check_schemas so it passes the updated schema. No other change may be made to the script.",
+      "acceptance": "deploy/scripts/validate-config-offline.sh contains no occurrence of lza-phase0-0_validate-offline; it contains lza-phase0-5-1_validate-offline.yml in the actionlint and yamllint invocations; check_digests invokes two independent subprocess executions in separate temporary directories with differing umask and locale, compares their digest outputs byte-for-byte, asserts they are identical, and emits a deterministicDigestsVerified field (value true) in the evidence JSON; the inline evidence_fixture in check_schemas includes deterministicDigestsVerified: True.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [],
+      "scope": [
+        "deploy/scripts/validate-config-offline.sh"
+      ],
+      "tracking_issue": 153
+    },
+    {
+      "id": "step-refs",
+      "title": "Update filename references in tests/consistency.bats, README.md, and Makefile",
+      "intent": "Replace every occurrence of lza-phase0-0_validate-offline.yml with lza-phase0-5-1_validate-offline.yml in exactly three files: (1) tests/consistency.bats — the locked-literals test appends the workflow path to its file list via paths.append(root / '.github/workflows/lza-phase0-0_validate-offline.yml'); change only that one path string to lza-phase0-5-1_validate-offline.yml; (2) README.md — two occurrences: one in the layout table under .github/workflows/ and one in the validating-locally prose; (3) Makefile — one occurrence in the comment block referencing the workflow filename. No other content in these files may change.",
+      "acceptance": "tests/consistency.bats references .github/workflows/lza-phase0-5-1_validate-offline.yml in its locked-literals path list and contains no occurrence of lza-phase0-0_validate-offline. README.md and Makefile both reference lza-phase0-5-1_validate-offline.yml and contain no occurrence of lza-phase0-0_validate-offline. No file in the repository root (excluding plans/, inputs/, and .git) contains the string lza-phase0-0_validate-offline.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-script"
+      ],
+      "scope": [
+        "tests/consistency.bats",
+        "README.md",
+        "Makefile"
+      ],
+      "reads": [
+        "deploy/scripts/validate-config-offline.sh"
+      ],
+      "tracking_issue": 154
+    },
+    {
+      "id": "step-schema",
+      "title": "Add DONE-090 deterministicDigestsVerified field to the evidence schema",
+      "intent": "Amend deployment/schemas/deployment-evidence.schema.json to add deterministicDigestsVerified as a required boolean property with const: true. This records that check 8 confirmed digest reproducibility across two independent subprocess invocations with distinct temporary directories, umask, and locale. The amendment is strictly additive to all other constraints: required, properties, and their existing definitions remain unchanged. Every evidence file the updated check_digests emits will include this field.",
+      "acceptance": "deployment/schemas/deployment-evidence.schema.json parses as valid JSON; the properties object includes deterministicDigestsVerified with type: boolean and const: true; the required array includes deterministicDigestsVerified; all other schema constraints are unchanged.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [],
+      "scope": [
+        "deployment/schemas/deployment-evidence.schema.json"
+      ],
+      "tracking_issue": 155
+    },
+    {
+      "id": "step-tests",
+      "title": "Add check-8 Bats suite (tests/digests.bats) and Gate 0 Gherkin feature file",
+      "intent": "Deliver tests/digests.bats: a Bats suite dedicated to DONE-090 behavioral coverage of check 8. It sources deploy/scripts/common.sh and anchors REPOSITORY_ROOT at the repo root. It asserts: (1) two independent invocations of the digest calculation (separate python3 subprocess, separate mktemp working directory) produce byte-identical JSON output; (2) the first invocation uses one umask value and the second uses a different umask value, confirming umask-independence; (3) the first invocation uses one locale (e.g. LC_ALL=C) and the second uses another (e.g. LC_ALL=en_US.UTF-8), confirming locale-independence; (4) the agreed digest set and deterministicDigestsVerified: true both appear in the evidence JSON that check_digests writes; (5) a negative test: copy repository content into a tmpdir, perturb one config file byte, run the digest calculation, and assert non-zero exit — the check detects the difference without modifying the implementation. The suite is picked up automatically by bats tests/*.bats in check 6. Also deliver tests/features/gate-0.feature: a Gherkin feature file with one Scenario per Bats test in digests.bats (1:1 mapping, living documentation). No Gherkin runner, no new package.json dependency, no root manifest change; the feature file is explicitly non-executing.",
+      "acceptance": "tests/digests.bats exists, sources deploy/scripts/common.sh, contains Bats tests covering the five behavioral assertions above including a negative perturbed-fixture test. tests/features/gate-0.feature exists and contains a Feature: header and one Scenario: per test in digests.bats. No new dependency is added to package.json or any root manifest.",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "high_stakes": false,
+      "depends_on": [
+        "step-script",
+        "step-schema"
+      ],
+      "scope": [
+        "tests/digests.bats",
+        "tests/features/gate-0.feature"
+      ],
+      "reads": [
+        "deploy/scripts/validate-config-offline.sh",
+        "deployment/schemas/deployment-evidence.schema.json"
+      ],
+      "tracking_issue": 156
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-workflow-delivered",
+      "kind": "exact-copy",
+      "check": ".github/workflows/lza-phase0-5-1_validate-offline.yml exists and contains no inputs/lza-phase0/ path, no id-token, and no environment: key",
+      "run": "python3 -c 'import sys; t=open(\".github/workflows/lza-phase0-5-1_validate-offline.yml\").read(); assert \"inputs/lza-phase0/\" not in t, \"found inputs/lza-phase0/ in workflow\"; assert \"id-token\" not in t, \"found id-token\"; assert \"environment:\" not in t, \"found environment:\"'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    },
+    {
+      "id": "vt-workflow-concurrency",
+      "kind": "exact-copy",
+      "check": "The delivered workflow concurrency group is exactly the literal string lza-phase0-5-1_validate-offline with cancel-in-progress: false and contains no ${{ expression in the group line",
+      "run": "python3 -c 'import re; t=open(\".github/workflows/lza-phase0-5-1_validate-offline.yml\").read(); assert \"group: lza-phase0-5-1_validate-offline\" in t, \"literal group not found\"; assert \"cancel-in-progress: false\" in t, \"missing cancel-in-progress\"; assert not re.search(r\"group:.*\\$\\{\\{\", t), \"expression in concurrency group\"'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    },
+    {
+      "id": "vt-workflow-branches",
+      "kind": "expected-output",
+      "check": "on.pull_request carries branches: [main] and a non-empty paths filter; on.push carries branches: [main]",
+      "run": "python3 -c 'import yaml; w=yaml.safe_load(open(\".github/workflows/lza-phase0-5-1_validate-offline.yml\")); pr=w[\"on\"][\"pull_request\"]; assert pr.get(\"branches\")==[\"main\"], pr; assert pr.get(\"paths\"), \"no paths on pull_request\"; push=w[\"on\"][\"push\"]; assert push.get(\"branches\")==[\"main\"], push'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    },
+    {
+      "id": "vt-workflow-pinned",
+      "kind": "expected-output",
+      "check": "Every third-party action in the delivered workflow is pinned to a 40-character commit SHA (no @vN/@main/@master/@latest tags)",
+      "run": "bash -c 'f=.github/workflows/lza-phase0-5-1_validate-offline.yml; test -f \"$f\" && ! grep -qE \"uses:[^@]*@(v[0-9]|main|master|latest)([^0-9a-f]|$)\" \"$f\"'",
+      "maps_to": [
+        "step-workflow"
+      ]
+    },
+    {
+      "id": "vt-script-filename",
+      "kind": "exact-copy",
+      "check": "deploy/scripts/validate-config-offline.sh contains no occurrence of lza-phase0-0_validate-offline and contains lza-phase0-5-1_validate-offline.yml in the linter invocations",
+      "run": "bash -c 'set -e; f=deploy/scripts/validate-config-offline.sh; test -f \"$f\"; grep -qF lza-phase0-5-1_validate-offline.yml \"$f\"; count=$(grep -cF lza-phase0-0_validate-offline \"$f\" || true); test \"$count\" -eq 0'",
+      "maps_to": [
+        "step-script"
+      ]
+    },
+    {
+      "id": "vt-script-done090",
+      "kind": "boundary-behavior",
+      "check": "check_digests in validate-config-offline.sh records deterministicDigestsVerified in the evidence output (confirming dual-invocation implementation)",
+      "run": "bash -c 'set -e; f=deploy/scripts/validate-config-offline.sh; test -f \"$f\"; grep -q deterministicDigestsVerified \"$f\"'",
+      "maps_to": [
+        "step-script"
+      ]
+    },
+    {
+      "id": "vt-refs-no-old-name",
+      "kind": "exact-copy",
+      "check": "No file in the repository (outside plans/, inputs/, and .git) contains the string lza-phase0-0_validate-offline",
+      "run": "python3 -c 'import subprocess; r=subprocess.run([\"grep\",\"-rF\",\"lza-phase0-0_validate-offline\",\"--exclude-dir=plans\",\"--exclude-dir=inputs\",\"--exclude-dir=.git\",\".\"],capture_output=True); assert r.returncode==1, \"Found old name:\\n\"+r.stdout.decode()'",
+      "maps_to": [
+        "step-refs"
+      ]
+    },
+    {
+      "id": "vt-consistency-updated",
+      "kind": "exact-copy",
+      "check": "tests/consistency.bats references lza-phase0-5-1_validate-offline.yml and contains no reference to lza-phase0-0_validate-offline",
+      "run": "bash -c 'set -e; f=tests/consistency.bats; test -f \"$f\"; grep -qF lza-phase0-5-1_validate-offline.yml \"$f\"; count=$(grep -cF lza-phase0-0_validate-offline \"$f\" || true); test \"$count\" -eq 0'",
+      "maps_to": [
+        "step-refs"
+      ]
+    },
+    {
+      "id": "vt-schema-done090",
+      "kind": "expected-output",
+      "check": "deployment/schemas/deployment-evidence.schema.json includes deterministicDigestsVerified as a required property with type: boolean and const: true",
+      "run": "python3 -c 'import json; s=json.load(open(\"deployment/schemas/deployment-evidence.schema.json\")); assert \"deterministicDigestsVerified\" in s[\"required\"], \"not in required\"; p=s[\"properties\"][\"deterministicDigestsVerified\"]; assert p.get(\"const\") is True, \"const not true\"'",
+      "maps_to": [
+        "step-schema"
+      ]
+    },
+    {
+      "id": "vt-tests-digests-bats",
+      "kind": "expected-output",
+      "check": "tests/digests.bats exists, sources deploy/scripts/common.sh, and contains assertions for umask independence and deterministicDigestsVerified evidence field",
+      "run": "bash -c 'set -e; test -f tests/digests.bats; grep -q deploy/scripts/common.sh tests/digests.bats; grep -q umask tests/digests.bats; grep -q deterministicDigestsVerified tests/digests.bats'",
+      "maps_to": [
+        "step-tests"
+      ]
+    },
+    {
+      "id": "vt-tests-feature-file",
+      "kind": "expected-output",
+      "check": "tests/features/gate-0.feature exists with a Feature: header and at least one Scenario: declaration",
+      "run": "bash -c 'set -e; test -f tests/features/gate-0.feature; grep -q Feature: tests/features/gate-0.feature; grep -q Scenario: tests/features/gate-0.feature'",
+      "maps_to": [
+        "step-tests"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-workflow-root-paths",
+      "description": "The copy in inputs/lza-phase0/.github/workflows/ references inputs/lza-phase0/ prefixed paths in its filters and step commands (it was updated during the relocation commit). The delivered .github/workflows/lza-phase0-5-1_validate-offline.yml MUST use root-relative paths (lza.lock, config/**, etc.) sourced from commit 1be1e3c, not the inputs/ copy.",
+      "step_id": "step-workflow"
+    },
+    {
+      "id": "bc-concurrency-literal",
+      "description": "Guard D6.2 rejects any ${{ }} expression in the concurrency group even when the literal prefix is correct. The concurrency block must be exactly 'group: lza-phase0-5-1_validate-offline' with 'cancel-in-progress: false' — no github.workflow variable, no github.ref, nothing dynamic. The group string must start with the file basename minus extension.",
+      "step_id": "step-workflow"
+    },
+    {
+      "id": "bc-check8-two-processes",
+      "description": "The DONE-090 fix requires two genuinely separate python3 subprocess invocations — separate processes, each in a distinct mktemp directory, each with a distinct umask applied before launch. The negative Bats test introduces a perturbed fixture file in the second invocation's tmpdir to drive a non-zero exit; it must NOT weaken check_digests itself.",
+      "step_id": "step-script"
+    },
+    {
+      "id": "bc-schema-fixture-in-script",
+      "description": "validate-config-offline.sh's check_schemas function contains an inline evidence_fixture dict that is validated against deployment-evidence.schema.json. After step-schema adds deterministicDigestsVerified as required, this fixture will fail schema validation unless step-script also adds deterministicDigestsVerified: True to it, causing check 4 to fail.",
+      "step_id": "step-script"
+    },
+    {
+      "id": "bc-schema-additive",
+      "description": "Adding deterministicDigestsVerified as a required field is intentionally breaking for evidence files produced by the old check_digests. The updated check_digests always writes this field, so no gate output from the delivered workflow will violate the new schema.",
+      "step_id": "step-schema"
+    },
+    {
+      "id": "bc-consistency-single-ref",
+      "description": "tests/consistency.bats contains exactly one reference to the workflow filename: the paths.append() call in the locked-literals test. Only that one path string changes. The test continues to assert that locked LZA version, commit, and Yarn literals do not appear in the delivered workflow file.",
+      "step_id": "step-refs"
+    }
+  ],
+  "state_transitions": [
+    {
+      "id": "st-workflow-deployed",
+      "description": ".github/workflows/lza-phase0-5-1_validate-offline.yml is added to main; the push-to-main trigger fires on the next merge touching Phase 0 content and that run serves as Gate 0.",
+      "step_id": "step-workflow"
+    },
+    {
+      "id": "st-check8-dual-subprocess",
+      "description": "check_digests in deploy/scripts/validate-config-offline.sh switches from two same-process calculate() calls sharing one interpreter to two independent subprocess invocations in separate mktemp -d directories with distinct umask and locale; the agreed digest set plus deterministicDigestsVerified: true is written to evidence.",
+      "step_id": "step-script"
+    },
+    {
+      "id": "st-schema-required-field",
+      "description": "deployment/schemas/deployment-evidence.schema.json gains deterministicDigestsVerified as a required boolean property with const: true; any evidence file produced by the pre-DONE-090 check_digests now fails schema validation.",
+      "step_id": "step-schema"
+    },
+    {
+      "id": "st-refs-updated",
+      "description": "Every in-repo occurrence of lza-phase0-0_validate-offline outside plans/ and inputs/ is replaced with lza-phase0-5-1_validate-offline in tests/consistency.bats, README.md, and Makefile.",
+      "step_id": "step-refs"
+    }
+  ]
+}
