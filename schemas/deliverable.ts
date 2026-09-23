@@ -48,6 +48,11 @@ export const DeliverableFile = z
     /** `utf-8` (default) or `base64` for binary deliverables — an image, a font, a
      *  compiled asset. Base64 is decoded by the writer, never executed by it. */
     encoding: z.enum(['utf-8', 'base64']).optional(),
+    /** GHI #301 — write the file executable (`100755`). `true` / `false` set the mode;
+     *  omitted keeps an EXISTING file's mode and writes a new one `100644`. The writer
+     *  used to write every file `100644`, and every agent-delivered script on the sandbox
+     *  lost its executable bit (test-turtle-1 PR #158: exit 126). */
+    executable: z.boolean().optional(),
   })
   .strict();
 

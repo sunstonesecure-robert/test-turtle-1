@@ -39,7 +39,8 @@
         "properties": {
           "path": { "type": "string", "minLength": 1, "description": "Repo-relative, forward slashes. Traversal and absolute paths are REFUSED by the gate, never normalized into safety." },
           "content": { "type": "string" },
-          "encoding": { "enum": ["utf-8", "base64"] }
+          "encoding": { "enum": ["utf-8", "base64"] },
+          "executable": { "type": "boolean", "description": "true writes the file executable (100755), false writes it 100644. Omitted: an existing file keeps its mode, a new file is 100644." }
         }
       }
     },

@@ -412,14 +412,23 @@ export async function publishDeliverable(
   const existingHeadSha = await readBranchHead(gh, repo, branch);
   const { data: headCommit } = await gh.git.getCommit({ ...repo, commit_sha: existingHeadSha ?? tagSha });
 
-  const treeEntries: { path: string; mode: '100644'; type: 'blob'; sha?: string | null; content?: string }[] = [];
+  // THE MODES THE FILES LAND WITH (GHI #301). Every file used to be written `100644`, and
+  // every agent-delivered script on the sandbox lost its executable bit (test-turtle-1
+  // PR #158, exit 126). An existing file keeps the mode it has; `executable` says it
+  // explicitly. Read on the built-in token — it is a read.
+  const baseModes = await readBaseModes(gh, repo, headCommit.tree.sha);
+  const modeNotes: ModeNote[] = [];
+  const treeEntries: { path: string; mode: FileMode; type: 'blob'; sha?: string | null; content?: string }[] = [];
   for (const file of patch.files) {
     const { data: blob } = await writer.git.createBlob({
       ...repo,
       content: file.content,
       encoding: file.encoding === 'base64' ? 'base64' : 'utf-8',
     });
-    treeEntries.push({ path: normalizePath(file.path), mode: '100644', type: 'blob', sha: blob.sha });
+    const path = normalizePath(file.path);
+    const note = resolveFileMode(file, path, baseModes);
+    modeNotes.push(note);
+    treeEntries.push({ path, mode: note.mode, type: 'blob', sha: blob.sha });
   }
   for (const path of patch.deletions ?? []) {
     // `sha: null` in a tree entry is the delete. Same containment checks already
@@ -575,6 +584,7 @@ export async function publishDeliverable(
     `**Declared scope:** ${scope.length > 0 ? scope.map((s) => `\`${s}\``).join(', ') : '_(none — plan frozen before `scope` existed; D2 reports not-applicable and D5 still applies)_'}`,
     '',
     `**Paths written:** ${paths.map((p) => `\`${p}\``).join(', ')}`,
+    ...modeLines(modeNotes, baseModes.complete),
     '',
     '---',
     '',
@@ -610,6 +620,89 @@ export async function publishDeliverable(
   await gh.issues.addLabels({ ...repo, issue_number: prNumber, labels: ['build:awaiting-merge'] }).catch(() => undefined);
 
   return { outcome: 'published', branch, prNumber, paths, authority };
+}
+
+/** The two modes the writer produces. Symlinks and submodules are never written. */
+export type FileMode = '100644' | '100755';
+
+/** What one delivered file's mode came to, and against what it was already. */
+export interface ModeNote {
+  path: string;
+  mode: FileMode;
+  /** the mode at the base tree; `null` for a new file; `undefined` when unreadable */
+  base: FileMode | null | undefined;
+  /** the patch said nothing, and the file's content opens with `#!` */
+  shebang: boolean;
+  explicit: boolean;
+}
+
+export interface BaseModes {
+  modes: Map<string, string>;
+  /** false when GitHub truncated the listing: an absent path may still exist */
+  complete: boolean;
+}
+
+/**
+ * The file modes at the tree the delivery is built on, in one recursive read. A listing
+ * GitHub truncates is marked incomplete rather than read as "these files are new": an
+ * existing executable would then be rewritten `100644` — the very loss GHI #301 is about —
+ * so the pull request says the modes could not all be confirmed.
+ */
+async function readBaseModes(gh: Octokit, repo: RepoRef, treeSha: string): Promise<BaseModes> {
+  const { data } = await gh.git.getTree({ ...repo, tree_sha: treeSha, recursive: 'true' });
+  const modes = new Map<string, string>();
+  for (const entry of data.tree) if (entry.type === 'blob' && entry.path && entry.mode) modes.set(entry.path, entry.mode);
+  return { modes, complete: !data.truncated };
+}
+
+/**
+ * The mode one file is written with (GHI #301): `executable` when the patch says, else the
+ * mode the file already has, else `100644`. An existing symlink or other non-regular mode is
+ * overwritten as a regular file, as before — the writer never produces one.
+ */
+export function resolveFileMode(
+  file: { content: string; encoding?: 'utf-8' | 'base64'; executable?: boolean },
+  path: string,
+  base: BaseModes,
+): ModeNote {
+  const existing = base.modes.get(path);
+  const baseMode: FileMode | null | undefined =
+    existing === '100755' ? '100755' : existing !== undefined ? '100644' : base.complete ? null : undefined;
+  const explicit = file.executable !== undefined;
+  const mode: FileMode = explicit ? (file.executable ? '100755' : '100644') : baseMode === '100755' ? '100755' : '100644';
+  const text = file.encoding === 'base64' ? Buffer.from(file.content, 'base64').subarray(0, 2).toString('latin1') : file.content.slice(0, 2);
+  return { path, mode, base: baseMode, shebang: !explicit && mode === '100644' && text === '#!', explicit };
+}
+
+/**
+ * What the pull request says about modes — only what a reviewer cannot see: GitHub's diff
+ * view does not show a mode change by default, and a non-executable script only fails
+ * when something runs it. Silent when every file is an ordinary `100644` with nothing to say.
+ */
+export function modeLines(notes: readonly ModeNote[], complete: boolean): string[] {
+  const code = (p: string) => `\`${p}\``;
+  const executable = notes.filter((n) => n.mode === '100755').map((n) => n.path);
+  const changed = notes.filter((n) => n.base && n.base !== n.mode);
+  const shebang = notes.filter((n) => n.shebang);
+  const unconfirmed = complete ? [] : notes.filter((n) => n.base === undefined && !n.explicit);
+  const lines: string[] = [];
+  if (executable.length > 0) lines.push(`**Executable:** ${executable.map(code).join(', ')}`);
+  if (changed.length > 0) {
+    lines.push(`**Mode changed:** ${changed.map((n) => `${code(n.path)} ${n.base} → ${n.mode}`).join(', ')}`);
+  }
+  if (shebang.length > 0) {
+    lines.push(
+      `**Starts with \`#!\` but written non-executable:** ${shebang.map((n) => code(n.path)).join(', ')}. Anything that runs it ` +
+        'directly will fail with "Permission denied" — the delivery did not say `executable: true`.',
+    );
+  }
+  if (unconfirmed.length > 0) {
+    lines.push(
+      `**Modes not confirmed:** the repository tree was too large to read in one listing, so ${unconfirmed.map((n) => code(n.path)).join(', ')} ` +
+        'may already exist with a different mode; each was written `100644`.',
+    );
+  }
+  return lines.length > 0 ? ['', ...lines] : [];
 }
 
 /**

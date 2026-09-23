@@ -427,7 +427,10 @@ the file is listed at its full size, then call the safe output with the BARE FIL
   "step_id": "step-<the step this chunk names>",
   "executor_id": "<the EXECUTOR_ID env var>",
   "executor": { "tier": "in-sandbox", "engine": "<ENGINE>", "model": "<MODEL>" },
-  "files": [{ "path": "docs/index.html", "content": "<the WHOLE file>" }],
+  "files": [
+    { "path": "docs/index.html", "content": "<the WHOLE file>" },
+    { "path": "deploy/run.sh", "content": "#!/usr/bin/env bash\n...", "executable": true }
+  ],
   "deletions": [],
   "summary": "one line for the commit message and PR title"
 }
@@ -444,6 +447,11 @@ the file is listed at its full size, then call the safe output with the BARE FIL
 - `files[].path` is repo-relative with forward slashes. `../`, absolute paths and drive letters are
   refused outright, never repaired.
 - Set `encoding: "base64"` on a file only when it is genuinely binary.
+- Set `executable: true` on any file something will RUN directly — a script a workflow, a
+  Makefile or another script calls by path (`deploy/run.sh`, `./scripts/x`). Without it a NEW file
+  lands non-executable and fails with "Permission denied" the first time it runs (live: exit 126,
+  test-turtle-1 PR #158). A file that already exists keeps the mode it has when you say nothing, so
+  set it only when you mean to change it, and `executable: false` only to remove the bit on purpose.
 - Include the tests you wrote for the deliverable in `files` too, when the step's scope covers them.
 
 **Stay inside the step's declared `scope`.** Read it from the step in `plans/<slug>/plan.json` at
