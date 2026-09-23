@@ -88,6 +88,71 @@ export interface BuildRunContext {
 }
 
 /**
+ * THE WORKFLOW WRITER (GHI #296, the short-term half of #174's credential decision).
+ *
+ * GitHub refuses any git-data write that adds, changes or removes a file under
+ * `.github/workflows/` from a credential without the **Workflows** permission — and the
+ * built-in `GITHUB_TOKEN` cannot be given it, because Actions' `permissions:` block has
+ * no key for it (live: test-turtle-1 runs 35644535945 and 35767908443, both 403 at
+ * `POST /git/trees`). Refs count too: GitHub ties Workflows to creating and updating a
+ * reference, so blob, tree, commit, `createRef` and `updateRef` all move together.
+ *
+ * Only those five writes. Reads, refusal comments, `pulls.create` / `pulls.update` and the
+ * PR label stay on the built-in token, because D1 accepts a deliverable only from a
+ * pull request the bot opened — a PAT is a user.
+ *
+ * LAZY, and asked for at exactly one point: after every check has passed, and only when
+ * the patch carries a subject workflow. A patch that needs no elevation never gets it.
+ * This is also where GHI #295 plugs in — its implementation mints a per-run App token
+ * here instead of reading a secret, so "mint after validation" holds without rework.
+ *
+ * Resolves `null` when no credential is configured, and the caller refuses in a sentence.
+ */
+export type WorkflowWriter = () => Promise<Octokit | null>;
+
+/** The Actions secret on the TARGET that carries the Workflows permission (CONFIGURATION_GUIDE §1). */
+export const WORKFLOW_WRITE_TOKEN_SECRET = 'WORKFLOW_WRITE_TOKEN';
+
+/**
+ * The PAT-backed writer. NOT `createClient({ token: env.WORKFLOW_WRITE_TOKEN })`: that
+ * falls back to `GITHUB_TOKEN` when the value is undefined (and 403s again), and an unset
+ * Actions secret arrives as `''`, which is an unauthenticated client. Neither would say
+ * what is missing, so blank is checked here and read as "not configured".
+ */
+export function workflowWriterFromEnv(env: NodeJS.ProcessEnv = process.env): WorkflowWriter {
+  return async () => {
+    const token = (env[WORKFLOW_WRITE_TOKEN_SECRET] ?? '').trim();
+    return token === '' ? null : createClient({ token });
+  };
+}
+
+/**
+ * The identity recorded on a commit the workflow writer makes. Without it the commit
+ * would be authored by whoever owns the PAT, and the history would read as that person
+ * hand-writing the delivery. This is the identity the built-in token writes with, so the
+ * history reads the same whichever credential made the commit; the run that made it is
+ * named in the commit message either way. Commits on the built-in token keep GitHub's
+ * own default, unchanged.
+ */
+export const WRITER_COMMIT_IDENTITY = {
+  name: 'github-actions[bot]',
+  email: '41898282+github-actions[bot]@users.noreply.github.com',
+} as const;
+
+/** The refusal when a subject workflow needs the workflow writer and none is configured. */
+export function workflowWriterMissingDetail(subjectPaths: readonly string[]): string {
+  return (
+    `deliverable.patch delivers ${subjectPaths.map((p) => `\`${p}\``).join(', ')}, and writing a file under ` +
+    '`.github/workflows/` needs a credential with the **Workflows: write** permission. The built-in `GITHUB_TOKEN` ' +
+    "cannot be given that permission — GitHub Actions' `permissions:` block has no key for it — and the " +
+    `\`${WORKFLOW_WRITE_TOKEN_SECRET}\` Actions secret that supplies it on this repository is not set, or is empty.\n\n` +
+    `Add \`${WORKFLOW_WRITE_TOKEN_SECRET}\` to this repository's Actions secrets (a fine-grained token scoped to this ` +
+    'repository with **Contents** and **Workflows** read and write, and nothing else), then re-run this publish. ' +
+    'Every check on the patch itself passed; only the credential is missing.'
+  );
+}
+
+/**
  * The deliverable branch for one step of one FROZEN VERSION of a plan.
  *
  * THE VERSION IS PART OF THE NAME (Codex on PR #153). It used to be
@@ -140,6 +205,9 @@ export async function publishDeliverable(
   repo: RepoRef,
   raw: unknown,
   ctx: BuildRunContext,
+  // No writer unless the caller hands one over: the CLI reads the secret; a caller that
+  // passes nothing gets the refusal on a subject workflow, never an ambient credential.
+  workflowWriter: WorkflowWriter = async () => null,
 ): Promise<PublishOutcome> {
   const parsed = DeliverablePatch.safeParse(raw);
   if (!parsed.success) {
@@ -290,6 +358,16 @@ export async function publishDeliverable(
     }
   }
 
+  // THE WORKFLOW WRITER, asked for here and nowhere else (GHI #296): every check above
+  // has passed, and only a patch carrying a subject workflow needs it. Missing or blank
+  // is a refusal that names the secret — still before any write.
+  let writer: Octokit = gh;
+  if (subjectPaths.size > 0) {
+    const elevated = await workflowWriter();
+    if (elevated === null) return refuse(gh, repo, reportOn, workflowWriterMissingDetail([...subjectPaths]));
+    writer = elevated;
+  }
+
   // ---- Everything below WRITES. Nothing above did. ----
 
   const branch = deliverableBranch(patch.plan_ref, step.id);
@@ -315,7 +393,7 @@ export async function publishDeliverable(
 
   const treeEntries: { path: string; mode: '100644'; type: 'blob'; sha?: string | null; content?: string }[] = [];
   for (const file of patch.files) {
-    const { data: blob } = await gh.git.createBlob({
+    const { data: blob } = await writer.git.createBlob({
       ...repo,
       content: file.content,
       encoding: file.encoding === 'base64' ? 'base64' : 'utf-8',
@@ -328,11 +406,11 @@ export async function publishDeliverable(
     treeEntries.push({ path: normalizePath(path), mode: '100644', type: 'blob', sha: null });
   }
 
-  // Written through the git DATA API — blob, tree, commit, ref — rather than a
+  // Written through the git DATA API — blob, tree, commit, ref, all on `writer` — rather than a
   // `git push`, so this workflow never holds a git credential in `.git/config`
   // either (zizmor artipacked; the same reason every checkout here sets
   // `persist-credentials: false`).
-  const { data: tree } = await gh.git.createTree({ ...repo, base_tree: headCommit.tree.sha, tree: treeEntries as never });
+  const { data: tree } = await writer.git.createTree({ ...repo, base_tree: headCommit.tree.sha, tree: treeEntries as never });
 
   // Re-delivery of an identical envelope ONTO A PULL REQUEST THAT IS ALREADY OPEN is not
   // an error and not a second commit: the seam is idempotent precisely so a
@@ -425,7 +503,7 @@ export async function publishDeliverable(
   if (!resuming) {
     // Only now is anything REFERENCED: past this point the branch must exist.
     try {
-      await gh.git.createRef({ ...repo, ref: `refs/heads/${branch}`, sha: tagSha });
+      await writer.git.createRef({ ...repo, ref: `refs/heads/${branch}`, sha: tagSha });
     } catch (error: unknown) {
       if (errorStatus(error) !== 422) throw error; // 422 = exists; resume above resolved its head
     }
@@ -433,15 +511,16 @@ export async function publishDeliverable(
 
   const summary = patch.summary ?? `deliver ${step.id}`;
   if (!resuming) {
-    const { data: commit } = await gh.git.createCommit({
+    const { data: commit } = await writer.git.createCommit({
       ...repo,
       message:
         `build: ${summary}\n\n` +
         `plan: ${patch.plan_ref}\nstep: ${step.id}\nexecutor: ${patch.executor_id}\nbuild run: ${ctx.runId}\n`,
       tree: tree.sha,
       parents: [headCommit.sha],
+      ...(writer === gh ? {} : { author: WRITER_COMMIT_IDENTITY, committer: WRITER_COMMIT_IDENTITY }),
     });
-    await gh.git.updateRef({ ...repo, ref: `heads/${branch}`, sha: commit.sha, force: false }).catch(async (error: unknown) => {
+    await writer.git.updateRef({ ...repo, ref: `heads/${branch}`, sha: commit.sha, force: false }).catch(async (error: unknown) => {
       // A non-fast-forward here means the branch moved under us — a concurrent
       // re-delivery. Fail loudly rather than force: this branch is a record.
       throw new Error(`could not advance ${branch}: ${errorMessage(error)}`);
@@ -591,7 +670,7 @@ if (isMain) {
     // var of the same name (CONFIGURATION_GUIDE.md §3); unset or empty = no operator
     // globs, and subject workflows wait regardless.
     checkpointGlobs: parseCheckpointPaths(process.env[CHECKPOINT_PATHS_VARIABLE]),
-  })
+  }, workflowWriterFromEnv())
     .then((result) => {
       if (result.outcome === 'refused') {
         console.error(`REFUSED: ${result.reason}`);

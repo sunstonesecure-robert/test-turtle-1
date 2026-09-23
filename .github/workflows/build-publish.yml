@@ -103,6 +103,13 @@ jobs:
         env:
           SUBJECT_SCANNERS_DIR: ${{ runner.temp }}/scanners # D6.5 — where the install step put actionlint + zizmor
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GHI #296: the ONE credential that can write a file under .github/workflows/ —
+          # a fine-grained PAT with Contents + Workflows write on this repository only
+          # (CONFIGURATION_GUIDE.md §1). The built-in token cannot be given Workflows. The
+          # publisher reads it only after every check passes and only for a patch carrying
+          # a subject workflow; unset or empty refuses that patch in a sentence. Retired by
+          # GHI #295 (a per-run App token minted at the same point).
+          WORKFLOW_WRITE_TOKEN: ${{ secrets.WORKFLOW_WRITE_TOKEN }}
           BP_RUN_ID: ${{ github.event.workflow_run.id }}
           # The build was dispatched ON the frozen tag (preflight B8 refuses anything
           # else), so these two are the trusted binding for the envelope's plan_ref —
