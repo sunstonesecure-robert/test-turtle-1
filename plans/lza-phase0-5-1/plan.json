@@ -1,9 +1,9 @@
 {
   "feature": "lza-phase0-5-1",
-  "version": 1,
-  "supersedes": null,
-  "run_id": "lza-phase0-5-1-v1-plan-propose-35762252918",
-  "andon_issue": 151,
+  "version": 2,
+  "supersedes": 1,
+  "run_id": "reopen-of-lza-phase0-5-1-v1",
+  "andon_issue": 160,
   "steps": [
     {
       "id": "step-workflow",
