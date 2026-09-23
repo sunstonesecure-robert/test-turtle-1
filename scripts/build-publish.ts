@@ -127,6 +127,27 @@ export function workflowWriterFromEnv(env: NodeJS.ProcessEnv = process.env): Wor
 }
 
 /**
+ * TAKE the secret out of the environment and hand back a writer holding it (Codex on PR #298).
+ *
+ * The step's `env:` puts `WORKFLOW_WRITE_TOKEN` in `process.env` from the first line, and every
+ * child this process spawns inherits `process.env` — the D6.5 scanners (`actionlint`, `zizmor`)
+ * run over the UNTRUSTED workflow before the writer is ever asked for, and so does `bash -n`.
+ * A scanner exploited by the file it is judging would have been handed a long-lived Contents +
+ * Workflows token. Called first thing in the CLI, this removes the variable before anything
+ * runs, so no child inherits it; the value lives only in the returned closure.
+ *
+ * WHAT IT DOES NOT CLOSE, stated: the kernel's copy of this process's initial environment
+ * (`/proc/<pid>/environ`, and the step shell's) still carries the value, and a same-user child
+ * can read it. That needs the credential in a separate execution boundary — a later job that
+ * never runs a scanner — which is the job split GHI #297 describes.
+ */
+export function takeWorkflowWriter(env: NodeJS.ProcessEnv = process.env): WorkflowWriter {
+  const writer = workflowWriterFromEnv({ [WORKFLOW_WRITE_TOKEN_SECRET]: env[WORKFLOW_WRITE_TOKEN_SECRET] });
+  delete env[WORKFLOW_WRITE_TOKEN_SECRET];
+  return writer;
+}
+
+/**
  * The identity recorded on a commit the workflow writer makes. Without it the commit
  * would be authored by whoever owns the PAT, and the history would read as that person
  * hand-writing the delivery. This is the identity the built-in token writes with, so the
@@ -632,6 +653,8 @@ export function findDeliverableFile(dir: string): string | null {
 
 const isMain = process.argv[1]?.endsWith('build-publish.ts');
 if (isMain) {
+  // First, before any check can spawn a child: see takeWorkflowWriter.
+  const workflowWriter = takeWorkflowWriter();
   const argv = process.argv.slice(2);
   const get = (name: string): string | undefined => {
     const i = argv.indexOf(`--${name}`);
@@ -670,7 +693,7 @@ if (isMain) {
     // var of the same name (CONFIGURATION_GUIDE.md §3); unset or empty = no operator
     // globs, and subject workflows wait regardless.
     checkpointGlobs: parseCheckpointPaths(process.env[CHECKPOINT_PATHS_VARIABLE]),
-  }, workflowWriterFromEnv())
+  }, workflowWriter)
     .then((result) => {
       if (result.outcome === 'refused') {
         console.error(`REFUSED: ${result.reason}`);
