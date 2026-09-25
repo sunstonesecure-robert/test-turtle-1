@@ -131,14 +131,14 @@ PY
 }
 
 check_linters_and_tests() {
-  actionlint "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-5_validate-offline.yml"
+  actionlint "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-5-1_validate-offline.yml"
   shellcheck "${REPOSITORY_ROOT}"/deploy/scripts/*.sh
   yamllint -c "${REPOSITORY_ROOT}/.yamllint.yml" \
     "${REPOSITORY_ROOT}/lza.lock" \
     "${REPOSITORY_ROOT}/config" \
     "${REPOSITORY_ROOT}/control-tower" \
     "${REPOSITORY_ROOT}/deployment" \
-    "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-5_validate-offline.yml"
+    "${REPOSITORY_ROOT}/.github/workflows/lza-phase0-5-1_validate-offline.yml"
   cfn_templates=()
   while IFS= read -r -d '' template; do
     cfn_templates+=("${template}")
