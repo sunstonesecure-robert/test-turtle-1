@@ -58,7 +58,7 @@ allowed = {root / "lza.lock", root / "deployment/inputs.example.yaml"}
 paths = []
 for name in ("config", "control-tower", "deployment", "deploy", "tests"):
     paths.extend(path for path in (root / name).rglob("*") if path.is_file())
-paths.append(root / ".github/workflows/lza-phase0-5_validate-offline.yml")
+paths.append(root / ".github/workflows/lza-phase0-5-1_validate-offline.yml")
 for path in paths:
     if path in allowed:
         continue
