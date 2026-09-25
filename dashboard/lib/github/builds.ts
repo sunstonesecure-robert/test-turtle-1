@@ -283,6 +283,12 @@ export interface DeliverablePrView {
    * apply to, and for a read that threw.
    */
   preAuthorizedHold: { kind: 'stalled' | 'refused' | 'unobserved'; message: string } | null;
+  /**
+   * The operator's own workflows GitHub held on this pull request instead of running
+   * (`HeldRuns`). `null` when the caller did not ask (`detectHeldRuns`) or the row is too
+   * old to be worth asking about. See `readHeldRuns`.
+   */
+  heldRuns: HeldRuns | null;
   mergeAuthority: 'pre-authorized' | 'operator-merge-required' | 'unknown';
   /** WHY, in the rule's own plain words (`resolveMergeAuthority`), for the Builds page
    *  to show under an operator-required row — which path waits, or which setting asked.
@@ -467,11 +473,109 @@ async function describeMergeHold(
 }
 
 /** What a caller wants beyond the listing itself. */
+/** One run GitHub is holding (or held) for approval, as the operator opens it. */
+export interface HeldRun {
+  id: number;
+  /** the workflow's display name, as the Actions page shows it */
+  name: string;
+  url: string;
+}
+
+/**
+ * The approvals a deliverable pull request is waiting on, THREE-VALUED (ADR-0007).
+ *
+ * WHY THIS EXISTS. `build-publish` opens every deliverable pull request on the built-in
+ * token, and GitHub holds the `pull_request` runs of such a pull request until someone
+ * with write access approves them. The product's own gates do not need that — the
+ * sweep judges the pull request from `workflow_run` — but the operator's OWN workflows
+ * (a delivered `<slug>_*.yml`, anything hand-written) get no such second route. Nobody
+ * approved them, and when the merge landed GitHub closed them as `failure` with no job
+ * ever started (test-turtle-1 PR #162, 2026-09-25): a red run that checked nothing, and
+ * real output nobody saw until the operator re-ran one by hand.
+ *
+ *   waiting   open pull request, runs held right now — approve them on GitHub
+ *   neverRan  settled, and the held runs were closed unrun — re-run them. `merged`
+ *             says HOW it settled: a refused deliverable is closed unmerged, and
+ *             calling that a merge would misstate the record (Codex on PR #306).
+ *   unreadable  the runs could not be listed; NOT "nothing held". `open` says which
+ *             remedy applies — approve (open) or re-run (settled).
+ */
+export type HeldRuns =
+  | { kind: 'waiting'; runs: HeldRun[] }
+  | { kind: 'never-ran'; runs: HeldRun[]; merged: boolean }
+  | { kind: 'none' }
+  | { kind: 'unreadable'; why: string; open: boolean };
+
+/**
+ * The product's own workflows that trigger on `pull_request`. They are held on a
+ * deliverable pull request like anything else, but they do not need approving: the
+ * gates are judged by their sweeps, and the other two act only on a merged pull request.
+ * Listing them would ask the operator to approve machinery that has already answered.
+ * `tests/unit/held-runs.test.ts` checks this list against every installed template that
+ * triggers on `pull_request`, so a new one cannot be missed.
+ */
+export const PRODUCT_PULL_REQUEST_WORKFLOWS: readonly string[] = [
+  '.github/workflows/plan-gate.yml',
+  '.github/workflows/deliverable-gate.yml',
+  '.github/workflows/build-merge.yml',
+  '.github/workflows/plan-post-merge.yml',
+];
+
+/** How far back a SETTLED deliverable is still asked about. Older ones are history. */
+export const HELD_RUNS_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Which of the operator's workflows GitHub held on this head commit (see `HeldRuns`).
+ *
+ * `waiting` is a `pull_request` run concluded `action_required`. `never-ran` is one
+ * concluded `failure` on its FIRST attempt with no job at all. That shape is how a held
+ * run ends when its pull request merges; a run that actually executed has jobs, and a
+ * re-run by the operator is a later attempt with a real result, so it drops out.
+ */
+export async function readHeldRuns(
+  gh: Octokit,
+  repo: RepoRef,
+  headSha: string,
+  settlement: { open: boolean; merged: boolean },
+): Promise<HeldRuns> {
+  const { open, merged } = settlement;
+  let runs: { id: number; name?: string | null; path: string; html_url: string; conclusion: string | null; run_attempt?: number; event: string }[];
+  try {
+    // PAGINATED (Codex on PR #306): one page of 100 would report a held run on page two
+    // as absent, and this line promises to name every one.
+    runs = await gh.paginate(gh.actions.listWorkflowRunsForRepo, { ...repo, head_sha: headSha, event: 'pull_request', per_page: 100 });
+  } catch (error: unknown) {
+    return { kind: 'unreadable', why: errorMessage(error), open };
+  }
+  const own = runs.filter((r) => !PRODUCT_PULL_REQUEST_WORKFLOWS.includes(r.path));
+  const view = (r: (typeof own)[number]): HeldRun => ({ id: r.id, name: r.name ?? r.path, url: r.html_url });
+  if (open) {
+    const waiting = own.filter((r) => r.conclusion === 'action_required');
+    return waiting.length > 0 ? { kind: 'waiting', runs: waiting.map(view) } : { kind: 'none' };
+  }
+  const neverRan: HeldRun[] = [];
+  for (const r of own.filter((x) => x.conclusion === 'failure' && (x.run_attempt ?? 1) === 1)) {
+    try {
+      const { data } = await gh.actions.listJobsForWorkflowRun({ ...repo, run_id: r.id, per_page: 1 });
+      if (data.total_count === 0) neverRan.push(view(r));
+    } catch (error: unknown) {
+      return { kind: 'unreadable', why: errorMessage(error), open };
+    }
+  }
+  return neverRan.length > 0 ? { kind: 'never-ran', runs: neverRan, merged } : { kind: 'none' };
+}
+
 export interface ListDeliverablePrsOptions {
   /** read each OPEN pre-authorized deliverable's required check runs, so a stalled one
    *  can be named (GHI #236). Off by default: `resolveVerifiedCommit` runs this listing
    *  on every workload card and cares only about merged pull requests. */
   detectMergeStalls?: boolean;
+  /** list the operator's own workflows GitHub is holding (or held) for approval on
+   *  each open deliverable and each one settled in the last week (`readHeldRuns`).
+   *  Off by default for the same reason as `detectMergeStalls`. */
+  detectHeldRuns?: boolean;
+  /** injectable clock for the settled-row lookback; tests only */
+  now?: number;
 }
 
 export async function listDeliverablePrs(
@@ -643,6 +747,11 @@ export async function listDeliverablePrs(
       preAuthorizedHold:
         options.detectMergeStalls === true && isOpen && state === 'awaiting-merge' && authority === 'pre-authorized'
           ? await describeMergeHold(gh, repo, pr.head.sha, pr.updated_at)
+          : null,
+      heldRuns:
+        options.detectHeldRuns === true &&
+        (isOpen || (pr.closed_at != null && (options.now ?? Date.now()) - Date.parse(pr.closed_at) <= HELD_RUNS_LOOKBACK_MS))
+          ? await readHeldRuns(gh, repo, pr.head.sha, { open: isOpen, merged })
           : null,
       mergeAuthority: authority,
       mergeReason,
