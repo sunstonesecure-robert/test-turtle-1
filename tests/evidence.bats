@@ -19,6 +19,7 @@ fixture = {
     "repositoryValidationOnly": True, "liveValidatorRan": False,
     "checks": [{"number": n, "name": f"check-{n}", "status": "passed"} for n in range(1, 9)],
     "digests": {f"digest-{n}": "0" * 64 for n in range(1, 12)},
+    "deterministicDigestsVerified": True,
 }
 Draft202012Validator(schema).validate(fixture)
 fixture["liveValidatorRan"] = True
