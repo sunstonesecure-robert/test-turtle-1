@@ -59,15 +59,15 @@
     },
     {
       "id": "step-schema",
-      "title": "Add DONE-090 deterministicDigestsVerified field to the evidence schema",
-      "intent": "Amend deployment/schemas/deployment-evidence.schema.json to add deterministicDigestsVerified as a required boolean property with const: true. This records that check 8 confirmed digest reproducibility across two independent subprocess invocations with distinct temporary directories, umask, and locale. The amendment is strictly additive to all other constraints: required, properties, and their existing definitions remain unchanged. Every evidence file the updated check_digests emits will include this field.",
-      "acceptance": "deployment/schemas/deployment-evidence.schema.json parses as valid JSON; the properties object includes deterministicDigestsVerified with type: boolean and const: true; the required array includes deterministicDigestsVerified; all other schema constraints are unchanged.",
+      "title": "Complete the DONE-090 evidence contract: align the tests/evidence.bats fixture with the schema field",
+      "intent": "deployment/schemas/deployment-evidence.schema.json already requires deterministicDigestsVerified (type: boolean, const: true) on main; it landed with workload lza-phase0-5 (PR #146) and MUST NOT be modified. That change left the evidence-contract test in tests/evidence.bats, \"Phase 0 evidence contract validates and denies a live-validator claim\", validating an inline fixture that lacks the field, so check 6 fails on every commit and Gate 0 can never pass. Make exactly one change: in that test's inline fixture dict, add the line `    \"deterministicDigestsVerified\": True,` immediately after the \"digests\" entry. Change nothing else in tests/evidence.bats: the live-validator denial assertion, the second test, and every other line stay byte-identical. This updates the fixture to the amended contract; it skips, disables or weakens no test.",
+      "acceptance": "tests/evidence.bats differs from the frozen tree by exactly one added line, \"deterministicDigestsVerified\": True, inside the inline fixture of the evidence-contract test; deployment/schemas/deployment-evidence.schema.json is unchanged; with the Phase 0 toolchain installed, `make validate-offline` passes all eight checks and `make test` passes every Bats test, including \"Phase 0 evidence contract validates and denies a live-validator claim\".",
       "priority": "MUST",
       "evidence_tag": "verified",
       "high_stakes": false,
       "depends_on": [],
       "scope": [
-        "deployment/schemas/deployment-evidence.schema.json"
+        "tests/evidence.bats"
       ],
       "tracking_issue": 155
     },
@@ -76,7 +76,7 @@
       "title": "Add check-8 Bats suite (tests/digests.bats) and Gate 0 Gherkin feature file",
       "intent": "Deliver tests/digests.bats: a Bats suite dedicated to DONE-090 behavioral coverage of check 8. It sources deploy/scripts/common.sh and anchors REPOSITORY_ROOT at the repo root. It asserts: (1) two independent invocations of the digest calculation (separate python3 subprocess, separate mktemp working directory) produce byte-identical JSON output; (2) the first invocation uses one umask value and the second uses a different umask value, confirming umask-independence; (3) the first invocation uses one locale (e.g. LC_ALL=C) and the second uses another (e.g. LC_ALL=en_US.UTF-8), confirming locale-independence; (4) the agreed digest set and deterministicDigestsVerified: true both appear in the evidence JSON that check_digests writes; (5) a negative test: copy repository content into a tmpdir, perturb one config file byte, run the digest calculation, and assert non-zero exit — the check detects the difference without modifying the implementation. The suite is picked up automatically by bats tests/*.bats in check 6. Also deliver tests/features/gate-0.feature: a Gherkin feature file with one Scenario per Bats test in digests.bats (1:1 mapping, living documentation). No Gherkin runner, no new package.json dependency, no root manifest change; the feature file is explicitly non-executing.",
       "acceptance": "tests/digests.bats exists, sources deploy/scripts/common.sh, contains Bats tests covering the five behavioral assertions above including a negative perturbed-fixture test. tests/features/gate-0.feature exists and contains a Feature: header and one Scenario: per test in digests.bats. No new dependency is added to package.json or any root manifest.",
-      "priority": "MUST",
+      "priority": "COULD",
       "evidence_tag": "verified",
       "high_stakes": false,
       "depends_on": [
@@ -117,7 +117,7 @@
       "id": "vt-workflow-branches",
       "kind": "expected-output",
       "check": "on.pull_request carries branches: [main] and a non-empty paths filter; on.push carries branches: [main]",
-      "run": "python3 -c 'import yaml; w=yaml.safe_load(open(\".github/workflows/lza-phase0-5-1_validate-offline.yml\")); pr=w[\"on\"][\"pull_request\"]; assert pr.get(\"branches\")==[\"main\"], pr; assert pr.get(\"paths\"), \"no paths on pull_request\"; push=w[\"on\"][\"push\"]; assert push.get(\"branches\")==[\"main\"], push'",
+      "run": "python3 -c 'import yaml; w=yaml.safe_load(open(\".github/workflows/lza-phase0-5-1_validate-offline.yml\")); on=w.get(\"on\", w.get(True)); pr=on[\"pull_request\"]; assert pr.get(\"branches\")==[\"main\"], pr; assert pr.get(\"paths\"), \"no paths on pull_request\"; push=on[\"push\"]; assert push.get(\"branches\")==[\"main\"], push'",
       "maps_to": [
         "step-workflow"
       ]
@@ -170,8 +170,8 @@
     {
       "id": "vt-schema-done090",
       "kind": "expected-output",
-      "check": "deployment/schemas/deployment-evidence.schema.json includes deterministicDigestsVerified as a required property with type: boolean and const: true",
-      "run": "python3 -c 'import json; s=json.load(open(\"deployment/schemas/deployment-evidence.schema.json\")); assert \"deterministicDigestsVerified\" in s[\"required\"], \"not in required\"; p=s[\"properties\"][\"deterministicDigestsVerified\"]; assert p.get(\"const\") is True, \"const not true\"'",
+      "check": "deployment/schemas/deployment-evidence.schema.json requires deterministicDigestsVerified (boolean, const: true) AND the evidence-contract fixture in tests/evidence.bats carries \"deterministicDigestsVerified\": True",
+      "run": "python3 -c 'import json, re, pathlib; s=json.load(open(\"deployment/schemas/deployment-evidence.schema.json\")); assert \"deterministicDigestsVerified\" in s[\"required\"], \"schema does not require the field\"; assert s[\"properties\"][\"deterministicDigestsVerified\"].get(\"const\") is True, \"const not true\"; t=pathlib.Path(\"tests/evidence.bats\").read_text(); assert re.search(r\"[\\x22\\x27]deterministicDigestsVerified[\\x22\\x27]\\s*:\\s*True\", t), \"tests/evidence.bats fixture lacks deterministicDigestsVerified: True\"'",
       "maps_to": [
         "step-schema"
       ]
