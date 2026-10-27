@@ -185,3 +185,21 @@ gh aw compile issue-triage-linear --no-check-update --actionlint
 References: [gh-aw custom MCP servers](https://github.github.com/gh-aw/reference/tools/#custom-mcp-servers-mcp-servers),
 [MCP Scripts specification](https://github.github.com/gh-aw/specs/mcp-scripts-specification/),
 [Cognito token endpoint](https://docs.aws.amazon.com/cognito/latest/developerguide/token-endpoint.html).
+
+## Execute a real integration task
+
+Create a GitHub issue with the `agent-task` label and describe the read-only task
+in its body. The label suppresses automatic triage; only an authorized manual
+dispatch with `mode=task` treats its title/body as the task specification.
+
+```sh
+gh aw run issue-triage-linear --repo sunstonesecure-robert/test-turtle-1 --ref main --raw-field issue_number=NUMBER --raw-field mode=task
+```
+
+For a full integration check, require an actual Linear search and inspected card,
+an Artemis `server_info` result, and installation/application of a matching skill
+from the approved repository. The task report marks each criterion passed,
+failed, or blocked. Connection success alone does not pass these criteria.
+Public reports use a Linear identifier and sanitized relevance summary, not
+private card bodies or customer details. Task mode does not label or classify
+issues, modify Linear, or start Artemis jobs.
