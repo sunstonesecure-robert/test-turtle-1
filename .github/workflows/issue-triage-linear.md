@@ -180,15 +180,29 @@ additional instructions. Skills provide subordinate domain guidance.
    result. Additional read calls must use organization/job/file identifiers
    grounded in the task or the selected card and authorized for the caller.
    Do not enumerate unrelated customers to manufacture a passing test.
-5. Post one `## Task report` comment. Include a pass/fail/blocked table for each
-   acceptance criterion, naming the real tool call and its observed outcome.
-   Report the selected Linear identifier and a sanitized explanation of relevance;
-   do not reproduce private card bodies or customer data on this public repository.
-   Record the installed skill path and pinned source commit. Distinguish a
-   successful integration check from reproducing or resolving the card's bug.
-   If any required call or installation failed, report that criterion as blocked
-   or failed; do not call the overall test passed. Do not apply labels or issue types
-   in task mode. Then stop.
+5. This repository is public. Post one comment using ONLY the compact template
+   below. Do not add extra sections, quote card titles/descriptions, or reproduce
+   customer names, example document names, private branch names, infrastructure
+   identifiers, index/bucket names, deployment metadata, or private tool responses.
+   A generic domain description such as "questionnaire processing" is enough to
+   explain relevance. Do not reproduce skill instructions or configuration examples.
+   Record only the allowed Linear identifier, approved skill path/commit, operation
+   names, and pass/fail/blocked observations. A missing or denied operation cannot
+   pass. Task mode must not apply labels or issue types. After the comment, stop.
+
+   ```markdown
+   ## Task report
+
+   | Check | Result | Evidence |
+   |---|---|---|
+   | Linear | PASS / FAIL / BLOCKED | [card identifier only]; [search and read outcomes] |
+   | Skill | PASS / FAIL / BLOCKED | [approved source path]@[commit]; [installed/read/applied outcomes] |
+   | Artemis | PASS / FAIL / BLOCKED | server_info: [response received or sanitized failure category] |
+   | Match | PASS / FAIL / BLOCKED | [one generic, non-customer-specific sentence connecting the task domain to the skill] |
+   | Reproduction | Not attempted / BLOCKED | [generic missing inputs only; no customer or source-document names] |
+
+   Next step: [one focused action using synthetic or explicitly authorized test inputs].
+   ```
 
 ## 0. Discover and install relevant skills
 
