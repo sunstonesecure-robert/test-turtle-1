@@ -4,9 +4,12 @@ import io
 import json
 from pathlib import Path
 import subprocess
+import ssl
+import socket
 import unittest
 from unittest.mock import patch
 import urllib.parse
+import urllib.error
 
 spec = importlib.util.spec_from_file_location('artemis_login', Path(__file__).resolve().parents[2] / 'scripts/mcp/artemis-login.py')
 login = importlib.util.module_from_spec(spec)
@@ -38,6 +41,43 @@ class LoginTest(unittest.TestCase):
         self.assertEqual(params['client_id'], [login.auth.CLIENT_ID])
         self.assertEqual(params['redirect_uri'], [login.CALLBACK])
         self.assertNotIn('client_secret', params)
+
+    def test_transport_diagnostics_hide_raw_error_text(self):
+        cases = [
+            (ssl.SSLCertVerificationError(1, 'secret-fixture'), 'TLS certificate verification'),
+            (socket.gaierror(-2, 'secret-fixture'), 'DNS lookup'),
+            (TimeoutError('secret-fixture'), 'timed out'),
+            (ConnectionRefusedError('secret-fixture'), 'refused'),
+        ]
+        for reason, expected in cases:
+            with self.subTest(expected=expected):
+                with patch.object(login.urllib.request.OpenerDirector, 'open', side_effect=urllib.error.URLError(reason)):
+                    with self.assertRaises(ValueError) as raised:
+                        login.exchange_code('code-fixture', 'verifier-fixture')
+                self.assertIn(expected, str(raised.exception))
+                self.assertNotIn('secret-fixture', str(raised.exception))
+
+    def test_oauth_error_exposes_only_allowlisted_code(self):
+        error = urllib.error.HTTPError(login.auth.TOKEN_ENDPOINT, 400, 'secret-fixture', {},
+            io.BytesIO(b'{"error":"invalid_grant","error_description":"secret-fixture"}'))
+        with patch.object(login.urllib.request.OpenerDirector, 'open', side_effect=error):
+            with self.assertRaises(login.OAuthExchangeError) as raised:
+                login.exchange_code('code-fixture', 'verifier-fixture')
+        self.assertEqual(raised.exception.oauth_error, 'invalid_grant')
+        self.assertNotIn('secret-fixture', str(raised.exception))
+
+    def test_non_json_response_is_diagnosed_without_body(self):
+        with patch.object(login.urllib.request.OpenerDirector, 'open', return_value=io.StringIO('secret-fixture')):
+            with self.assertRaisesRegex(ValueError, 'non-JSON') as raised:
+                login.exchange_code('code-fixture', 'verifier-fixture')
+        self.assertNotIn('secret-fixture', str(raised.exception))
+
+    def test_connection_probe_accepts_only_expected_oauth_rejection(self):
+        with patch.object(login, 'exchange_code', side_effect=login.OAuthExchangeError(400, 'invalid_grant')), contextlib.redirect_stdout(io.StringIO()):
+            login.check_connection()
+        with patch.object(login, 'exchange_code', side_effect=login.OAuthExchangeError(401, 'invalid_client')), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(login.OAuthExchangeError):
+                login.check_connection()
 
     def test_secret_uses_stdin_not_arguments_or_logs(self):
         logs = io.StringIO()

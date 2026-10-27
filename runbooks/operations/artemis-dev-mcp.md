@@ -95,6 +95,36 @@ credentials or the callback URL into chat or issues.
 
 ### Login troubleshooting
 
+If an older helper prints only `Token exchange failed. No credential or response
+body was printed.`, update your clean setup checkout and run the new diagnostic:
+
+```sh
+git pull --ff-only
+python3 scripts/mcp/artemis-login.py --check-connection
+```
+
+This contacts the actual token endpoint with a dummy authorization code. It
+checks Python's TLS/network path without signing in, accessing credentials, or
+changing GitHub secrets. A successful check reports `Connection OK`; then run
+`python3 scripts/mcp/artemis-login.py` again for a fresh browser sign-in. Do not
+reuse an old callback URL or authorization code.
+
+- **TLS certificate verification failed:** for Python installed from python.org
+  on macOS, run `Install Certificates.command` in the matching
+  `/Applications/Python 3.x/` folder. The diagnostic prints the active Python
+  version and executable. Do not modify Apple's system Python. For corporate TLS
+  inspection, use your organization-approved CA configuration. Never disable
+  certificate verification. See [Python's macOS installation guide](https://docs.python.org/3/using/mac.html).
+- **DNS, connection refusal, or timeout:** check the network, VPN, and proxy used
+  by your terminal. Browser sign-in succeeding does not prove Python can contact
+  the token endpoint.
+- **Non-JSON response:** a proxy or unexpected endpoint response may be involved;
+  the helper intentionally does not print the response body.
+- **OAuth `invalid_grant`:** start a fresh sign-in; the code may have expired,
+  been used already, or failed PKCE/callback validation. During
+  `--check-connection` only, this rejection is expected for the dummy code.
+
+
 - **Redirect mismatch:** inspect the client above and its allowed callback URLs.
   The exact URL must be `http://localhost:8765/callback`. Its login configuration
   must allow authorization-code grants and `openid email profile`. Ask the client
