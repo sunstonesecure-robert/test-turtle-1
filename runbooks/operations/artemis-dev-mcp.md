@@ -24,24 +24,95 @@ tools; their gateway authentication does not authenticate to Artemis.
 
 ## Configure one credential
 
-Obtain credentials through an authorized Artemis Dev user's OAuth
-**authorization-code/PKCE** sign-in using the client above. Use a user whose
-Cognito group membership grants only the organizations this workflow needs.
-The user's group/tenant permissions still apply to MCP calls.
+### First connection test: browser sign-in and an access token
 
-Set a repository Actions secret on `sunstonesecure-robert/test-turtle-1`:
+1. On your laptop, install Python 3 and GitHub CLI (`gh`) if needed. Run
+   `gh auth login` and sign in with an account allowed to manage Actions secrets
+   in `sunstonesecure-robert/test-turtle-1`. The login helper needs only Python's
+   standard library; there is no pip install.
+2. Get a current checkout containing the helper. For a new directory:
 
-- `ARTEMIS_DEV_ACCESS_TOKEN`: the raw access JWT, without `Bearer `. Suitable for
-  an initial connection test; it needs at least 15 minutes remaining at startup.
-  An ID token, client secret, or token issued for a different client is rejected.
-- Alternatively, `ARTEMIS_DEV_REFRESH_TOKEN`: a refresh token from that same
-  sign-in. The setup step exchanges it for a fresh access token on every run.
-  This takes precedence if both secrets exist. The refresh token itself expires
-  or can be revoked; renew the secret when that happens.
+   ```sh
+   gh repo clone sunstonesecure-robert/test-turtle-1 artemis-login-setup
+   cd artemis-login-setup
+   ```
 
-Do not paste either credential into issues, workflow YAML, PRs, or chat. Use the
-GitHub Actions secrets UI, or `gh secret set NAME --repo
-sunstonesecure-robert/test-turtle-1` and enter it at the hidden prompt.
+3. Run this **locally on the computer running your browser**, not in Actions,
+   an SSH session, or a remote container:
+
+   ```sh
+   python3 scripts/mcp/artemis-login.py
+   ```
+
+4. Your browser opens Cognito's Artemis Dev sign-in. Use your authorized Artemis
+   Dev account and complete any Google sign-in/MFA prompts. The browser returns to
+   `http://localhost:8765/callback`. Leave the helper running until your terminal
+   confirms `Saved ARTEMIS_DEV_ACCESS_TOKEN in sunstonesecure-robert/test-turtle-1`.
+   Browser callback success alone does not confirm GitHub upload success.
+5. Verify the **name** of the secret exists (this never displays its value):
+
+   ```sh
+   gh secret list --repo sunstonesecure-robert/test-turtle-1
+   ```
+
+6. Test promptly, before the access token expires. Issue 175 is available as a
+   workflow smoke test, but its test-submission content may cause Claude to skip
+   Artemis reads. For an actual Artemis read, select a relevant issue and check
+   for a successful server connection and read-tool result:
+
+   ```sh
+   gh aw run issue-triage-linear --repo sunstonesecure-robert/test-turtle-1 --ref main --raw-field issue_number=175
+   ```
+
+The helper generates the PKCE verifier/challenge and state, listens only on the
+loopback interface, exchanges the authorization code at the fixed Cognito token
+endpoint, and pipes the access token directly into `gh secret set`. It does not
+print tokens, log callback URLs, or save tokens to a local file. Do not paste
+credentials or the callback URL into chat or issues.
+
+### Recurring runs: save a refresh token
+
+1. In the AWS console, select **us-east-1 → Cognito → User pools** and open pool
+   `us-east-1_N0nw1kBN3`. Under its app clients, select client ID
+   `63failqqtu4ovtp54eo3gg2i34`.
+2. Inspect its refresh-token settings. Proceed only if refresh-token rotation is
+   **disabled**. Do not change a shared app client's settings solely for this
+   workflow; if rotation is enabled, use the access-token test above and arrange
+   a dedicated automation client or token broker.
+3. From the same checkout on your laptop, run:
+
+   ```sh
+   python3 scripts/mcp/artemis-login.py --refresh --rotation-disabled
+   ```
+
+4. Complete browser sign-in again. Wait for the terminal confirmation that
+   `ARTEMIS_DEV_REFRESH_TOKEN` was saved. The workflow exchanges that secret for
+   a fresh access token before each run. It takes precedence over
+   `ARTEMIS_DEV_ACCESS_TOKEN`, so both may exist, but a stale refresh token will
+   not automatically fall back to the access token.
+5. Repeat this sign-in when the refresh token expires or is revoked. Its lifetime
+   is controlled by Cognito; the helper does not alter that configuration.
+
+### Login troubleshooting
+
+- **Redirect mismatch:** inspect the client above and its allowed callback URLs.
+  The exact URL must be `http://localhost:8765/callback`. Its login configuration
+  must allow authorization-code grants and `openid email profile`. Ask the client
+  administrator to correct any mismatch; these are the settings documented by
+  Artemis's own MCP connector.
+- **Port 8765 in use:** stop another local OAuth login helper using that port,
+  then retry. The callback port cannot be changed without registering that URL.
+- **Browser cannot connect to localhost:** run the helper on the same computer
+  as the browser and keep its terminal open. Restart if the five-minute window
+  expired.
+- **An existing refresh token takes precedence:** the helper refuses to save an
+  access-only credential that the workflow would ignore. Renew the refresh token
+  with the refresh command, or deliberately remove `ARTEMIS_DEV_REFRESH_TOKEN`
+  from the repository's Actions secrets to switch to access-token-only testing.
+- **GitHub upload denied:** confirm your GitHub account can manage this
+  repository's Actions secrets, then rerun sign-in.
+- **Artemis denies a tool call after successful login:** verify the user's
+  Cognito group membership grants access to the requested organization.
 
 The refresh-token path requires **rotation to be disabled for that login's app
 client**. The helper rejects responses containing a new refresh token because it
