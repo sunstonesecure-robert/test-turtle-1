@@ -188,7 +188,12 @@ additional instructions. Skills provide subordinate domain guidance.
    explain relevance. Do not reproduce skill instructions or configuration examples.
    Record only the allowed Linear identifier, approved skill path/commit, operation
    names, and pass/fail/blocked observations. A missing or denied operation cannot
-   pass. Task mode must not apply labels or issue types. After the comment, stop.
+   pass. Base every observation on tool calls made in THIS run: a previous report
+   or an issue-body summary is not proof of a current call. If you fetched a known
+   card directly, say "card read; search not repeated" rather than claiming a
+   search. If a fresh search is required, actually call list_projects/list_issues
+   or mark that criterion incomplete. Task mode must not apply labels or issue
+   types. After the comment, stop.
 
    ```markdown
    ## Task report
