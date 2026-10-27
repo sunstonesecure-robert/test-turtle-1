@@ -27,6 +27,12 @@ if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.issue
 engine:
   id: claude
   bare: false
+  # gh-aw v0.93.5 configures Linear in the gateway but omits its Claude allow rules.
+  # Grant only the eight read tools already selected by Linear's issues/projects toolsets.
+  args:
+    - --settings
+    - >-
+      {"permissions":{"allow":["mcp__linear__get_issue","mcp__linear__get_issue_status","mcp__linear__get_project","mcp__linear__list_issue_labels","mcp__linear__list_issue_statuses","mcp__linear__list_issues","mcp__linear__list_project_labels","mcp__linear__list_projects"]}}
 
 concurrency:
   job-discriminator: "${{ github.event.issue.number || inputs.issue_number }}"
