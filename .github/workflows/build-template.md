@@ -259,30 +259,44 @@ steps:
   - name: resolve the gate set (reported, so an absent gate cannot read as a passing one)
     id: gates
     run: |
-      echo "ref=${GATES_REF:-${{ github.event.repository.default_branch }}}" >> "$GITHUB_OUTPUT"
+      echo "ref=${GATES_REF:-$DEFAULT_BRANCH}" >> "$GITHUB_OUTPUT"
       echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
     env:
       GATES_REF: ${{ inputs.gates_ref }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
   - name: build-preflight (B1–B9 as applicable — MUST be step 1, fails the run before any agent step)
     # The JSON report is ALSO written to a handoff file under ${RUNNER_TEMP}/gh-aw, which the
     # agent's sandbox mounts read-only at the same path — so the agent can read the gates'
     # verdicts, including the step B3 resolved for the work item, instead of re-deriving them
     # (live, 2026-09-11, run 34545293834: the agent looked for "any preflight handoff file" and
     # found none). `pipefail` keeps a failing preflight failing through the tee.
+    #
+    # EVERY VALUE ARRIVES THROUGH `env:`, NEVER AS AN EXPRESSION IN THE SCRIPT (2026-11-22).
+    # Actions substitutes `${{ }}` into the script text before Bash parses it, so a dispatch
+    # input written inline is shell input. gh-aw v1.x refuses to compile that (CTR-006), which is
+    # how this was found; the dispatcher is the dashboard or an operator, but a gate that runs
+    # before any agent step is the wrong place to rely on who is calling. The array keeps the two
+    # optional flags optional without an unquoted expansion.
     run: |
       set -o pipefail
       mkdir -p "$RUNNER_TEMP/gh-aw/preflight"
-      npx tsx scripts/gates/build-preflight.ts \
-        --plan-ref ${{ inputs.plan_ref }} \
-        --workload ${{ inputs.workload }} \
-        ${{ inputs.chunk && format('--chunk {0}', inputs.chunk) || '' }} \
-        ${{ inputs.unattended == 'true' && '--unattended' || '' }} \
-        --gates-ref ${{ steps.gates.outputs.ref }} \
-        --gates-sha ${{ steps.gates.outputs.sha }} \
-        --repo ${{ github.repository }} --json \
+      args=(--plan-ref "$PLAN_REF" --workload "$WORKLOAD")
+      if [ -n "$CHUNK" ]; then args+=(--chunk "$CHUNK"); fi
+      if [ "$UNATTENDED" = "true" ]; then args+=(--unattended); fi
+      npx tsx scripts/gates/build-preflight.ts "${args[@]}" \
+        --gates-ref "$GATES_REF_RESOLVED" \
+        --gates-sha "$GATES_SHA" \
+        --repo "$REPO" --json \
         | tee "$RUNNER_TEMP/gh-aw/preflight/report.json"
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN_REF: ${{ inputs.plan_ref }}
+      WORKLOAD: ${{ inputs.workload }}
+      CHUNK: ${{ inputs.chunk }}
+      UNATTENDED: ${{ inputs.unattended }}
+      GATES_REF_RESOLVED: ${{ steps.gates.outputs.ref }}
+      GATES_SHA: ${{ steps.gates.outputs.sha }}
+      REPO: ${{ github.repository }}
   # STAGED HERE, RUN AFTER THE FROZEN CHECKOUT (GHI #274, and #107/#265 for the "here").
   # The materializer has to run after the frozen checkout, because `actions/checkout` cleans
   # the workspace and would delete anything vendored before it — but it must be the CURRENT

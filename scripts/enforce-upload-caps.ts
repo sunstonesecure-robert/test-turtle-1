@@ -39,7 +39,13 @@ export const LOCKS = [
  * One embedded upload_artifact config object, raw (`"k":v`) or JSON-escaped (`\"k\":v`).
  * Group 1 = the quote form in use (`"` or `\"`), group 2 = the object body.
  */
-const UPLOAD_CONFIG = /(\\?")upload_artifact\1:\{([^{}]*)\}/g;
+/**
+ * The body may carry an Actions expression (`"retention-days":"${{ vars.X || '30' }}"`, written
+ * by the compiler since gh-aw v1.x). Its braces are not the object's, so they are matched as a
+ * unit — the first version of this pattern excluded every brace, matched nothing on a v1.2.2
+ * lock, and reported that as "no upload_artifact config" while the build carried on.
+ */
+export const UPLOAD_CONFIG = /(\\?")upload_artifact\1:\{((?:[^{}]|\$\{\{[^{}]*\}\})*)\}/g;
 
 export type CapAction = 'injected' | 'updated' | 'unchanged' | 'not-needed';
 
@@ -86,7 +92,13 @@ function main(): void {
     // CRLF-normalize for the same reason enforce-job-timeouts does; write-back is LF.
     const before = readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
     const { text, actions } = enforceUploadCaps(before);
-    const summary = actions.length === 0 ? 'no upload_artifact config' : actions.join(', ');
+    // Every lock this product compiles declares upload-artifact. Finding none means the pattern
+    // no longer reads what the compiler writes — which is the cap silently not being enforced,
+    // not a workflow that needs no cap.
+    if (actions.length === 0) {
+      throw new Error(`${basename(file)}: no upload_artifact config found — the compiler's output shape changed; fix UPLOAD_CONFIG before trusting this lock`);
+    }
+    const summary = actions.join(', ');
     console.log(`${basename(file)}: upload_artifact "max" mirrored from "max-uploads" (${summary})`);
     if (text !== before) writeFileSync(path, text);
   }
