@@ -39,5 +39,6 @@
       "description": "When no operator name is configured, the greeting falls back to \"Hello, operator!\"",
       "step_id": "step-hello"
     }
-  ]
+  ],
+  "second_human_review": "deferred"
 }
