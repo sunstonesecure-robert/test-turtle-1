@@ -1,0 +1,815 @@
+{
+  "$ref": "#/$defs/ControllerOutput",
+  "$defs": {
+    "EvidenceRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "\\S"
+        },
+        "ref": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "retry_after_seconds": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        }
+      },
+      "required": [
+        "kind",
+        "ref"
+      ],
+      "additionalProperties": false
+    },
+    "Fact": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "known"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "array",
+                  "items": {}
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {}
+                }
+              ]
+            },
+            "observed_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "source": {
+              "$ref": "#/$defs/EvidenceRef/properties/kind"
+            }
+          },
+          "required": [
+            "state",
+            "value",
+            "observed_at",
+            "source"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unknown"
+            },
+            "reason": {
+              "$ref": "#/$defs/EvidenceRef/properties/kind"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/EvidenceRef"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "state",
+            "reason",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "PolicySnapshot": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "repository_id": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "revision": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "sha256": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "off",
+            "observe",
+            "enforce"
+          ]
+        },
+        "loops": {
+          "type": "object",
+          "properties": {
+            "execution": {
+              "$ref": "#/$defs/PolicySnapshot/properties/mode"
+            },
+            "repair": {
+              "$ref": "#/$defs/PolicySnapshot/properties/mode"
+            },
+            "remediation": {
+              "$ref": "#/$defs/PolicySnapshot/properties/mode"
+            },
+            "optimization": {
+              "$ref": "#/$defs/PolicySnapshot/properties/mode"
+            }
+          },
+          "required": [
+            "execution",
+            "repair",
+            "remediation",
+            "optimization"
+          ],
+          "additionalProperties": false
+        },
+        "workloads": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "maxItems": 100
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "revision",
+              "build",
+              "remediation"
+            ]
+          },
+          "maxItems": 4
+        },
+        "episode_limits": {
+          "type": "object",
+          "properties": {
+            "generations": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "agent_aic_cap": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "detector_aic_cap": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "episode_aic_basis": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "tool_turns": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "active_compute_minutes": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "deadline_hours": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "transport_retries": {
+              "$ref": "#/$defs/EvidenceRef/properties/status"
+            },
+            "identical_failure_stop": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            }
+          },
+          "required": [
+            "generations",
+            "agent_aic_cap",
+            "detector_aic_cap",
+            "episode_aic_basis",
+            "tool_turns",
+            "active_compute_minutes",
+            "deadline_hours",
+            "transport_retries",
+            "identical_failure_stop"
+          ],
+          "additionalProperties": false
+        },
+        "daily_aic": {
+          "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+        },
+        "artifact_retention_days": {
+          "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+        },
+        "recovery_window_minutes": {
+          "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+        },
+        "tool_manifest_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "profile_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "authority_record_ref": {
+          "$ref": "#/$defs/EvidenceRef"
+        },
+        "approved_by": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "approved_at": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        }
+      },
+      "required": [
+        "schema_version",
+        "repository_id",
+        "revision",
+        "sha256",
+        "mode",
+        "loops",
+        "workloads",
+        "kinds",
+        "episode_limits",
+        "daily_aic",
+        "artifact_retention_days",
+        "recovery_window_minutes",
+        "tool_manifest_digest",
+        "authority_record_ref",
+        "approved_by",
+        "approved_at"
+      ],
+      "additionalProperties": false
+    },
+    "EpisodeCheckpoint": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "episode_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "repository_id": {
+          "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+        },
+        "workload": {
+          "$ref": "#/$defs/PolicySnapshot/properties/workloads/items"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "plan",
+            "revision",
+            "build",
+            "remediation"
+          ]
+        },
+        "work_item": {
+          "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+        },
+        "step_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "plan_ref": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "plan_sha": {
+          "type": "string",
+          "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+        },
+        "request_actor": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "automation_principal": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "revision": {
+          "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+        },
+        "parent_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef/properties/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "context_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "running",
+            "validating",
+            "ready_to_publish",
+            "waiting_for_review",
+            "waiting_for_checks",
+            "waiting_for_merge",
+            "verifying_merge",
+            "retry_wait",
+            "action_required",
+            "preparing_prototype",
+            "diagnosing",
+            "waiting_for_authority",
+            "waiting_for_harness",
+            "waiting_for_budget",
+            "searching",
+            "deploying",
+            "awaiting_deployment",
+            "conforming",
+            "complete",
+            "stopped",
+            "superseded"
+          ]
+        },
+        "generation_count": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "current_generation_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "not_before": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        },
+        "deadline": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        },
+        "active_compute_ms": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "reserved_aic": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "settled_aic": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "failure_fingerprint": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "unchanged_failure_count": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "pending_effect_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "last_outcome": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "next_action": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "schema_version",
+        "episode_id",
+        "repository_id",
+        "workload",
+        "kind",
+        "plan_ref",
+        "plan_sha",
+        "request_actor",
+        "automation_principal",
+        "revision",
+        "parent_digest",
+        "policy_digest",
+        "context_digest",
+        "status",
+        "generation_count",
+        "deadline",
+        "active_compute_ms",
+        "reserved_aic",
+        "settled_aic",
+        "unchanged_failure_count",
+        "last_outcome",
+        "reason_code",
+        "next_action",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "EffectIntent": {
+      "type": "object",
+      "properties": {
+        "effect_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "dispatch",
+            "publish",
+            "merge",
+            "deploy",
+            "poll_deploy",
+            "verify",
+            "record"
+          ]
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": {}
+        },
+        "generation": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/EvidenceRef/properties/kind"
+            },
+            "ordinal": {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            "feedback_digest": {
+              "$ref": "#/$defs/EvidenceRef/properties/sha256"
+            },
+            "prior_candidate_digest": {
+              "$ref": "#/$defs/EvidenceRef/properties/sha256"
+            }
+          },
+          "required": [
+            "id",
+            "ordinal",
+            "feedback_digest",
+            "prior_candidate_digest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "effect_id",
+        "kind"
+      ],
+      "additionalProperties": false
+    },
+    "Decision": {
+      "type": "object",
+      "properties": {
+        "episode_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "workload": {
+          "$ref": "#/$defs/PolicySnapshot/properties/workloads/items"
+        },
+        "mode": {
+          "$ref": "#/$defs/PolicySnapshot/properties/mode"
+        },
+        "status": {
+          "$ref": "#/$defs/EpisodeCheckpoint/properties/status"
+        },
+        "reason_code": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "next_action": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "not_before": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        },
+        "effects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EffectIntent"
+          },
+          "maxItems": 100
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 100
+        },
+        "unknown": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef/properties/kind"
+          },
+          "maxItems": 100
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        },
+        "policy_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidenceRef/properties/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "status",
+        "reason_code",
+        "next_action",
+        "effects",
+        "evidence",
+        "unknown",
+        "observed_at",
+        "policy_digest"
+      ],
+      "additionalProperties": false
+    },
+    "Summary": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "action_required": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "waiting": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "proposed_effects": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "executed_effects": {
+          "type": "number",
+          "const": 0
+        },
+        "unknown_facts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef/properties/kind"
+          }
+        },
+        "cost": {
+          "type": "string",
+          "const": "unknown"
+        }
+      },
+      "required": [
+        "total",
+        "action_required",
+        "waiting",
+        "proposed_effects",
+        "executed_effects",
+        "unknown_facts",
+        "cost"
+      ],
+      "additionalProperties": false
+    },
+    "WaveProof": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "result": {
+          "type": "string",
+          "enum": [
+            "pass",
+            "fail",
+            "incomplete",
+            "error"
+          ]
+        },
+        "claim_scope": {
+          "type": "string",
+          "enum": [
+            "protocol",
+            "effectiveness",
+            "release_cycle"
+          ]
+        },
+        "wave_id": {
+          "type": "string",
+          "pattern": "^W[0-8]$"
+        },
+        "tracer_id": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "source_sha": {
+          "$ref": "#/$defs/EpisodeCheckpoint/properties/plan_sha"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "candidate_digest": {
+          "$ref": "#/$defs/EvidenceRef/properties/sha256"
+        },
+        "command": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "started_at": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        },
+        "completed_at": {
+          "$ref": "#/$defs/Fact/anyOf/0/properties/observed_at"
+        },
+        "boundaries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "component": {
+                "$ref": "#/$defs/EvidenceRef/properties/kind"
+              },
+              "actual_or_simulated": {
+                "type": "string",
+                "enum": [
+                  "actual",
+                  "simulated"
+                ]
+              },
+              "fixture_digest": {
+                "$ref": "#/$defs/EvidenceRef/properties/sha256"
+              },
+              "initiated_by": {
+                "$ref": "#/$defs/EvidenceRef/properties/kind"
+              }
+            },
+            "required": [
+              "component",
+              "actual_or_simulated"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 100
+        },
+        "gate_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "check": {
+                "$ref": "#/$defs/EvidenceRef/properties/kind"
+              },
+              "first": {
+                "$ref": "#/$defs/EvidenceRef/properties/kind"
+              },
+              "after_repair": {
+                "$ref": "#/$defs/EvidenceRef/properties/kind"
+              },
+              "failing_input": {
+                "$ref": "#/$defs/EvidenceRef/properties/kind"
+              },
+              "fixture_digest": {
+                "$ref": "#/$defs/EvidenceRef/properties/sha256"
+              }
+            },
+            "required": [
+              "check",
+              "first",
+              "after_repair",
+              "failing_input"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100
+        },
+        "actual_model_calls": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "simulated_generations": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "actual_effects": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "simulated_effects": {
+          "$ref": "#/$defs/EvidenceRef/properties/status"
+        },
+        "receipts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "maxItems": 100
+        },
+        "operator_outcome": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        },
+        "next_action": {
+          "$ref": "#/$defs/EvidenceRef/properties/kind"
+        }
+      },
+      "required": [
+        "schema_version",
+        "result",
+        "claim_scope",
+        "wave_id",
+        "tracer_id",
+        "source_sha",
+        "policy_digest",
+        "input_digest",
+        "candidate_digest",
+        "command",
+        "exit_code",
+        "started_at",
+        "completed_at",
+        "boundaries",
+        "gate_results",
+        "actual_model_calls",
+        "simulated_generations",
+        "actual_effects",
+        "simulated_effects",
+        "receipts",
+        "operator_outcome",
+        "next_action"
+      ],
+      "additionalProperties": false
+    },
+    "ControllerOutput": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "number",
+          "const": 1
+        },
+        "mode": {
+          "$ref": "#/$defs/PolicySnapshot/properties/mode"
+        },
+        "repository_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicySnapshot/properties/repository_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Decision"
+          }
+        },
+        "summary": {
+          "$ref": "#/$defs/Summary"
+        }
+      },
+      "required": [
+        "schema_version",
+        "mode",
+        "repository_id",
+        "decisions",
+        "summary"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://agentic-turtles.dev/schemas/agent-loop.schema.json",
+  "title": "Agent loop observe contracts"
+}

@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto';
 import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { resolveCurrent, slugFromPlanRef, tagExists, tagTargetSha, tryReadPlanAtRef, freezeCompletion, freezeIncompleteSentence } from '../../../dashboard/lib/github/plans';
+import { getApprovalRecord } from '../../../dashboard/lib/github/approval';
 import { getWorkload } from '../../../dashboard/lib/github/workloads';
 import { getChunk, findIntentConfirmation } from '../../../dashboard/lib/github/chunks';
 import { errorMessage, errorStatus } from '../../../dashboard/lib/github/errors';
+import { PLAN_TAG_RULESET } from './readiness';
 import { CONTRADICTION_LABEL } from '../../../dashboard/lib/github/labels';
 import { ConfirmationRecord, Ledger, Legacy } from '../../../schemas/confirmation';
 import type { PlanStep } from '../../../schemas/plan';
@@ -30,11 +32,149 @@ import { readTextAtRef } from './repo-read';
  *       already governs what they were dispatched on
  */
 
+/**
+ * Is the frozen tag still on the commit that was approved? (GHI #318)
+ *
+ * A frozen tag IS the official plan, and B1, B9 and the build itself all read its
+ * CURRENT target. So a tag that was moved — any credential with Contents write can,
+ * and a developer's `git push --force --tags` is the likeliest way — silently became
+ * the official version, and every check passed because each one followed the tag.
+ * The freeze refuses a tag at the wrong commit only at freeze time.
+ *
+ * `init` now installs a tag ruleset that blocks the move. This is the second check,
+ * for where that ruleset is not there: a private repository on a plan without
+ * rulesets, a target not yet re-initialized, a ruleset somebody disabled. It runs on
+ * every preflight rather than only "when rulesets are absent" — asking whether the
+ * protection is on would need a second read that can itself be wrong, while this asks
+ * the question the protection exists to answer.
+ *
+ * THE APPROVAL IS THE MERGE (FR-006): the pull request from `plan/<slug>/v<N>` into
+ * `main`, and the record of it is `getApprovalRecord`. Base `main` is part of the
+ * match, the same read `approvalPrMerged` makes — a merge of that branch into any
+ * other branch is not an approval, and counting one would let a tag be "approved"
+ * onto a commit no required check ever saw.
+ *
+ * THREE ANSWERS, kept apart (ADR-0007's rule: "nothing was compared" is not "compared
+ * and equal"):
+ *   `approved`   the tag is on the merge commit of a merged approval pull request.
+ *   `moved`      there is a merged approval for this version and the tag is somewhere
+ *                else. Refused, naming both commits.
+ *   `unrecorded` no merged approval pull request for this version was found, so there
+ *                was nothing to compare with. NOT refused here, and said out loud
+ *                instead: B1 passes carrying this sentence, so a reader of the report
+ *                sees that the comparison did not happen rather than a silent green.
+ *                It is not a refusal because the absence of a pull-request record is
+ *                not evidence the tag moved — and the tag an attacker MOVES still has
+ *                its version's approval on record, which is the case this catches. A
+ *                tag created by hand for a version nobody approved is caught by the
+ *                completion check below it in B1 (no resolved review names the ref).
+ *   `unreadable` the credential was refused the pull-request read (403), so whether an
+ *                approval is on record is itself not known. A FOURTH answer and not
+ *                `unrecorded`, which would claim "no approval was found" about a list
+ *                nobody was allowed to see (review of PR #385). It is the answer the
+ *                build job's own token gave on every private repository — the job held
+ *                no `pull-requests` scope — which is exactly where rulesets can be
+ *                absent and this comparison is the only protection. The build workflow
+ *                now grants the scope, but a tag frozen before that carries its own
+ *                copy of the workflow and re-init cannot reach it, so the answer has to
+ *                be reportable: thrown, it took the whole preflight report down with a
+ *                raw API error, on a plan nothing could repair. Same disposition as
+ *                `unrecorded` — said in B1's detail, not refused — and the same open
+ *                question. Any other failed read (5xx, network) is still an error.
+ *
+ * THE RUN'S OWN COMMIT (`runSha`, Codex on PR #385). A dispatched run is pinned at
+ * dispatch: its workflow file comes from the commit the tag named THEN (`GITHUB_SHA`),
+ * while everything above reads where the tag points NOW. A tag moved, dispatched on,
+ * and put back before this read would pass every line here with the run still executing
+ * the moved commit's workflow. So when the caller knows the run's commit it is compared
+ * with the tag first, and a difference is a refusal — it needs no approval record, so
+ * it holds under `unrecorded` and `unreadable` as well. With the tag then compared with
+ * the approval, the run's commit is the approved one by both steps together.
+ * What this cannot do: if the moved commit carries a DIFFERENT workflow file, that file
+ * decides whether this check runs at all — nothing inside a run can vouch for the
+ * workflow that started it. That case is the ruleset's to prevent, not this function's.
+ */
+export type FrozenTagApproval =
+  | { verdict: 'approved' }
+  | { verdict: 'moved'; detail: string }
+  | { verdict: 'unrecorded'; detail: string }
+  | { verdict: 'unreadable'; detail: string };
+
+export async function checkFrozenTagIsTheApprovedCommit(
+  gh: Octokit,
+  repo: RepoRef,
+  planRef: string,
+  /** the commit this run was dispatched on (`GITHUB_SHA` of a run dispatched on the
+   *  tag). Omitted where there is no such run: the buildability scan, a verify run. */
+  runSha?: string,
+): Promise<FrozenTagApproval> {
+  const target = await tagTargetSha(gh, repo, planRef);
+  if (target === null) return { verdict: 'moved', detail: `tag ${planRef} does not exist` };
+  if (runSha !== undefined && runSha !== target) {
+    return {
+      verdict: 'moved',
+      detail:
+        `this run was started on commit ${runSha.slice(0, 8)}, but ${planRef} now points at ${target.slice(0, 8)}. ` +
+        'The tag was moved between the dispatch and this check, so the run is executing a commit the tag no longer names. ' +
+        `Nothing was built. Check which commit was approved for ${planRef} before dispatching again.`,
+    };
+  }
+  const approvals: { number: number; mergeSha: string }[] = [];
+  try {
+    const closed = await gh.paginate(gh.pulls.list, {
+      ...repo,
+      state: 'closed',
+      head: `${repo.owner}:${planRef}`,
+      base: 'main',
+      per_page: 100,
+    });
+    for (const pr of closed) {
+      if (pr.merged_at === null || pr.merged_at === undefined) continue;
+      // Checked here as well as asked for in the query: the filter is what makes a merge
+      // into some other branch not count, so it is not left to a query parameter alone.
+      if (pr.base.ref !== 'main' || pr.head.ref !== planRef) continue;
+      const record = await getApprovalRecord(gh, repo, pr.number);
+      if (record) approvals.push({ number: pr.number, mergeSha: record.mergeSha });
+    }
+  } catch (error: unknown) {
+    if (errorStatus(error) !== 403) throw error;
+    return {
+      verdict: 'unreadable',
+      detail:
+        `${planRef} could not be compared with its approval: this run's credential was refused when it asked for the ` +
+        `repository's pull requests (${errorMessage(error)}), so nothing confirms the tag still points at the commit that was approved. ` +
+        'The build workflow needs `pull-requests: read`; a plan frozen before the workflow had it keeps the older copy, and gets it with its next approved version.',
+    };
+  }
+  if (approvals.some((a) => a.mergeSha === target)) return { verdict: 'approved' };
+  if (approvals.length === 0) {
+    return {
+      verdict: 'unrecorded',
+      detail:
+        `${planRef} could not be compared with its approval: no merged approval pull request for that version ` +
+        `(from branch ${planRef} into main) was found, so nothing confirms the tag still points at the commit that was approved`,
+    };
+  }
+  const approved = approvals.map((a) => `${a.mergeSha.slice(0, 8)} (pull request #${a.number})`).join(', ');
+  return {
+    verdict: 'moved',
+    detail:
+      `${planRef} points at ${target.slice(0, 8)}, not at the commit its approval merged: ${approved}. ` +
+      'The tag was moved after the plan was frozen, so what it names is no longer what was approved. ' +
+      'Put it back on the approved commit (delete the tag, then re-run the plan-post-merge workflow for that pull request), or propose and approve a new version. ' +
+      `Where the "${PLAN_TAG_RULESET}" ruleset is active it refuses that deletion for everyone, administrators included: ` +
+      'disable it under Settings → Rules → Rulesets first, restore the tag, then re-run `npm run init`, which switches it back on.',
+  };
+}
+
 export async function checkB1FrozenCurrent(
   gh: Octokit,
   repo: RepoRef,
   planRef: string,
   slug: string,
+  /** the commit this run was dispatched on, when it was dispatched on the tag — see
+   *  `checkFrozenTagIsTheApprovedCommit`. */
+  runSha?: string,
 ): Promise<GateResult> {
   if (!(await tagExists(gh, repo, planRef))) {
     return { id: 'B1', status: 'fail', requirement: 'FR-007', detail: `tag ${planRef} does not exist` };
@@ -42,6 +182,13 @@ export async function checkB1FrozenCurrent(
   const current = await resolveCurrent(gh, repo, slug);
   if (current !== planRef) {
     return { id: 'B1', status: 'fail', requirement: 'FR-007', detail: `official version is ${current ?? 'unset (nothing frozen)'}, not ${planRef}` };
+  }
+  // The newest tag is only the official version while it is still on the commit that
+  // was approved (GHI #318). Before the completion check: a moved tag is a different
+  // plan, and whether "its" freeze finished is then a question about the wrong thing.
+  const approval = await checkFrozenTagIsTheApprovedCommit(gh, repo, planRef, runSha);
+  if (approval.verdict === 'moved') {
+    return { id: 'B1', status: 'fail', requirement: 'FR-007', detail: approval.detail };
   }
   // The tag alone is not the whole freeze (GHI #212; review of PR #214): the work
   // items are brought to this version's steps AFTER the tag, and the break is
@@ -52,7 +199,12 @@ export async function checkB1FrozenCurrent(
   if (!completion.complete) {
     return { id: 'B1', status: 'fail', requirement: 'FR-007', detail: freezeIncompleteSentence(planRef) };
   }
-  return { id: 'B1', status: 'pass', requirement: 'FR-007' };
+  return {
+    id: 'B1',
+    status: 'pass',
+    requirement: 'FR-007',
+    ...(approval.verdict === 'unrecorded' || approval.verdict === 'unreadable' ? { detail: approval.detail } : {}),
+  };
 }
 
 export async function checkB2PlanRevalidates(gh: Octokit, repo: RepoRef, planRef: string): Promise<GateResult> {

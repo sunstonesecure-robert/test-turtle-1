@@ -1,6 +1,5 @@
 import { createClient } from '../../dashboard/lib/github/client';
-import { getApprovalRecord } from '../../dashboard/lib/github/approval';
-import { freezeApprovedPlan, parsePlanRef, readPlanAtRef } from '../../dashboard/lib/github/plans';
+import { freezeMergedApproval } from '../../dashboard/lib/github/approval-authority';
 import { errorMessage } from '../../dashboard/lib/github/errors';
 
 /**
@@ -8,7 +7,29 @@ import { errorMessage } from '../../dashboard/lib/github/errors';
  * single writer). Reads the merged approval PR, derives slug/version from the
  * head branch, and performs tag + andon:resolved — the tag IS the official
  * version (derived, 2026-07-11 GHI #44); nothing is pushed to main.
+ *
+ * A MERGE ALONE FREEZES NOTHING (GHI #319). The freeze happens only when a person
+ * with write access reviewed the exact merged commit — see
+ * dashboard/lib/github/approval-authority.ts. A merge without that review exits
+ * non-zero with the reason, which is also written on the plan's review; recording
+ * the review and re-running this workflow completes it.
+ *
+ * OPERATOR_SIGN_IN_APP_ID (a repository Actions variable) names the dashboard's
+ * operator sign-in App. It is needed only for a decision the pull request's own
+ * author recorded while working alone; unset, such a decision cannot be checked and
+ * is refused. An approval by a second person needs no configuration.
  */
+
+/** The sign-in App id, or null when unset. A value that is not an id is a fault. */
+function signInAppId(): number | null {
+  const raw = (process.env.OPERATOR_SIGN_IN_APP_ID ?? '').trim();
+  if (raw === '') return null;
+  if (!/^[1-9]\d{0,15}$/.test(raw)) {
+    console.error('OPERATOR_SIGN_IN_APP_ID must be the numeric App ID of the operator sign-in App');
+    process.exit(2);
+  }
+  return Number(raw);
+}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -30,36 +51,32 @@ async function main(): Promise<void> {
   const repo = { owner, repo: repoName };
   const gh = createClient();
 
-  const { data: pr } = await gh.pulls.get({ ...repo, pull_number: Number(prArg) });
-  const head = pr.head.ref;
-  // ONE parser for the ref grammar (T279). This used to carry its own, looser
-  // `[a-z0-9-]+` capture — the very duplication `slugFromPlanRef`'s docblock records as
-  // removed — which read `plan/-demo/v1` as the slug `-demo`. It would then have cut a
-  // frozen tag naming a slug the namespace readers answer null for, so D5 would reserve
-  // all of `.github/**` for that workload and D1 would refuse the deliverable outright.
-  // Fail-closed, but two parsers for one grammar is how a gate and a view come to
-  // disagree about which workload a run belongs to — and the namespace decision now
-  // rests on this grammar.
-  const m = parsePlanRef(head);
-  if (!m || !pr.merged_at) {
-    console.log(`not an approval merge (head=${head}, merged=${Boolean(pr.merged_at)}) — nothing to do`);
+  const result = await freezeMergedApproval(gh, repo, Number(prArg), { signInAppId: signInAppId() });
+  if (result.outcome === 'not_an_approval') {
+    console.log(`not an approval merge (${result.detail}) — nothing to do`);
     return;
   }
-  const record = await getApprovalRecord(gh, repo, Number(prArg));
-  if (!record) throw new Error(`PR #${prArg} has no approval record`);
-  const plan = await readPlanAtRef(gh, repo, head);
-
-  const { tagRef, reconciled } = await freezeApprovedPlan(gh, repo, {
-    slug: m.slug,
-    version: m.version,
-    mergeSha: record.mergeSha,
-    andonIssue: plan.andon_issue,
-    approver: record.approver,
-    approvedAt: record.approvedAt,
-  });
-  // NOT A GITHUB MENTION — a console line in the CLI's main(), captured only as job-log
-  // text. The frozen TAG MESSAGE this reports is a separate write, guarded in plans.ts.
-  console.log(`frozen ${tagRef} — approver @${record.approver} at ${record.approvedAt}`);
+  if (result.outcome === 'refused') {
+    console.error(
+      result.alreadyFrozen
+        ? `PR #${prArg} was merged, but ${result.reason}. This version was already frozen by an earlier run; ` +
+            'that frozen version is unchanged and this run did nothing.'
+        : `PR #${prArg} was merged, but ${result.reason}. Nothing was frozen.` +
+            (result.noted ? ` The reason and what to do next are on review #${result.andonIssue}.` : '') +
+            (result.code === 'merged_plan_differs'
+              ? ' Re-running will not change this: re-open the plan as a new version.'
+              : ' Record the approval of that exact commit, then re-run this workflow.'),
+    );
+    process.exit(1);
+  }
+  const { tagRef, reconciled, record } = result;
+  // A console line in the CLI's main(), captured only as job-log text. The frozen TAG
+  // MESSAGE this reports is a separate write, guarded in plans.ts.
+  console.log(
+    `frozen ${tagRef} — approved by ${record.approver.login} at ${record.approvedAt} ` +
+      `(${record.basis === 'second_person_review' ? 'approving review' : "own decision; second person's review deferred"} ` +
+      `${record.reviewId} of ${record.headSha}); merged by ${record.mergedBy ?? 'an account GitHub did not report'}`,
+  );
   // The items this version tracks now mirror ITS steps (GHI #212) — say which moved.
   for (const r of reconciled) {
     console.log(

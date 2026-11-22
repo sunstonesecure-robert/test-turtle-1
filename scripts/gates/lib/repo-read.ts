@@ -69,6 +69,25 @@ export async function readTextAtRef(gh: Octokit, repo: RepoRef, path: string, re
 }
 
 /** The same read, with "could not find out" as its own answer. Never throws. */
+/**
+ * The ref that names a FROZEN plan's tag and nothing else (GHI #303).
+ *
+ * A plan ref's bare name, `plan/<slug>/v<N>`, is the name of TWO refs once a version is
+ * approved: the tag the freeze cuts at the approval merge, and the approval branch it was
+ * proposed on, which nothing deletes. GitHub resolves a bare name as a branch FIRST. The
+ * branch was cut before the approval merged, so it can carry older machinery than the
+ * tag, and a re-opened plan (cut from the previous tag) always does. Reading the build
+ * workflow by the bare name made every re-open read as "Cannot be built" for as long as
+ * its approval branch existed (live: test-turtle-1, plan/lza-phase0-5-1/v2, 2026-09-23).
+ *
+ * `refs/tags/<name>` is unambiguous and the contents API accepts it (checked live the
+ * same day). Use it for any read of what a frozen version CONTAINS. A plan under review
+ * lives only on its branch, so its readers keep the bare name.
+ */
+export function frozenTagRef(planRef: string): string {
+  return planRef.startsWith('refs/') ? planRef : `refs/tags/${planRef}`;
+}
+
 export async function readFileAtRef(gh: Octokit, repo: RepoRef, path: string, ref: string): Promise<FileAtRef> {
   try {
     const { data } = await gh.repos.getContent({ ...repo, path, ref });

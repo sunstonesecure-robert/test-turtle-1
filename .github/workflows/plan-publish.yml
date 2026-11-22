@@ -35,8 +35,14 @@ name: plan-publish
 # and the break stood with no plan branch and no header: the exact dead end PR #125 describes.
 # The conclusion is not the signal; the artifact is. This job now runs on `success` OR `failure`
 # and lets the probe below decide: a `plan.json` artifact means there is something to publish
-# (validated untrusted, as always); none means the agent did not finish, and the job says so and
-# exits clean rather than red — a failed agent run is already red on its own.
+# (validated untrusted, as always); none means there is nothing to publish, and the job says so
+# where the operator is looking and exits clean rather than red — a failed agent run is already
+# red on its own.
+# NO plan.json HAS TWO CAUSES, AND THE PROBE CANNOT TELL THEM APART (GHI #316). Threat detection
+# is compiled in blocking mode: a run it stops concludes `failure` with nothing applied, which
+# from the artifact listing looks exactly like an agent that gave up. So the probe reports only
+# what it sees (`no-artifact`) and the reporter step reads the run's own `detection` job before
+# it writes a word — "the agent did not finish" is no longer said by anything that does not know it.
 # WHY `workflow_dispatch`. GitHub emits no `workflow_run` event for a re-run, and a publish that
 # was skipped cannot be replayed — so the operator can ask for one by run id (the id is in the
 # Andon's footer). Untrusted input: digits only, read through env, never interpolated into a script.
@@ -117,7 +123,7 @@ jobs:
               echo "::notice::run $PP_RUN_ID's plan.json artifact has EXPIRED (GitHub's artifact retention) — nothing can be published from it; re-dispatch plan-propose for the workload and, if a headerless Andon still stands for it, withdraw that break first"
             else
               echo "reason=no-artifact" >> "$GITHUB_OUTPUT"
-              echo "::notice::run $PP_RUN_ID uploaded no plan.json artifact (live artifacts: ${live:-none}) — the agent did not finish, so there is nothing to publish; that run's own failure is the record"
+              echo "::notice::run $PP_RUN_ID uploaded no plan.json artifact (live artifacts: ${live:-none}) — there is nothing to publish. The next step reads that run's safety check to say why, and records it where the operator will see it"
             fi
             exit 0
           fi

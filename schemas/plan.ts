@@ -171,6 +171,19 @@ export const PlanDoc = z
      * here would retroactively refuse every plan that could not have had it.
      */
     state_transitions: z.array(StateTransition).optional(),
+    /**
+     * Whether approving this plan needs a second person (GHI #319). OPTIONAL, and
+     * absent reads as `required` — every plan frozen before this field existed
+     * carries none, and none of them said a second review was deferred.
+     *
+     * `deferred` is the operator's recorded single-operator policy: the person who
+     * opened the approval pull request may also be the one who approves it, by a
+     * comment review of the exact commit plus a consent recorded through the
+     * dashboard sign-in, because GitHub refuses an author's approving review. It is
+     * part of the bytes that person consents to, and it is carried into the approval
+     * record. It never stands for a second person's review.
+     */
+    second_human_review: z.enum(['required', 'deferred']).optional(),
   })
   .strict()
   /**

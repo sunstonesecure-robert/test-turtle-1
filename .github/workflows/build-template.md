@@ -29,6 +29,10 @@ on:
 permissions:
   contents: read
   issues: read
+  pull-requests: read # build-preflight B1 compares the frozen tag with the merge commit of
+  #   its approval pull request (GHI #318). Without this the read is a 403 on every
+  #   PRIVATE repository — where rulesets can be absent and that comparison is the only
+  #   thing protecting the tag — and the check reports that it compared nothing.
   checks: read # agent job is read-only (gh-aw strict mode); vt-<id> check runs are
   #   emitted by templates/workflows/vt-report.yml — a SEPARATE deterministic
   #   workflow_run workflow, not a step in this job: a step here would need
@@ -62,6 +66,13 @@ safe-outputs:
   create-issue:
     title-prefix: "missing-data: "
   upload-artifact:
+  # BLOCKING, NOT WARNING (GHI #316). gh-aw's default lets a flagged run through with a caution
+  # label: the detection job "succeeds", so the safe_outputs gate on its result stops nothing.
+  # `false` makes a flagged run - or a detector that could not run - FAIL the detection job, and
+  # nothing the agent produced is applied. tests/unit/workflow-detection-blocking.test.ts pins this
+  # in the source and in the compiled lock.
+  threat-detection:
+    continue-on-error: false
 network: defaults
 # NODE 24 FOR THE GATE TOOLCHAIN, AND ASKING FOR IT IN `steps:` IS WHAT DELETED IT
 # (Codex on PR #172).

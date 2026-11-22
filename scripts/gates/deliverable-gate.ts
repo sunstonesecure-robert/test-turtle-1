@@ -2,7 +2,9 @@ import type { Octokit } from '@octokit/rest';
 import { createClient, type RepoRef } from '../../dashboard/lib/github/client';
 import { errorMessage, errorStatus } from '../../dashboard/lib/github/errors';
 import { listPullRequestPaths } from '../../dashboard/lib/github/builds';
+import { HeadMovedError, type PinnedHead } from './lib/pinned-head';
 import { slugFromPlanRef } from '../../dashboard/lib/github/plans';
+import { frozenTagRef } from './lib/repo-read';
 import { ApiUnavailableError, cliMain, printReport, refusalDetail, runGateCatalogue, UsageError, type GateReport } from './lib/runner';
 import { DELIVERABLE_CATALOGUE } from './lib/catalogue';
 import {
@@ -83,7 +85,8 @@ export async function readExecutorConfig(
   planRef: string,
 ): Promise<string | null> {
   try {
-    const { data } = await gh.repos.getContent({ ...repo, path: `executors/${executorId}.yml`, ref: planRef });
+    // The frozen TAG's executor config, not a same-named approval branch's (GHI #303).
+    const { data } = await gh.repos.getContent({ ...repo, path: `executors/${executorId}.yml`, ref: frozenTagRef(planRef) });
     if (Array.isArray(data) || !('content' in data)) return null;
     return Buffer.from(data.content, 'base64').toString('utf8');
   } catch (error: unknown) {
@@ -129,15 +132,29 @@ export async function readSubjectWorkflowFiles(
   return out;
 }
 
-export async function deliverableGate(gh: Octokit, repo: RepoRef, prNumber: number): Promise<GateReport> {
+export async function deliverableGate(
+  gh: Octokit,
+  repo: RepoRef,
+  prNumber: number,
+  /**
+   * `pinned` — judge THIS commit or nothing (GHI #320). The merger passes the head it
+   * has already read and the file list it read for it. If the pull request's head is no
+   * longer that commit the gate throws `HeadMovedError` instead of judging: a verdict
+   * about a commit nobody is about to merge is worse than no verdict, because the
+   * caller would merge on it. With a pin the file list is the caller's, never a second
+   * live read — a second read can describe a different head than the first.
+   */
+  opts: { pinned?: PinnedHead } = {},
+): Promise<GateReport> {
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
+  if (opts.pinned && pr.head.sha !== opts.pinned.headSha) throw new HeadMovedError(opts.pinned.headSha, pr.head.sha);
   // Every path the diff touches — added, modified, removed, renamed. `previous_filename`
   // is included deliberately: a rename WRITES both sides, so a patch that renames a
   // reserved file out of the way has touched it, and a gate that only saw the
   // destination would let exactly that through. Shared with the merger and the
   // dashboard listing (`listPullRequestPaths`) so the four readers of merge authority
   // see the same diff.
-  const paths = await listPullRequestPaths(gh, repo, prNumber);
+  const paths = opts.pinned ? opts.pinned.paths : await listPullRequestPaths(gh, repo, prNumber);
 
   const subject: DeliverablePr = {
     number: pr.number,

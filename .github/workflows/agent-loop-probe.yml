@@ -1,0 +1,115 @@
+# No-model stand-in runs for the native control-plane witnesses (spec 002, T124).
+# `hold` only stays in progress so the hosted controller can bind a real run and
+# attempt; `isolation` shows this repository's own credentials cannot reach the
+# control plane. It holds no secret, calls no model and writes nothing here.
+name: agent-loop-probe
+run-name: agent-loop-probe:${{ inputs.role }}:${{ inputs.label }}
+on:
+  workflow_dispatch:
+    inputs:
+      role:
+        description: hold keeps a run in progress; isolation tries the control plane and must be refused
+        required: true
+        default: hold
+        type: choice
+        options: [hold, isolation]
+      label:
+        description: Short label shown in the run title (letters, digits, hyphen)
+        required: true
+        default: executor
+        type: string
+      hold_minutes:
+        description: Minutes a hold run stays in progress (1-300)
+        required: false
+        default: '240'
+        type: string
+      state_repository:
+        description: isolation only - the hosted state repository (owner/name)
+        required: false
+        default: ''
+        type: string
+      audit_repository:
+        description: isolation only - the hosted audit repository (owner/name)
+        required: false
+        default: ''
+        type: string
+      control_repository:
+        description: isolation only - the hosted control repository (owner/name)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  hold:
+    if: inputs.role == 'hold'
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    steps:
+      - name: Stay in progress without doing work
+        env:
+          HOLD_MINUTES: ${{ inputs.hold_minutes }}
+          PROBE_LABEL: ${{ inputs.label }}
+        run: |
+          [[ "$PROBE_LABEL" =~ ^[A-Za-z0-9-]{1,40}$ ]] || { echo "::error::label is not valid"; exit 2; }
+          if ! [[ "$HOLD_MINUTES" =~ ^[0-9]{1,3}$ ]] || (( 10#$HOLD_MINUTES < 1 || 10#$HOLD_MINUTES > 300 )); then echo "::error::hold_minutes must be 1-300"; exit 2; fi
+          echo "Run $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT at $GITHUB_SHA holds for $HOLD_MINUTES minutes. No model, no writes." >> "$GITHUB_STEP_SUMMARY"
+          sleep "$(( 10#$HOLD_MINUTES * 60 ))"
+
+  isolation:
+    if: inputs.role == 'isolation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The widest token a governed workflow could ask for. It is still scoped to
+    # this repository, which is the point of the probe.
+    permissions:
+      contents: write
+      actions: write
+      id-token: write
+    steps:
+      - name: Try the hosted control plane with this repository's own credentials
+        env:
+          GOVERNED_TOKEN: ${{ github.token }}
+          STATE_REPOSITORY: ${{ inputs.state_repository }}
+          AUDIT_REPOSITORY: ${{ inputs.audit_repository }}
+          CONTROL_REPOSITORY: ${{ inputs.control_repository }}
+          # Hosted keys are never defined here; each must read empty.
+          WRITER_KEY: ${{ secrets.TURTLES_WRITER_PRIVATE_KEY }}
+          PROPOSAL_KEY: ${{ secrets.TURTLES_PROPOSAL_PRIVATE_KEY }}
+          CHECKS_KEY: ${{ secrets.TURTLES_CHECKS_PRIVATE_KEY }}
+          SIGNING_KEY: ${{ secrets.TURTLES_AUDIT_SIGNING_KEY }}
+        run: |
+          set -u
+          for r in "$STATE_REPOSITORY" "$AUDIT_REPOSITORY" "$CONTROL_REPOSITORY"; do
+            [[ "$r" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$ ]] || { echo "::error::a hosted repository name is missing or malformed"; exit 2; }
+          done
+          call() { # method path [json-body] -> HTTP status only; response bodies are discarded
+            curl --silent --output /dev/null --write-out '%{http_code}' --max-time 20 -X "$1" \
+              -H "Authorization: Bearer $GOVERNED_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+              ${3:+-H 'Content-Type: application/json' --data "$3"} "https://api.github.com$2"
+          }
+          # A write that could never land even if it were authorized: the expected blob SHA is all zeros.
+          stale='{"message":"isolation probe","content":"e30K","sha":"0000000000000000000000000000000000000000","branch":"main"}'
+          attempts="[]"; refused=true
+          record() { # label status
+            local code=$(( 10#${2:-0} )) # "000" (no HTTP response) is not a JSON number
+            attempts=$(printf '%s' "$attempts" | sed "s/]\$/$( [[ "$attempts" == "[]" ]] || printf ',' ){\"target\":\"$1\",\"http_status\":$code}]/")
+            case "$code" in 401|403|404) ;; *) refused=false ;; esac
+          }
+          record state_repository_read "$(call GET "/repos/$STATE_REPOSITORY")"
+          record state_control_write "$(call PUT "/repos/$STATE_REPOSITORY/contents/state/control.json" "$stale")"
+          record state_journal_write "$(call PUT "/repos/$STATE_REPOSITORY/contents/state/journal.json" "$stale")"
+          record audit_repository_read "$(call GET "/repos/$AUDIT_REPOSITORY")"
+          record audit_chain_write "$(call PUT "/repos/$AUDIT_REPOSITORY/contents/audit/chain.json" "$stale")"
+          record audit_acknowledgement_write "$(call PUT "/repos/$AUDIT_REPOSITORY/contents/audit/acknowledged.json" "$stale")"
+          record control_repository_read "$(call GET "/repos/$CONTROL_REPOSITORY")"
+          record control_environment_secrets "$(call GET "/repos/$CONTROL_REPOSITORY/environments/broker-credentials/secrets")"
+          record control_broker_dispatch "$(call POST "/repos/$CONTROL_REPOSITORY/actions/workflows/broker.yml/dispatches" '{"ref":"main"}')"
+          visible=$(( ${#WRITER_KEY} + ${#PROPOSAL_KEY} + ${#CHECKS_KEY} + ${#SIGNING_KEY} ))
+          result=pass; { [[ "$refused" == true ]] && (( visible == 0 )); } || result=fail
+          report="{\"schema_version\":1,\"purpose\":\"governed_isolation_probe\",\"repository\":\"$GITHUB_REPOSITORY\",\"run_id\":$GITHUB_RUN_ID,\"run_attempt\":$GITHUB_RUN_ATTEMPT,\"source_sha\":\"$GITHUB_SHA\",\"state_repository\":\"$STATE_REPOSITORY\",\"audit_repository\":\"$AUDIT_REPOSITORY\",\"control_repository\":\"$CONTROL_REPOSITORY\",\"attempts\":$attempts,\"hosted_secret_bytes_visible\":$visible,\"result\":\"$result\"}"
+          echo "GOVERNED_ISOLATION $report"
+          echo "Governed isolation probe: **$result**. Every attempt on the hosted state, audit and control repositories must be refused, and no hosted key may be visible." >> "$GITHUB_STEP_SUMMARY"
+          [[ "$result" == pass ]]

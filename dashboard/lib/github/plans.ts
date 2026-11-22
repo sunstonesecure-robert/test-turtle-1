@@ -210,13 +210,17 @@ function declaredFeature(raw: string): string | null {
  * A root document whose JSON is unreadable is NOT rejected here — it is returned
  * so the caller's schema parse reports the real defect instead of "not found".
  */
-export async function readPlanFileAtRef(gh: Octokit, repo: RepoRef, ref: string): Promise<PlanFile> {
+export async function readPlanFileAtRef(gh: Octokit, repo: RepoRef, ref: string, commit?: string): Promise<PlanFile> {
   const slug = slugFromPlanRef(ref);
+  // `commit` pins the read to one exact commit while `ref` still names the workload
+  // (GHI #319): a branch NAME answers with whatever it points at now, and an approval
+  // is of the bytes at the commit that was reviewed, not of the branch's later head.
+  const at = commit ?? ref;
   if (slug !== null) {
-    const canonical = await getFileAtRef(gh, repo, planPath(slug), ref);
+    const canonical = await getFileAtRef(gh, repo, planPath(slug), at);
     if (canonical) return { path: planPath(slug), ...canonical };
   }
-  const legacy = await getFileAtRef(gh, repo, LEGACY_PLAN_PATH, ref);
+  const legacy = await getFileAtRef(gh, repo, LEGACY_PLAN_PATH, at);
   if (legacy && (slug === null || (declaredFeature(legacy.raw) ?? slug) === slug)) {
     return { path: LEGACY_PLAN_PATH, ...legacy };
   }
@@ -526,7 +530,19 @@ export async function tagTargetSha(gh: Octokit, repo: RepoRef, tagRef: string): 
 export async function freezeApprovedPlan(
   gh: Octokit,
   repo: RepoRef,
-  input: { slug: string; version: number; mergeSha: string; andonIssue: number; approver: string; approvedAt: string },
+  input: {
+    slug: string;
+    version: number;
+    mergeSha: string;
+    andonIssue: number;
+    approver: string;
+    approvedAt: string;
+    /** Who merged — recorded BESIDE the approver, never as the approver (GHI #319).
+     *  `null` is GitHub not reporting one. Absent leaves the message as it was. */
+    mergedBy?: string | null;
+    /** What the approval rests on, in a few plain words, for the tag message. */
+    basis?: string;
+  },
 ): Promise<{ tagRef: string; reconciled: ReconciledChunk[] }> {
   const tagRef = planBranch(input.slug, input.version);
 
@@ -541,7 +557,16 @@ export async function freezeApprovedPlan(
       // needs (GHI #245). The approver is the highest-risk login this product
       // writes: it is `pr.merged_by.login` straight from the API, and its fallback
       // used to spell a real private individual's account.
-      message: `Frozen plan ${tagRef} approved by ${plainLogin(input.approver)} at ${input.approvedAt}`,
+      //
+      // THE APPROVER IS NOT THE MERGER (GHI #319). The freeze entry point passes the
+      // person whose review of the exact commit authorized this, and names whoever
+      // merged separately — a merge proves only that some credential could merge.
+      message:
+        `Frozen plan ${tagRef} approved by ${plainLogin(input.approver)} at ${input.approvedAt}` +
+        (input.basis ? ` (${input.basis})` : '') +
+        (input.mergedBy !== undefined
+          ? `; merged by ${input.mergedBy ? plainLogin(input.mergedBy) : 'an account GitHub did not report'}`
+          : ''),
       object: input.mergeSha,
       type: 'commit',
     });

@@ -6,7 +6,7 @@ import { DeliverablePatch, patchPaths } from '../schemas/deliverable';
 import type { PlanStep } from '../schemas/plan';
 import { readPlanAtRef, slugFromPlanRef, tagTargetSha } from '../dashboard/lib/github/plans';
 import { getWorkload } from '../dashboard/lib/github/workloads';
-import { serializeDeliverableMarker } from '../dashboard/lib/github/markers';
+import { REFUSAL_HEADER, serializeDeliverableMarker, serializeRefusalMarker } from '../dashboard/lib/github/markers';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 import { patchPathsWithinStepScope } from './gates/lib/checks-deliverable';
 import { resolveMergeAuthority } from '../dashboard/lib/github/builds';
@@ -15,6 +15,7 @@ import { reservedPathsTouched, reservedRefusalDetail, PRODUCT_PR_ROUTE } from '.
 import { checkD6SubjectWorkflowContent, subjectWorkflowPaths, type SubjectWorkflowFile } from './gates/lib/checks-subject-workflow';
 import { checkpointPathsTouched, parseCheckpointPaths, CHECKPOINT_PATHS_VARIABLE } from './gates/lib/checkpoint-paths';
 import { scannerRunner } from './gates/lib/subject-workflow-scanners';
+import { detectionStoppedExplanation, readDetectionOutcome, readRunTitle, type DetectionOutcome } from './detection-outcome';
 
 /**
  * build-publish (T207) — the deterministic writer that lands an agent's deliverable.
@@ -207,13 +208,17 @@ async function refuse(
   repo: RepoRef,
   where: number | null,
   reason: string,
+  // The build run this refusal is for, as a marker the dashboard joins to the dispatch
+  // record on (`parseRefusalMarker`). Optional only so a caller that has no run cannot
+  // invent one; every call inside `publishDeliverable` passes `ctx.runId`.
+  runId?: string,
 ): Promise<PublishOutcome> {
   if (where !== null) {
     await gh.issues
       .createComment({
         ...repo,
         issue_number: where,
-        body: `**Deliverable refused — nothing was written.**\n\n${reason}`,
+        body: `${runId === undefined ? '' : `${serializeRefusalMarker(runId)}\n`}${REFUSAL_HEADER}\n\n${reason}`,
       })
       .catch(() => undefined);
     await gh.issues.addLabels({ ...repo, issue_number: where, labels: ['build:refused'] }).catch(() => undefined);
@@ -237,12 +242,13 @@ export async function publishDeliverable(
       repo,
       null,
       `deliverable.patch failed schema validation: ${parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ')}`,
+      ctx.runId,
     );
   }
   const patch = parsed.data;
   const slug = slugFromPlanRef(patch.plan_ref);
   if (slug === null) {
-    return refuse(gh, repo, null, `plan_ref "${patch.plan_ref}" is not a frozen plan ref (plan/<slug>/v<N>)`);
+    return refuse(gh, repo, null, `plan_ref "${patch.plan_ref}" is not a frozen plan ref (plan/<slug>/v<N>)`, ctx.runId);
   }
 
   // THE TRUSTED BINDING. The build was dispatched ON the frozen tag (preflight B8
@@ -252,7 +258,7 @@ export async function publishDeliverable(
   // substitution `vt-report` closes with `--expect-sha`.
   const tagSha = await tagTargetSha(gh, repo, patch.plan_ref);
   if (tagSha === null) {
-    return refuse(gh, repo, null, `plan_ref "${patch.plan_ref}" names no frozen tag — a deliverable must descend from an approved plan`);
+    return refuse(gh, repo, null, `plan_ref "${patch.plan_ref}" names no frozen tag — a deliverable must descend from an approved plan`, ctx.runId);
   }
   if (ctx.headSha && ctx.headSha.trim() !== tagSha) {
     return refuse(
@@ -262,6 +268,7 @@ export async function publishDeliverable(
       `deliverable.patch claims ${patch.plan_ref} (commit ${tagSha.slice(0, 8)}), but the build that produced it ran on ` +
         `commit ${ctx.headSha.trim().slice(0, 8)}. A build may only deliver against the plan it actually built ` +
         '(FR-007). Nothing was written.',
+      ctx.runId,
     );
   }
   if (ctx.headBranch && ctx.headBranch.trim() !== patch.plan_ref) {
@@ -270,6 +277,7 @@ export async function publishDeliverable(
       repo,
       null,
       `deliverable.patch claims ${patch.plan_ref}, but the build run was dispatched on "${ctx.headBranch}" (FR-007, preflight B8)`,
+      ctx.runId,
     );
   }
 
@@ -284,6 +292,7 @@ export async function publishDeliverable(
       fallbackIssue,
       `deliverable.patch names step "${patch.step_id}", which ${patch.plan_ref} does not define. The plan's steps are: ` +
         `${plan.steps.map((s) => s.id).join(', ')}`,
+      ctx.runId,
     );
   }
   // The step's own work item is where a refusal belongs — that is the issue an
@@ -299,7 +308,7 @@ export async function publishDeliverable(
   // later gate cannot recover the original spelling to notice.
   const rawPaths = patchPaths(patch);
   if (rawPaths.length === 0) {
-    return refuse(gh, repo, reportOn, 'deliverable.patch writes and deletes nothing — an empty deliverable is not a deliverable');
+    return refuse(gh, repo, reportOn, 'deliverable.patch writes and deletes nothing — an empty deliverable is not a deliverable', ctx.runId);
   }
   const traversal = rawPaths.filter((p) => !isRepoRelative(p));
   if (traversal.length > 0) {
@@ -310,6 +319,7 @@ export async function publishDeliverable(
       `deliverable.patch names path(s) that are not repo-relative: ${traversal.join(', ')}. Refused outright, and ` +
         'refused AS WRITTEN — an absolute path or a traversal is never normalized into something acceptable and then ' +
         'accepted; the contract requires repo-relative paths with forward slashes.',
+      ctx.runId,
     );
   }
 
@@ -325,7 +335,7 @@ export async function publishDeliverable(
   // under the wrong name is told the name it could have used (GHI #127).
   const reserved = reservedPathsTouched(paths, { slug });
   if (reserved.length > 0) {
-    return refuse(gh, repo, reportOn, reservedRefusalDetail(reserved, 'deliverable.patch', slug));
+    return refuse(gh, repo, reportOn, reservedRefusalDetail(reserved, 'deliverable.patch', slug), ctx.runId);
   }
   const scope = step.scope ?? [];
   if (scope.length > 0) {
@@ -338,6 +348,7 @@ export async function publishDeliverable(
         `deliverable.patch touches ${straying.length} path(s) outside step ${step.id}'s declared scope ` +
           `[${scope.join(', ')}]: ${straying.join(', ')}. Work outside the step is work no authority was asked ` +
           'about (FR-061) — the pull request is refused rather than silently trimmed.',
+        ctx.runId,
       );
     }
   }
@@ -375,6 +386,7 @@ export async function publishDeliverable(
         repo,
         reportOn,
         `deliverable.patch delivers a subject workflow that fails the content guards: ${d6.detail ?? d6.status}`,
+        ctx.runId,
       );
     }
   }
@@ -385,7 +397,7 @@ export async function publishDeliverable(
   let writer: Octokit = gh;
   if (subjectPaths.size > 0) {
     const elevated = await workflowWriter();
-    if (elevated === null) return refuse(gh, repo, reportOn, workflowWriterMissingDetail([...subjectPaths]));
+    if (elevated === null) return refuse(gh, repo, reportOn, workflowWriterMissingDetail([...subjectPaths]), ctx.runId);
     writer = elevated;
   }
 
@@ -517,6 +529,7 @@ export async function publishDeliverable(
         'would deliver none of the work the step promises.\n\nOne of two things is true, and both need you rather ' +
         'than a retry: this step was **already delivered** by an earlier plan version and needs no rebuild, or the ' +
         'step was **redefined** since that delivery and the agent rebuilt the old content instead of the new work.',
+      ctx.runId,
     );
   }
 
@@ -730,6 +743,102 @@ async function findDeliverablePr(gh: Octokit, repo: RepoRef, branch: string, bas
 }
 
 /** Locate deliverable.patch anywhere under the downloaded-artifacts directory. */
+/* ------------------------------------------------------------------------- *
+ * A BUILD THE SAFETY CHECK STOPPED (GHI #316).
+ *
+ * In blocking mode a flagged build - or one whose detector could not run - concludes
+ * `failure`, and the publish job is for successful builds only. Before this the work
+ * item then said nothing at all: still ready, carrying no trace that a build was
+ * dispatched, paid for and stopped. This is a second, separate job's whole work: read
+ * the run's detection job and, only when detection is why the build failed, say so on
+ * the work item the build was for.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO:
+ *   - touch any artifact. It takes no `--dir`; the stopped run's staged files were
+ *     never cleared, and code that never holds them cannot publish them.
+ *   - label the item or change its state. Whether to build again is the operator's
+ *     call after reading what was flagged; this names the state before that click.
+ *   - speak for any OTHER failure. A build that failed for another reason gets no
+ *     comment here rather than a false cause (that silence is GHI #291, still open).
+ * ------------------------------------------------------------------------- */
+
+/** Idempotency key, per run: a `workflow_run` re-delivery adds nothing. */
+export function detectionStoppedMarker(runId: string): string {
+  return `<!-- build-publish:detection-stopped:${runId} -->`;
+}
+
+export function detectionStoppedComment(input: { runId: string; runUrl: string | null }): string {
+  return [
+    detectionStoppedMarker(input.runId),
+    `### This build was stopped before it could deliver`,
+    ``,
+    ...detectionStoppedExplanation({
+      runUrl: input.runUrl,
+      notApplied: 'no branch was created and no pull request was opened for this work item',
+    }),
+  ].join('\n');
+}
+
+// The work item, from the run title build-template's `run-name` sets (pinned by
+// tests/unit/workflow-linkage.test.ts): "build-template — <workload> · #<item> on <plan ref>".
+// A detection job only runs after the agent job, which only runs after the preflight
+// accepted these same inputs, so on a run detection stopped the title names a real item.
+const BUILD_TITLE_ITEM = /^build-template — [a-z0-9][a-z0-9-]* · #(\d{1,10}) on \S+$/;
+
+export type DetectionStoppedReport =
+  | { outcome: 'commented' | 'already_reported'; issueNumber: number }
+  | { outcome: 'not_detection'; detection: DetectionOutcome }
+  | { outcome: 'no_work_item' };
+
+export async function reportDetectionStopped(gh: Octokit, repo: RepoRef, runId: string): Promise<DetectionStoppedReport> {
+  const detection = await readDetectionOutcome(gh, repo, runId);
+  if (detection !== 'stopped') return { outcome: 'not_detection', detection };
+  const run = await readRunTitle(gh, repo, runId);
+  const item = run.title === null ? null : BUILD_TITLE_ITEM.exec(run.title);
+  if (!item) return { outcome: 'no_work_item' };
+  const issueNumber = Number(item[1]);
+  try {
+    const { data: issue } = await gh.issues.get({ ...repo, issue_number: issueNumber });
+    if (issue.pull_request) return { outcome: 'no_work_item' };
+  } catch {
+    return { outcome: 'no_work_item' };
+  }
+  const marker = detectionStoppedMarker(runId);
+  const existing = await gh.paginate(gh.issues.listComments, { ...repo, issue_number: issueNumber, per_page: 100 });
+  if (existing.some((c) => (c.body ?? '').includes(marker))) return { outcome: 'already_reported', issueNumber };
+  await gh.issues.createComment({ ...repo, issue_number: issueNumber, body: detectionStoppedComment({ runId, runUrl: run.url }) });
+  return { outcome: 'commented', issueNumber };
+}
+
+/** `--report-stopped`: the failed-build job's whole work. No artifact directory, no
+ *  writer credential, at most one comment. Every outcome but an API error on the write
+ *  itself is a normal one and exits clean - the build run is already red, and a second
+ *  red run would only be one more thing to interpret. */
+function reportStoppedMain(owner: string | undefined, repoName: string | undefined, runId: string | undefined): void {
+  if (!owner || !repoName || !runId || !/^[0-9]+$/.test(runId)) {
+    console.error('usage: build-publish --report-stopped --repo <owner/repo> --run-id <digits>');
+    process.exit(2);
+  }
+  reportDetectionStopped(createClient(), { owner, repo: repoName }, runId)
+    .then((result) => {
+      console.log(
+        result.outcome === 'not_detection'
+          ? result.detection === 'unknown'
+            ? `build run ${runId} failed, and whether its safety check is why could not be read — nothing said here`
+            : `build run ${runId} failed, and its safety check is not why (detection: ${result.detection}) — nothing said here`
+          : result.outcome === 'no_work_item'
+            ? `build run ${runId} was stopped by its safety check, but its title names no work item that exists — nothing to tell`
+            : result.outcome === 'commented'
+              ? `told work item #${result.issueNumber} that build run ${runId} was stopped by its safety check`
+              : `work item #${result.issueNumber} was already told about build run ${runId} — nothing added`,
+      );
+    })
+    .catch((error) => {
+      console.error(errorMessage(error));
+      process.exit(1);
+    });
+}
+
 export function findDeliverableFile(dir: string): string | null {
   if (!existsSync(dir)) return null;
   for (const entry of readdirSync(dir)) {
@@ -745,7 +854,17 @@ export function findDeliverableFile(dir: string): string | null {
 }
 
 const isMain = process.argv[1]?.endsWith('build-publish.ts');
-if (isMain) {
+const reportStoppedMode = process.argv.includes('--report-stopped');
+if (isMain && reportStoppedMode) {
+  const argv = process.argv.slice(2);
+  const get = (name: string): string | undefined => {
+    const i = argv.indexOf(`--${name}`);
+    return i >= 0 ? argv[i + 1] : undefined;
+  };
+  const [owner, repoName] = (get('repo') ?? '').split('/');
+  reportStoppedMain(owner, repoName, get('run-id'));
+}
+if (isMain && !reportStoppedMode) {
   // First, before any check can spawn a child: see takeWorkflowWriter.
   const workflowWriter = takeWorkflowWriter();
   const argv = process.argv.slice(2);

@@ -52,6 +52,9 @@ export async function buildPreflight(
     chunk?: number;
     unattended?: boolean;
     githubRef?: string;
+    /** `GITHUB_SHA`: the commit Actions pinned this run to at dispatch. B1 compares it
+     *  with the frozen tag on a build run dispatched on that tag (PR #385). */
+    githubSha?: string;
     /** the step ids this build covers (`--step`, repeatable). Omitted is NOT "the
      *  whole plan" any more: when the build names a chunk, the covered step is
      *  derived from it (GHI #87). Omitted AND chunkless is the whole plan. */
@@ -114,8 +117,16 @@ export async function buildPreflight(
       ? 'this is a VERIFY run, not a build: the deliverable was already produced, gated and merged, and this run only ' +
         'judges the merged commit — B9 is the gate that asks whether that commit descends from the approved plan'
       : null;
+  // The run's own commit is only comparable with the tag when the run was dispatched ON
+  // the tag: a verify run sits on the default branch by design, and a run dispatched
+  // anywhere else is B8's refusal, said once there rather than twice.
+  const onTheTag = input.githubRef?.trim() === `refs/tags/${input.planRef}`;
+  const runSha =
+    input.verifyCommit === undefined && onTheTag && input.githubSha !== undefined && input.githubSha.trim().length > 0
+      ? input.githubSha.trim()
+      : undefined;
   const report = await runGateCatalogue(input.planRef, PREFLIGHT_CATALOGUE, [
-    { id: 'B1', run: () => checkB1FrozenCurrent(gh, repo, input.planRef, input.workload) },
+    { id: 'B1', run: () => checkB1FrozenCurrent(gh, repo, input.planRef, input.workload, runSha) },
     { id: 'B2', run: () => checkB2PlanRevalidates(gh, repo, input.planRef) },
     { id: 'B3', skip: noChunk, run: () => checkB3ChunkReady(gh, repo, input.chunk!, input.planRef) },
     {
@@ -185,6 +196,8 @@ if (isMain) {
     // caller-supplied ref would let the very dispatch B8 refuses assert its own
     // correctness.
     const githubRef = process.env.GITHUB_REF;
+    // Same source and same reason: the commit Actions pinned the run to.
+    const githubSha = process.env.GITHUB_SHA;
     // Arguments, not environment, and the opposite of B8's reasoning on purpose:
     // this is a LABEL on the report, not a check, and only the workflow that did
     // the checkout knows what it checked out. Both halves or neither — a ref with
@@ -202,6 +215,7 @@ if (isMain) {
       ...(steps.length > 0 ? { steps } : {}),
       ...(flags.has('unattended') ? { unattended: true } : {}),
       ...(githubRef !== undefined ? { githubRef } : {}),
+      ...(githubSha !== undefined ? { githubSha } : {}),
       ...(gatesRef !== undefined && gatesSha !== undefined ? { gateSet: { ref: gatesRef, sha: gatesSha } } : {}),
       ...(args.get('verify-commit') !== undefined ? { verifyCommit: args.get('verify-commit')! } : {}),
     });

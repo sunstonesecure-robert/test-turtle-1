@@ -2,7 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import type { RepoRef } from './client';
 import { credentialRemedy, errorMessage, errorStatus, githubSaid, isPermissionDenied, Refusal } from './errors';
 import { classifyRequiredSuite, listRequiredCheckRuns } from './required-checks';
-import { parseDeliverableMarker, type DeliverableMarker } from './markers';
+import { parseDeliverableMarker, parseRefusalMarker, REFUSAL_HEADER, type DeliverableMarker } from './markers';
 import { readPlanAtRef, resolveCurrent, slugFromPlanRef, tagTargetSha, freezeCompletion, freezeIncompleteSentence } from './plans';
 import { findIntentConfirmation, getChunk } from './chunks';
 import { getWorkload } from './workloads';
@@ -927,7 +927,14 @@ export type PriorBuild =
    *  a real state, and it is the one where the repeat rewrites rather than adds */
   | { kind: 'refused'; pullNumber: number; reopened?: boolean }
   /** a dispatch is on record and nothing was ever delivered for it */
-  | { kind: 'dispatched'; by: string; at: string };
+  | { kind: 'dispatched'; by: string; at: string }
+  /** the newest dispatch ENDED without a pull request, and GitHub says how: `what` is
+   *  the history line's own clause ("the build failed", "its deliverable was refused
+   *  …"), so the dialog and the row say the same thing */
+  | { kind: 'ended-undelivered'; by: string; at: string; what: string }
+  /** the build finished and its deliverable is being published right now — a repeat can
+   *  race the publisher (Codex on PR #309) */
+  | { kind: 'publishing'; by: string; at: string };
 
 /**
  * The sentence the confirm dialog adds when this work item has been built before — the
@@ -990,6 +997,18 @@ export function repeatDispatchSentence(prior: PriorBuild): string {
         // GitHub, so the at-sign renders as an at-sign and notifies nobody.
         `This work item was dispatched before, by @${prior.by} at ${prior.at}, and nothing has been delivered for it yet. ` +
         `${repeat}.`
+      );
+    case 'publishing':
+      return (
+        // NOT A GITHUB MENTION — the confirm() dialog, as above.
+        `This work item was dispatched before, by @${prior.by} at ${prior.at}; that build finished and its deliverable is being published right now, so a pull request may appear in a moment. ` +
+        `${repeat}, and starting it now races the publisher: wait for the row to change unless you mean to build it twice.`
+      );
+    case 'ended-undelivered':
+      return (
+        // NOT A GITHUB MENTION — the confirm() dialog, as above.
+        `This work item was dispatched before, by @${prior.by} at ${prior.at}, and ${prior.what}. ` +
+        `${repeat}; read why on the row before repeating it, because a repeat of the same build can end the same way.`
       );
   }
 }
@@ -1635,4 +1654,171 @@ export function parseBuildDispatchEvents(bodies: readonly (string | null | undef
     if (event) events.push(event);
   }
   return events;
+}
+
+/**
+ * WHAT BECAME OF ONE DISPATCH that produced no pull request — read from GitHub, not
+ * inferred from the dispatch record alone.
+ *
+ * The dispatch record says a run was started and nothing about how it ended, so the
+ * work-item row used to say "nothing delivered for it yet" for a build that had failed,
+ * one whose deliverable `build-publish` refused, and one still being published, alike.
+ * Live, test-turtle-1 #155 (2026-09-25): build run 36182569888 succeeded, publish run
+ * 36183106992 refused the patch as changing nothing, and both dashboard surfaces kept
+ * saying "dispatched". The operator had to open Actions to find the reason.
+ *
+ * Each kind is a FACT with its source, and the order below is the order they are checked:
+ *
+ *   build-failed    the build run's own conclusion is not success (failure, cancelled,
+ *                   timed out). `failedStep` / `message` come from its jobs and, where the
+ *                   token can read them, the failing job's error annotation.
+ *   publish-refused the build succeeded and a refusal comment names THIS run on the work
+ *                   item (`deliverable-refused` marker), or — for a comment written before
+ *                   the marker — the one refusal written after this dispatch and before
+ *                   the next. `reason` is the refusal's own text.
+ *   no-deliverable  the build succeeded and uploaded no `deliverable.patch` artifact, so
+ *                   there was nothing to publish (the agent reported missing data, or
+ *                   produced nothing).
+ *   publishing      the build succeeded with a deliverable, no refusal is recorded, and a
+ *                   publisher run is still queued or running — or none has appeared yet
+ *                   and the build finished within `PUBLISH_GRACE_MS`.
+ *   unpublished     the same, but NO publisher run is in flight and one created after this
+ *                   build finished has completed: it ended without a pull request or a
+ *                   refusal. Asserted only on that evidence (Codex on PR #309): a time bound
+ *                   measured from the build's finish ignores the publisher's queue, and its
+ *                   own 15-minute timeout starts only when its job does.
+ *
+ * `null` for a dispatch this could not answer about — a run it could not read, or one
+ * still in flight (the running line owns that). Unknown says nothing; it is never "fine".
+ */
+export type DispatchOutcome =
+  | { kind: 'build-failed'; conclusion: string; failedStep: string | null; message: string | null }
+  | { kind: 'publish-refused'; reason: string; commentUrl: string }
+  | { kind: 'no-deliverable' }
+  | { kind: 'publishing' }
+  /** `publisherUrl`: the completed publisher run after this build, where it failed */
+  | { kind: 'unpublished'; publisherUrl: string | null };
+
+/** How long after a successful build, with NO publisher run visible yet, the publisher is
+ *  still presumed to be coming: its queue plus its own 15-minute job timeout. */
+export const PUBLISH_GRACE_MS = 30 * 60 * 1000;
+
+/** The login `build-publish` writes its refusal comments as — the built-in token's. Any
+ *  other author's comment carrying the header is not the publisher's (Codex on PR #309):
+ *  the comment author is the GitHub-recorded fact a commenter cannot forge. When the
+ *  publisher moves to a GitHub App (GHI #295), its bot login joins this set. */
+export const PUBLISHER_LOGINS: readonly string[] = ['github-actions[bot]'];
+
+const PUBLISHER_WORKFLOW_PATH = '.github/workflows/build-publish.yml';
+
+export interface DispatchOutcomeRequest {
+  runId: number;
+  /** the work item the dispatch was for — where `build-publish` writes a refusal */
+  issueNumber: number;
+  /** when the dispatch was recorded, and when the NEXT dispatch of the same item was
+   *  (null when none) — the window a marker-less refusal must fall in to be this one's */
+  dispatchedAt: string;
+  nextDispatchAt: string | null;
+}
+
+/** GitHub's own generic last line of a failed step — true of every failure, so it
+ *  explains none of them, and a more specific annotation is preferred over it. */
+const GENERIC_EXIT = /^Process completed with exit code \d+\.?$/;
+
+/**
+ * The refusal's reason as the operator should read it: the text after the header,
+ * without markdown emphasis (the row renders text, never markup), and without the
+ * hidden marker line. Paragraph breaks are kept.
+ */
+export function refusalReason(body: string): string {
+  const after = body.includes(REFUSAL_HEADER) ? body.slice(body.indexOf(REFUSAL_HEADER) + REFUSAL_HEADER.length) : body;
+  return after
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .trim();
+}
+
+async function readOneOutcome(gh: Octokit, repo: RepoRef, req: DispatchOutcomeRequest, now: number): Promise<DispatchOutcome | null> {
+  const { data: run } = await gh.actions.getWorkflowRun({ ...repo, run_id: req.runId });
+  if (run.status !== 'completed') return null;
+  if (run.conclusion !== 'success') {
+    let failedStep: string | null = null;
+    let message: string | null = null;
+    try {
+      const jobs = await gh.paginate(gh.actions.listJobsForWorkflowRun, { ...repo, run_id: req.runId, per_page: 100 });
+      const job = jobs.find((j) => j.conclusion === 'failure') ?? null;
+      failedStep = job?.steps?.find((st) => st.conclusion === 'failure')?.name ?? null;
+      if (job !== null) {
+        // The failing job's error annotations — the `##[error]` lines GitHub lifts out of
+        // the log. Readable wherever check runs are; a token that cannot read them (a
+        // fine-grained PAT on a private target) leaves the step name, which is still a fact.
+        try {
+          const { data: notes } = await gh.checks.listAnnotations({ ...repo, check_run_id: job.id, per_page: 50 });
+          const failures = notes.filter((n) => n.annotation_level === 'failure' && n.message);
+          message = (failures.find((n) => !GENERIC_EXIT.test(n.message!.trim())) ?? failures[0])?.message?.trim() ?? null;
+        } catch {
+          message = null;
+        }
+      }
+    } catch {
+      // The conclusion alone is still the answer; which step it died on is detail.
+    }
+    return { kind: 'build-failed', conclusion: run.conclusion ?? 'unknown', failedStep, message };
+  }
+
+  // The build succeeded. Did the publisher refuse what it built?
+  const comments = await gh.paginate(gh.issues.listComments, { ...repo, issue_number: req.issueNumber, since: req.dispatchedAt, per_page: 100 });
+  const refusals = comments.filter((c) => (c.body ?? '').includes(REFUSAL_HEADER) && PUBLISHER_LOGINS.includes(c.user?.login ?? ''));
+  const marked = refusals.filter((c) => parseRefusalMarker(c.body ?? '') === req.runId);
+  const legacy = refusals.filter(
+    (c) =>
+      parseRefusalMarker(c.body ?? '') === null &&
+      c.created_at >= req.dispatchedAt &&
+      (req.nextDispatchAt === null || c.created_at < req.nextDispatchAt),
+  );
+  const refusal = (marked.length > 0 ? marked : legacy).at(-1) ?? null;
+  if (refusal !== null) return { kind: 'publish-refused', reason: refusalReason(refusal.body ?? ''), commentUrl: refusal.html_url };
+
+  const artifacts = await gh.paginate(gh.actions.listWorkflowRunArtifacts, { ...repo, run_id: req.runId, per_page: 100 });
+  if (!artifacts.some((a) => a.name === 'deliverable.patch')) return { kind: 'no-deliverable' };
+  // WHERE IS THE PUBLISHER? Its run cannot be joined to this build exactly — it runs on
+  // the default branch's commit, and the API does not say which run triggered it — so the
+  // failure is asserted only when nothing could still be publishing: no publisher run in
+  // flight, and one created after this build finished has completed.
+  const finishedAt = run.updated_at;
+  const publishers = (
+    await gh.paginate(gh.actions.listWorkflowRunsForRepo, { ...repo, event: 'workflow_run', created: `>=${finishedAt}`, per_page: 100 })
+  )
+    .filter((r) => r.path === PUBLISHER_WORKFLOW_PATH && r.created_at >= finishedAt)
+    .sort((a, b) => a.created_at.localeCompare(b.created_at));
+  if (publishers.some((r) => r.status !== 'completed')) return { kind: 'publishing' };
+  const done = publishers[0];
+  if (done !== undefined) return { kind: 'unpublished', publisherUrl: done.html_url };
+  const finished = Date.parse(finishedAt);
+  return Number.isFinite(finished) && now - finished < PUBLISH_GRACE_MS ? { kind: 'publishing' } : { kind: 'unpublished', publisherUrl: null };
+}
+
+/**
+ * Every requested dispatch's outcome, by run id. A request whose reads fail is LEFT OUT
+ * of the map — the derivation then says what it said before (dispatched, nothing
+ * delivered yet), which is true, rather than a guess.
+ */
+export async function readDispatchOutcomes(
+  gh: Octokit,
+  repo: RepoRef,
+  requests: readonly DispatchOutcomeRequest[],
+  now: number = Date.now(),
+): Promise<Map<number, DispatchOutcome>> {
+  const out = new Map<number, DispatchOutcome>();
+  await Promise.all(
+    requests.map(async (req) => {
+      try {
+        const outcome = await readOneOutcome(gh, repo, req, now);
+        if (outcome !== null) out.set(req.runId, outcome);
+      } catch {
+        // unknown — see the docblock
+      }
+    }),
+  );
+  return out;
 }

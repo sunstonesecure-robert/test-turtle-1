@@ -5,6 +5,9 @@ import {
   checkReadiness,
   unmetItems,
   PLAN_RULESET,
+  PLAN_TAG_RULESET,
+  PLAN_TAG_REF_PATTERN,
+  PLAN_TAG_RULE_TYPES,
   CURRENT_RULESET,
   MAIN_RULESET,
   EVIDENCE_RULESET,
@@ -103,6 +106,30 @@ export async function init(gh: Octokit, repo: RepoRef): Promise<InitResult> {
         enforcement: 'active',
         conditions: { ref_name: { include: ['refs/heads/plan/**'], exclude: [] } },
         rules: [{ type: 'non_fast_forward' }, { type: 'deletion' }],
+      },
+    },
+    {
+      name: PLAN_TAG_RULESET,
+      payload: {
+        name: PLAN_TAG_RULESET,
+        target: 'tag',
+        enforcement: 'active',
+        // `refs/tags/plan/**/*`: the `/**/*` form is what reaches `plan/<slug>/v<N>`
+        // under GitHub's fnmatch rules — see PLAN_TAG_REF_PATTERN.
+        conditions: { ref_name: { include: [PLAN_TAG_REF_PATTERN], exclude: [] } },
+        // A frozen tag IS the official approved plan, and every build and gate follows
+        // wherever it points — so it may never be moved (`update`) or removed
+        // (`deletion`) (GHI #318). NO BYPASS ACTOR, not even the admin role the
+        // default-branch ruleset exempts: no harness code moves or deletes a plan tag,
+        // and a correction is a new version, never a rewritten one.
+        //
+        // `creation` IS DELIBERATELY NOT HERE. The freeze creates the tag on the
+        // built-in token, and a personal repository has no integration bypass to
+        // exempt it with (GHI #44) — restricting creation would stop every approval
+        // from freezing. A tag created early for a future version fails loudly rather
+        // than silently: the freeze refuses a tag that is not at its merge commit, and
+        // build-preflight refuses a tag that is not at its approval's merge commit.
+        rules: PLAN_TAG_RULE_TYPES.map((type) => ({ type })),
       },
     },
     {

@@ -8,6 +8,7 @@ import { parseAndonHeader, parseJudgmentItems, serializeAndonHeader } from '../d
 import { getWorkload, getWorkloadByIssue } from '../dashboard/lib/github/workloads';
 import { findOpenAndonByPlanRef } from '../dashboard/lib/github/andon';
 import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
+import { detectionStoppedExplanation, readDetectionOutcome, readRunTitle } from './detection-outcome';
 
 /**
  * plan-publish — the deterministic writer that lands an agent-proposed plan.
@@ -231,9 +232,15 @@ async function findBreakByPlanRef(
   return found === null ? undefined : { number: found };
 }
 
-/** Why a run produced nothing to publish — the probe knows which, and each one
- *  reads differently to the operator. */
-export type UnpublishableReason = 'no-artifact' | 'expired' | 'revision-incomplete';
+/** Why a run produced nothing to publish, as the workflow's probe can tell from the
+ *  run's artifact listing alone. */
+export type ProbeReason = 'no-artifact' | 'expired' | 'revision-incomplete';
+export const PROBE_REASONS: readonly ProbeReason[] = ['no-artifact', 'expired', 'revision-incomplete'];
+
+/** Why a run produced nothing to publish — each one reads differently to the operator.
+ *  `detection-stopped` is never the probe's answer: it is what `no-artifact` turns out
+ *  to be when the run's own safety check is why nothing was uploaded (GHI #316). */
+export type UnpublishableReason = ProbeReason | 'detection-stopped';
 
 /** Idempotency key: the publisher may be re-delivered or re-dispatched for the same
  *  run, and a break that collects the same notice three times is noise, not a record. */
@@ -246,8 +253,32 @@ export function unpublishableMarker(runId: string): string {
  * sentence an operator reads is a tested value rather than a string built inside a
  * workflow step nothing can run.
  */
-export function unpublishableComment(input: { runId: string; reason: UnpublishableReason; liveArtifacts: string[] }): string {
-  const why: Record<UnpublishableReason, string> = {
+export function unpublishableComment(input: {
+  runId: string;
+  reason: UnpublishableReason;
+  liveArtifacts: string[];
+  runUrl?: string | null;
+}): string {
+  const checked =
+    `_Checked by the publisher against run ${input.runId}; the files it found there were: ` +
+    `${input.liveArtifacts.length > 0 ? input.liveArtifacts.map((a) => `\`${a}\``).join(', ') : 'none'}._`;
+  // Its own shape, not a fourth entry in the table below: this comment may land on a
+  // WORKLOAD (a stopped proposal opened no review to land on), where "this review has no
+  // plan" and "withdraw this review" would both be about something that does not exist.
+  if (input.reason === 'detection-stopped') {
+    return [
+      unpublishableMarker(input.runId),
+      `### A planning run was stopped before it could publish`,
+      ``,
+      ...detectionStoppedExplanation({
+        runUrl: input.runUrl ?? null,
+        notApplied: 'no plan was published, and no review was opened or changed',
+      }),
+      ``,
+      checked,
+    ].join('\n');
+  }
+  const why: Record<ProbeReason, string> = {
     'no-artifact':
       `**No plan document came out of that run.** The agent finished and raised this review, but it uploaded no ` +
       `\`plan.json\`, so there is nothing to publish and no plan to judge. Publishing this run again cannot change ` +
@@ -274,9 +305,45 @@ export function unpublishableComment(input: { runId: string; reason: Unpublishab
     ``,
     route,
     ``,
-    `_Checked by the publisher against run ${input.runId}; the files it found there were: ` +
-      `${input.liveArtifacts.length > 0 ? input.liveArtifacts.map((a) => `\`${a}\``).join(', ') : 'none'}._`,
+    checked,
   ].join('\n');
+}
+
+const LIVE_BREAK_LABELS = ['andon:open', 'andon:under-review'];
+// Whole-title matches against the two `run-name`s the sources set (pinned by
+// tests/unit/detection-stopped.test.ts). The title is dispatch input, so it is matched
+// strictly and then CHECKED against repository facts below - it only ever selects an
+// issue to comment on, and only one that already is what the title says it is.
+const REVISE_TITLE = /^plan-revise — review #(\d{1,10})$/;
+const PROPOSE_TITLE = /^plan-propose — ([a-z0-9][a-z0-9-]*)$/;
+
+/**
+ * Who to tell about a run that the safety check stopped, found from the run's TITLE.
+ *
+ * Neither existing locator can work for such a run, and that is the point of blocking
+ * mode: a stopped proposal opened no review (so no footer links the run), and a stopped
+ * revision uploaded no plan.json (so there is no plan ref to look up). What remains is
+ * what the operator typed when dispatching, which the workflow's `run-name` carries:
+ * the review number for a revision, the workload for a proposal.
+ */
+async function findReaderByRunTitle(gh: Octokit, repo: RepoRef, title: string): Promise<{ number: number } | undefined> {
+  const revise = REVISE_TITLE.exec(title);
+  if (revise) {
+    try {
+      const { data: issue } = await gh.issues.get({ ...repo, issue_number: Number(revise[1]) });
+      const labels = (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : (l.name ?? '')));
+      const live = !issue.pull_request && issue.state === 'open' && labels.some((l) => LIVE_BREAK_LABELS.includes(l));
+      return live ? { number: issue.number } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const propose = PROPOSE_TITLE.exec(title);
+  if (propose) {
+    const workload = await getWorkload(gh, repo, propose[1]!);
+    return workload ? { number: workload.issueNumber } : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -298,7 +365,15 @@ export function unpublishableComment(input: { runId: string; reason: Unpublishab
 export async function reportUnpublishable(
   gh: Octokit,
   repo: RepoRef,
-  input: { runId: string; reason: UnpublishableReason; liveArtifacts: string[]; planRef?: string | null },
+  input: {
+    runId: string;
+    reason: UnpublishableReason;
+    liveArtifacts: string[];
+    planRef?: string | null;
+    /** the run's title and page — read only for a detection stop (see findReaderByRunTitle) */
+    runTitle?: string | null;
+    runUrl?: string | null;
+  },
 ): Promise<{ outcome: 'commented' | 'already_reported' | 'no_break'; issueNumber?: number }> {
   // TWO LOCATORS, because a revision's break does not link the revision's run (Codex on
   // PR #287). The run-link search finds the break a PROPOSAL raised, because gh-aw's
@@ -310,13 +385,41 @@ export async function reportUnpublishable(
   // absent), find the live break by ref the way the publish path already does.
   const andon =
     (input.planRef ? await findBreakByPlanRef(gh, repo, input.planRef) : undefined) ??
-    (await findLiveBreakByRunLink(gh, repo, input.runId));
+    (await findLiveBreakByRunLink(gh, repo, input.runId)) ??
+    // THIRD, and for a detection stop only: the other reasons keep exactly the two
+    // locators they had, so nothing about them can start landing on a workload issue.
+    (input.reason === 'detection-stopped' && input.runTitle ? await findReaderByRunTitle(gh, repo, input.runTitle) : undefined);
   if (!andon) return { outcome: 'no_break' };
   const marker = unpublishableMarker(input.runId);
   const existing = await gh.paginate(gh.issues.listComments, { ...repo, issue_number: andon.number, per_page: 100 });
   if (existing.some((c) => (c.body ?? '').includes(marker))) return { outcome: 'already_reported', issueNumber: andon.number };
   await gh.issues.createComment({ ...repo, issue_number: andon.number, body: unpublishableComment(input) });
   return { outcome: 'commented', issueNumber: andon.number };
+}
+
+/**
+ * The reporter the workflow runs: the probe's reason, REFINED by the one fact the probe
+ * does not read, then reported.
+ *
+ * The probe sees only the artifact listing, and to it a run the safety check stopped
+ * looks exactly like a run whose agent gave up: no `plan.json`. Saying "the agent did
+ * not finish" there is a false cause (GHI #316), so `no-artifact` is re-read against the
+ * run's own detection job. Only `no-artifact` is: an expired or half-uploaded plan
+ * exists BECAUSE detection passed and its outputs were applied.
+ *
+ * Unknown stays the old answer. A detection result that cannot be read does not become
+ * "detection stopped it"; the run-link locator then answers as it always did.
+ */
+export async function reportAbsence(
+  gh: Octokit,
+  repo: RepoRef,
+  input: { runId: string; reason: ProbeReason; liveArtifacts: string[]; planRef?: string | null },
+): Promise<{ outcome: 'commented' | 'already_reported' | 'no_break'; issueNumber?: number; reason: UnpublishableReason }> {
+  const stopped = input.reason === 'no-artifact' && (await readDetectionOutcome(gh, repo, input.runId)) === 'stopped';
+  if (!stopped) return { ...(await reportUnpublishable(gh, repo, input)), reason: input.reason };
+  const run = await readRunTitle(gh, repo, input.runId);
+  const result = await reportUnpublishable(gh, repo, { ...input, reason: 'detection-stopped', runTitle: run.title, runUrl: run.url });
+  return { ...result, reason: 'detection-stopped' };
 }
 
 /** The deterministic branch write both publish paths share. RESUMABLE: a
@@ -473,8 +576,8 @@ if (isMain) {
   const reportReason = get('report-absence');
   if (reportReason !== undefined) {
     const runId = get('run-id');
-    const reasons: UnpublishableReason[] = ['no-artifact', 'expired', 'revision-incomplete'];
-    if (!owner || !repoName || !runId || !/^[0-9]+$/.test(runId) || !reasons.includes(reportReason as UnpublishableReason)) {
+    const reasons = PROBE_REASONS;
+    if (!owner || !repoName || !runId || !/^[0-9]+$/.test(runId) || !reasons.includes(reportReason as ProbeReason)) {
       console.error(`usage: plan-publish --report-absence <${reasons.join('|')}> --repo <owner/repo> --run-id <digits> [--artifacts "a,b"]`);
       process.exit(2);
     }
@@ -484,9 +587,9 @@ if (isMain) {
     // missing, empty or unparsable directory simply yields no ref — the run-link
     // locator then answers, exactly as before.
     const planRef = planRefFromDir(get('dir'));
-    reportUnpublishable(createClient(), { owner: owner!, repo: repoName! }, {
+    reportAbsence(createClient(), { owner: owner!, repo: repoName! }, {
       runId: runId!,
-      reason: reportReason as UnpublishableReason,
+      reason: reportReason as ProbeReason,
       liveArtifacts: (get('artifacts') ?? '')
         .split(/[\n,]/)
         .map((a) => a.trim())
@@ -498,12 +601,13 @@ if (isMain) {
         // whose break was already withdrawn is exactly the case where there is nobody left
         // to tell, and failing the job for it would turn a tidy record into a red run the
         // operator has to interpret.
+        const why = result.reason === 'detection-stopped' ? 'was stopped by its safety check' : 'has no plan to publish';
         console.log(
           result.outcome === 'commented'
-            ? `told Andon #${result.issueNumber} that run ${runId} has no plan to publish`
+            ? `told #${result.issueNumber} that run ${runId} ${why}`
             : result.outcome === 'already_reported'
-              ? `Andon #${result.issueNumber} was already told about run ${runId} — nothing added`
-              : `no live Andon break references run ${runId} — nothing to tell`,
+              ? `#${result.issueNumber} was already told about run ${runId} — nothing added`
+              : `run ${runId} ${why}, and nothing live (a review, or the workload it was for) could be found to tell`,
         );
       })
       .catch((error) => {

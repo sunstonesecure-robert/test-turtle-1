@@ -135,10 +135,16 @@ export async function getApprovalRecord(
   gh: Octokit,
   repo: RepoRef,
   prNumber: number,
-): Promise<{ approver: string; approvedAt: string; mergeSha: string } | null> {
+): Promise<{ approver: string; approvedAt: string; mergeSha: string; mergedBy: string | null } | null> {
   const { data: pr } = await gh.pulls.get({ ...repo, pull_number: prNumber });
   if (!pr.merged_at || !pr.merge_commit_sha) return null;
   return {
+    // WHO MERGED, UNDER ITS OWN NAME (GHI #319) — null when GitHub reports nobody.
+    // `approver` below is kept for the readers that predate the distinction (the
+    // archive's cards), and it is still the merger there. It authorizes nothing: the
+    // freeze takes its approver from `readApprovalAuthority`, which asks who reviewed
+    // the exact merged commit and never reads this field.
+    mergedBy: pr.merged_by?.login ?? null,
     approver: pr.merged_by?.login ?? UNREPORTED_APPROVER_LOGIN,
     approvedAt: pr.merged_at,
     mergeSha: pr.merge_commit_sha,

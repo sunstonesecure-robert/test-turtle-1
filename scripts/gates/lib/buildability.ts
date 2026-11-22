@@ -3,7 +3,7 @@ import type { RepoRef } from '../../../dashboard/lib/github/client';
 import { apiMessage } from '../../../dashboard/lib/github/errors';
 import { resolveCurrent, tryReadPlanAtRef } from '../../../dashboard/lib/github/plans';
 import { checkB1FrozenCurrent, checkB2PlanRevalidates } from './checks-preflight';
-import { readFileAtRef, type FileAtRef } from './repo-read';
+import { frozenTagRef, readFileAtRef, type FileAtRef } from './repo-read';
 import type { GateResult } from './runner';
 
 /**
@@ -231,7 +231,8 @@ export async function checkMachineryCurrentAtTag(
       degraded ??= `${path} on ${current.branch} could not be read (${here.why})`;
       continue;
     }
-    const there = await readFileAtRef(gh, repo, path, planRef);
+    // The TAG, never the same-named approval branch (GHI #303) — see frozenTagRef.
+    const there = await readFileAtRef(gh, repo, path, frozenTagRef(planRef));
     if (there.kind === 'unreadable') {
       degraded ??= `${path} at ${planRef} could not be read (${there.why})`;
       continue;
@@ -269,7 +270,7 @@ export async function machineryDriftReason(
   // one read used to fault the whole workloads page, and now that the same read feeds a
   // REFUSAL at the dispatch click it would also close the only retry route the product
   // has. A read that could not be made says nothing and refuses nothing (ADR-0007).
-  const lock = await readFileAtRef(gh, repo, BUILD_WORKFLOW_PATH, planRef);
+  const lock = await readFileAtRef(gh, repo, BUILD_WORKFLOW_PATH, frozenTagRef(planRef));
   if (lock.kind === 'unreadable') {
     return {
       drift: { kind: 'unknown', why: `${BUILD_WORKFLOW_PATH} at ${planRef} could not be read (${lock.why})` },

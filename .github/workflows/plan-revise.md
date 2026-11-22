@@ -5,6 +5,12 @@ on:
       andon:
         description: "Plan review (Andon issue) number whose open corrections this run must carry out"
         required: true
+# THE RUN'S TITLE CARRIES ITS DISPATCH INPUT (GHI #316). plan-publish is a `workflow_run`
+# consumer and cannot see inputs. When the safety check stops this run nothing is applied -
+# no issue, no plan.json - so the title is the only thing left that says who to tell.
+# `workflow_run` keys on `name:` (the heading below), not on this, so the trigger is unaffected.
+# Pinned on this source and on the compiled lock by tests/unit/detection-stopped.test.ts.
+run-name: "plan-revise — review #${{ inputs.andon }}"
 permissions:
   contents: read
   issues: read
@@ -33,6 +39,13 @@ safe-outputs:
     # every compile run `npm run lock:enforce` — scripts/enforce-upload-caps.ts mirrors this value
     # as `"max"` into the lock's embedded config; tests/unit/upload-caps.test.ts fails without it.
     max-uploads: 2
+  # BLOCKING, NOT WARNING (GHI #316). gh-aw's default lets a flagged run through with a caution
+  # label: the detection job "succeeds", so the safe_outputs gate on its result stops nothing.
+  # `false` makes a flagged run - or a detector that could not run - FAIL the detection job, and
+  # nothing the agent produced is applied. tests/unit/workflow-detection-blocking.test.ts pins this
+  # in the source and in the compiled lock.
+  threat-detection:
+    continue-on-error: false
 steps:
   # CAN THIS KEY PAY FOR THE RUN? Asked in one second, before any container pull
   # (operator ask, 2026-08-23, after run 32658500322 died at "Credit balance is too

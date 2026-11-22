@@ -1,0 +1,82 @@
+# Read-only baseline. Enrolled control and effects belong in the SunStone broker;
+# this workflow cannot reserve, dispatch an agent, publish, merge, or deploy.
+# Manual until broker enrollment/custody is proved; no automatic paid activation.
+name: agent-loop
+# The run title is the typed request the hosted controller reads from GitHub's own
+# list of dispatches, so a dropped, cancelled or coalesced run is still recoverable.
+# A dispatch is not an acceptance: only a recorded request receipt is.
+run-name: agent-loop:${{ inputs.action }}:${{ inputs.workload || '-' }}:${{ inputs.request_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: Caller-chosen request ID (8-64 characters; letters, digits, dot, underscore, hyphen). Reusing an ID is idempotent.
+        required: true
+        type: string
+      action:
+        description: What is asked of the loop controller
+        required: true
+        default: observe
+        type: choice
+        options: [observe, reconcile, start, resume, stop]
+      workload:
+        description: Workload slug (required for start, resume and stop)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  issues: read
+  actions: read
+  checks: read
+
+concurrency:
+  group: agent-loop-observe
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Visible refusal at the source. The controller validates the title again itself.
+      - name: Refuse a malformed typed request
+        env:
+          REQUEST_ID: ${{ inputs.request_id }}
+          REQUEST_ACTION: ${{ inputs.action }}
+          REQUEST_WORKLOAD: ${{ inputs.workload }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          [[ "$REQUEST_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,63}$ ]] || { echo "::error::request_id is not a valid request ID"; exit 2; }
+          [[ "$REQUEST_ACTION" =~ ^(observe|reconcile|start|resume|stop)$ ]] || { echo "::error::action is not a supported request"; exit 2; }
+          [[ -z "$REQUEST_WORKLOAD" || "$REQUEST_WORKLOAD" =~ ^[a-z0-9][a-z0-9-]{0,99}$ ]] || { echo "::error::workload is not a valid slug"; exit 2; }
+          if [[ -z "$REQUEST_WORKLOAD" && "$REQUEST_ACTION" =~ ^(start|resume|stop)$ ]]; then echo "::error::this request needs a workload"; exit 2; fi
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || { echo "::error::requests are read only from the default branch"; exit 2; }
+          echo "Request recorded as a dispatch. It is accepted only once the controller records its receipt." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - name: Observe without operational writes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx tsx scripts/agent-loop.ts --repo "$GITHUB_REPOSITORY" --mode observe > "$RUNNER_TEMP/agent-loop-observe.json"
+      - name: Show the same status projection
+        if: always()
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+          const path = process.env.RUNNER_TEMP + '/agent-loop-observe.json';
+          if (existsSync(path)) {
+            const report = JSON.parse(readFileSync(path, 'utf8'));
+            const summary = report.summary;
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              summary ? `Observe: ${summary.total} decisions; ${summary.action_required} require action; ${summary.executed_effects} executed effects; cost ${summary.cost}.\n` : 'Observation failed. See the sanitized JSON report.\n');
+          }
+          JS

@@ -77,6 +77,27 @@ export function serializeDeliverableMarker(d: DeliverableMarker): string {
   return `<!-- deliverable:v1 plan:${d.planRef} step:${d.stepId} run:${d.runId} executor:${d.executorId} tier:${d.tier}${optional} -->`;
 }
 
+/**
+ * The build run a `build-publish` refusal was for, recorded on the refusal comment it
+ * writes to the work item. Before this the comment named no run, so the dashboard could
+ * only say "dispatched, nothing delivered yet" about a build whose deliverable had been
+ * refused minutes after it finished (test-turtle-1 #155, 2026-09-25). The run id is the
+ * join the dispatch record already carries, so the two meet exactly.
+ */
+export const REFUSAL_HEADER = '**Deliverable refused — nothing was written.**';
+const REFUSAL_RE = /<!--\s*deliverable-refused:v1\s+run:(\d+)\s*-->/;
+
+export function serializeRefusalMarker(runId: string): string {
+  return `<!-- deliverable-refused:v1 run:${runId} -->`;
+}
+
+/** The run a refusal comment names, or null for a comment that carries no marker
+ *  (every refusal written before the marker existed). */
+export function parseRefusalMarker(body: string): number | null {
+  const m = REFUSAL_RE.exec(body);
+  return m ? Number(m[1]) : null;
+}
+
 export function parseDeliverableMarker(body: string): DeliverableMarker | null {
   const m = DELIVERABLE_RE.exec(body);
   if (!m) return null;

@@ -190,6 +190,15 @@ export { REQUIRED_CHECK_CONTEXTS };
  * compiled `.lock.yml`, so a missing source changes nothing at runtime.
  */
 export const I5_UNVERIFIED_TEMPLATES: Readonly<Record<string, string>> = {
+  'agent-loop.yml':
+    'Optional manual read-only observation for spec 002. Its absence does not block legacy planning, ' +
+    'building or verification. Enforced loops remain unavailable; this workflow is not an activation ' +
+    'or hosted-control readiness proof.',
+  'agent-loop-probe.yml':
+    'No-model stand-in runs for the hosted control plane\'s native witnesses (spec 002, T124): a run that only ' +
+    'stays in progress, and a probe showing this repository\'s own credentials cannot reach the hosted state, ' +
+    'audit or control repositories. Manual dispatch only; it holds no secret and writes nothing. Its absence ' +
+    'blocks no planning, building or verification.',
   'workload-intake.yml':
     'Normalizes GitHub-UI intake into the workload:v1 marker. Without it, issues created from the ' +
     'intake template keep their form-rendered markdown and are invisible downstream (FR-031\'s ' +
@@ -328,6 +337,75 @@ export async function resolveCanOpenPrs(gh: Octokit, repo: RepoRef): Promise<Can
 }
 
 export const PLAN_RULESET = 'oversight: protect plan branches';
+/** The frozen plan TAGS' own protection (GHI #318). A tag `plan/<slug>/v<N>` IS the
+ *  official approved plan — builds dispatch on it, verify checks it out, every gate
+ *  reads its current target — and until this ruleset nothing stopped a credential
+ *  with Contents write (or a developer's `git push --force --tags`) from moving or
+ *  deleting one. It blocks update and deletion and carries no bypass actor. It does
+ *  NOT restrict creation: the freeze creates the tag on the built-in token, and
+ *  personal repositories have no integration bypass to exempt it with (GHI #44). */
+export const PLAN_TAG_RULESET = 'oversight: protect frozen plan tags';
+// WHICH tags that ruleset covers. `/**/*`, NOT `/**` (review of PR #385).
+//
+// GitHub matches ruleset ref patterns with `File.fnmatch` and `File::FNM_PATHNAME`, so
+// `*` never crosses a `/`, and a trailing `**` behaves as a single `*`: only `**/` is
+// recursive. Its documentation gives `qa/**/*` as the form that matches any depth
+// ("Using fnmatch syntax", creating-rulesets-for-a-repository). Every frozen tag is
+// `plan/<slug>/v<N>` — two segments below `plan/` — so `refs/tags/plan/**` would have
+// covered NONE of them while the ruleset sat there named, active and green.
+//
+// Not taken on trust: the sandbox's branch ruleset carries the `/**` form, and
+// `GET /repos/{owner}/{repo}/rules/branches/{branch}` answers with its two rules for
+// `plan/x` and with nothing for `plan/demo/v1` (read 2026-11-17). The branch ruleset's
+// own pattern is the same defect and is tracked separately; it is not changed here.
+//
+// Shared by `init`, which installs it, and readiness, which reads it back — one
+// constant, so the two cannot drift apart.
+export const PLAN_TAG_REF_PATTERN = 'refs/tags/plan/**/*';
+/** The rules that make a frozen tag immovable. `creation` is deliberately absent — see
+ *  the ruleset's payload in setup-repo.ts. */
+export const PLAN_TAG_RULE_TYPES = ['update', 'deletion'] as const;
+
+/**
+ * What is wrong with a stored tag ruleset, in words; empty when it protects the tags.
+ *
+ * NAMED AND ACTIVE IS NOT PROTECTING (Codex on PR #385). A ruleset keeps its name and
+ * its `active` enforcement while someone removes `update` from it, points it at other
+ * refs, adds an exclusion, or gives a role a bypass — and readiness, asking only for the
+ * name and the enforcement, said the frozen tags were protected while any of those left
+ * them movable. `init` already treats every one of these as drift and puts it back;
+ * this is the same question asked where the operator looks first.
+ *
+ * `bypass_actors` ABSENT is not the same as empty: GitHub returns the property only to
+ * a caller with write access to the ruleset. A reader without it learns nothing about
+ * bypass either way, so absence is not reported as a weakness (it would turn every
+ * read-only credential's report red) — only a bypass list that was returned and is not
+ * empty is.
+ */
+export function planTagRulesetWeaknesses(ruleset: {
+  target?: string;
+  conditions?: unknown;
+  rules?: { type: string }[];
+  bypass_actors?: unknown[];
+}): string[] {
+  const weaknesses: string[] = [];
+  if (ruleset.target !== 'tag') weaknesses.push(`it targets ${ruleset.target ?? 'branch'} refs, not tags`);
+  const refName = (ruleset.conditions as { ref_name?: { include?: unknown; exclude?: unknown } } | undefined)?.ref_name;
+  const include = Array.isArray(refName?.include) ? (refName.include as unknown[]) : [];
+  const exclude = Array.isArray(refName?.exclude) ? (refName.exclude as unknown[]) : [];
+  if (!include.includes(PLAN_TAG_REF_PATTERN)) {
+    weaknesses.push(`it does not apply to ${PLAN_TAG_REF_PATTERN} (it applies to ${include.length ? include.join(', ') : 'nothing'})`);
+  }
+  if (exclude.length > 0) weaknesses.push(`it excludes ${exclude.join(', ')}`);
+  const types = new Set((ruleset.rules ?? []).map((rule) => rule.type));
+  for (const type of PLAN_TAG_RULE_TYPES) {
+    if (!types.has(type)) weaknesses.push(`it has no "${type}" rule, so a frozen tag can be ${type === 'update' ? 'moved' : 'deleted'}`);
+  }
+  if (Array.isArray(ruleset.bypass_actors) && ruleset.bypass_actors.length > 0) {
+    weaknesses.push(`${ruleset.bypass_actors.length} bypass actor(s) may ignore it`);
+  }
+  return weaknesses;
+}
 /** LEGACY (pre-2026-07-11, GHI #44): the CURRENT pointer file is gone — the
  *  official version is derived from frozen tags. The name survives only so
  *  init can DELETE a stale instance on reconcile; nothing requires it. */
@@ -369,10 +447,12 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
    *  present-reporting-and-inert failure this project refuses everywhere else (GHI #108),
    *  reached from the one direction nothing was looking at. */
   let rulesetEnforcement: Map<string, string> | null = null;
+  let rulesetIds: Map<string, number> | null = null;
   let planLimitDetail: string | null = null;
   try {
     const { data: rulesets } = await gh.request('GET /repos/{owner}/{repo}/rulesets', { ...repo });
-    const listed = rulesets as { name: string; enforcement?: string }[];
+    const listed = rulesets as { id: number; name: string; enforcement?: string }[];
+    rulesetIds = new Map(listed.map((r) => [r.name, r.id]));
     rulesetNames = new Set(listed.map((r) => r.name));
     rulesetEnforcement = new Map(listed.map((r) => [r.name, r.enforcement ?? 'unknown']));
   } catch (error: unknown) {
@@ -404,8 +484,53 @@ export async function checkReadiness(gh: Octokit, repo: RepoRef): Promise<GateRe
     return { status: 'pass' };
   };
 
-  const i2 = rulesetVerdict(PLAN_RULESET, `missing ruleset: ${PLAN_RULESET}`);
-  results.push({ id: 'I2', status: i2.status, requirement: 'FR-028', ...(i2.detail ? { detail: i2.detail } : {}) });
+  // I2 is BOTH halves of plan protection (GHI #318): the proposal branches and the
+  // frozen tags. One item rather than a new id because it is one question — "can an
+  // approved plan be rewritten after the fact?" — and the tag half is the one that
+  // answers it for the official version. Both details are reported when both are unmet;
+  // on a plan-limited repository the two are the same sentence, so it is said once.
+  const planBranches = rulesetVerdict(PLAN_RULESET, `missing ruleset: ${PLAN_RULESET}`);
+  let planTags = rulesetVerdict(
+    PLAN_TAG_RULESET,
+    `missing ruleset: ${PLAN_TAG_RULESET} (an approved plan's tag can be moved or deleted) — re-run \`npm run init\``,
+  );
+  // Present and active is where the name-and-enforcement question stops; whether it
+  // still PROTECTS the tags is read from the ruleset itself (Codex on PR #385). The list
+  // is not relied on for rules, conditions or bypass actors — the per-id read is the one
+  // `init` reconciles against, so the two judge the same document.
+  const planTagRulesetId = rulesetIds?.get(PLAN_TAG_RULESET);
+  if (planTags.status === 'pass' && planTagRulesetId !== undefined) {
+    const repair = 're-run `npm run init` (it puts the ruleset back), or correct it under Settings → Rules → Rulesets';
+    try {
+      const { data: full } = await gh.request('GET /repos/{owner}/{repo}/rulesets/{ruleset_id}', {
+        ...repo,
+        ruleset_id: planTagRulesetId,
+      });
+      const weaknesses = planTagRulesetWeaknesses(full as Parameters<typeof planTagRulesetWeaknesses>[0]);
+      if (weaknesses.length > 0) {
+        planTags = {
+          status: 'fail',
+          detail: `ruleset "${PLAN_TAG_RULESET}" is active but does not protect frozen plan tags: ${weaknesses.join('; ')} — ${repair}`,
+        };
+      }
+    } catch (error: unknown) {
+      // Listed a moment ago and now refused or gone: what it enforces was not read, and
+      // "not read" is not "protecting".
+      const status = errorStatus(error);
+      if (status !== 403 && status !== 404) throw error;
+      planTags = {
+        status: 'fail',
+        detail: `ruleset "${PLAN_TAG_RULESET}" is listed but could not be read (${apiMessage(error)}), so what it enforces is not known — ${repair}`,
+      };
+    }
+  }
+  const i2Details = [...new Set([planBranches.detail, planTags.detail].filter((d): d is string => d !== undefined))];
+  results.push({
+    id: 'I2',
+    status: i2Details.length === 0 ? 'pass' : 'fail',
+    requirement: 'FR-028',
+    ...(i2Details.length ? { detail: i2Details.join('; ') } : {}),
+  });
   const i3 = rulesetVerdict(MAIN_RULESET, `missing ruleset: ${MAIN_RULESET} (required plan-gate check)`);
   results.push({ id: 'I3', status: i3.status, requirement: 'FR-028', ...(i3.detail ? { detail: i3.detail } : {}) });
 

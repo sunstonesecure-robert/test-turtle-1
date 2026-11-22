@@ -31,7 +31,28 @@ import { errorMessage } from '../../dashboard/lib/github/errors';
  * `scope` field is added: PlanStep is additionalProperties:false until T223.
  */
 
-export function demoPlan(runId: string): PlanDoc {
+/** The file the seeded plan delivers when the caller names none. */
+export const DEMO_FILENAME = 'hello.py';
+
+/**
+ * A deliverable name the seed will write into the plan: one Python file at the
+ * repository root. Deliberately narrow — the name lands verbatim inside the
+ * `run` shell command the operator approves, so nothing that could mean
+ * anything to a shell (a space, a quote, `$`, `;`, a slash) is accepted.
+ */
+export const DEMO_FILENAME_PATTERN = /^[a-z0-9][a-z0-9_-]*\.py$/;
+
+/**
+ * `filename` exists for live runs that repeat (PB-021): a target that already
+ * holds `hello.py` from an earlier run fails the seeded plan's negative
+ * control, and renaming six occurrences by hand in the GitHub editor is where
+ * a missed one costs a paid build. Every mention moves together here instead.
+ * IDs stay `step-hello` / `vt-hello-copy` whatever the file is called.
+ */
+export function demoPlan(runId: string, filename: string = DEMO_FILENAME): PlanDoc {
+  if (!DEMO_FILENAME_PATTERN.test(filename)) {
+    throw new Error(`demo plan filename must be a root-level Python file matching ${DEMO_FILENAME_PATTERN} — got "${filename}"`);
+  }
   return {
     feature: 'demo',
     version: 1,
@@ -41,9 +62,9 @@ export function demoPlan(runId: string): PlanDoc {
     steps: [
       {
         id: 'step-hello',
-        title: 'Print the demo greeting from hello.py',
-        intent: 'Add a standalone hello.py at the repo root that prints the operator-facing greeting',
-        acceptance: 'Running `python hello.py` exits 0 and prints exactly the greeting string',
+        title: `Print the demo greeting from ${filename}`,
+        intent: `Add a standalone ${filename} at the repo root that prints the operator-facing greeting`,
+        acceptance: `Running \`python ${filename}\` exits 0 and prints exactly the greeting string`,
         priority: 'MUST',
         evidence_tag: 'verified',
         stand_in: null,
@@ -57,7 +78,7 @@ export function demoPlan(runId: string): PlanDoc {
         //
         // An EXACT path, not `hello.py/**`: a bare name is read exactly in the scope
         // direction, so this authorizes the one file and nothing beneath it.
-        scope: ['hello.py'],
+        scope: [filename],
         tracking_issue: null,
       },
     ],
@@ -65,10 +86,10 @@ export function demoPlan(runId: string): PlanDoc {
       {
         id: 'vt-hello-copy',
         kind: 'exact-copy',
-        check: 'stdout of `python hello.py` equals "Hello, operator!"',
+        check: `stdout of \`python ${filename}\` equals "Hello, operator!"`,
         // The executable form (T223): the operator approves the exact command that
         // will judge the work, so verification needs no model.
-        run: 'test "$(python hello.py)" = "Hello, operator!"',
+        run: `test "$(python ${filename})" = "Hello, operator!"`,
         maps_to: ['step-hello'],
       },
     ],
@@ -91,10 +112,13 @@ export interface ProposeResult {
 export async function proposeDemoPlan(
   gh: Octokit,
   repo: RepoRef,
-  opts: { slug?: string; runId?: string; actor?: string; at?: string; base?: string; trackingIssue?: number } = {},
+  opts: { slug?: string; runId?: string; actor?: string; at?: string; base?: string; trackingIssue?: number; filename?: string } = {},
 ): Promise<ProposeResult> {
   const slug = opts.slug ?? 'demo';
   const runId = opts.runId ?? `demo-run-${slug}`;
+  // Built before anything is written: a refused filename must not leave a
+  // workload and an Andon break behind with no plan.
+  const plan = demoPlan(runId, opts.filename);
   // Attribution is a success criterion, not decoration (live PB-003 finding G:
   // seeded events read `by:@operator`, a placeholder no audit can resolve).
   // Default to the AUTHENTICATED user, the same identity the real workflows
@@ -137,7 +161,6 @@ export async function proposeDemoPlan(
   }
 
   const branch = planBranch(slug, 1);
-  const plan = demoPlan(runId);
   plan.feature = slug;
   // Bind the step to its chunk when the caller has one — preflight B3 requires
   // the build's chunk to be a tracking issue of the frozen plan.
@@ -160,6 +183,30 @@ export async function proposeDemoPlan(
   return { workloadIssue: workload.issueNumber, andonIssue, planRef: branch };
 }
 
+export const SEED_USAGE =
+  'usage: propose-plan [--slug <kebab-case-slug>] [--filename <name.py>]  (defaults: demo, hello.py)';
+
+/**
+ * The seed's command line, or null when it should be refused with the usage
+ * line. Both flags take `--flag value` and `--flag=value`. Anything else is
+ * refused rather than ignored: both flags have defaults, so a misspelt one would
+ * otherwise seed `demo` / `hello.py` silently.
+ */
+export function parseSeedArgs(argv: readonly string[]): { slug?: string; filename?: string } | null {
+  const out: { slug?: string; filename?: string } = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    const key = (['slug', 'filename'] as const).find((k) => arg === `--${k}` || arg.startsWith(`--${k}=`));
+    if (key === undefined || out[key] !== undefined) return null;
+    const value = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : argv[++i];
+    if (!value) return null;
+    if (key === 'slug' && !/^[a-z0-9][a-z0-9-]*$/.test(value)) return null;
+    if (key === 'filename' && !DEMO_FILENAME_PATTERN.test(value)) return null;
+    out[key] = value;
+  }
+  return out;
+}
+
 const isMain = process.argv[1]?.endsWith('propose-plan.ts');
 if (isMain) {
   // A live target accumulates plan/<slug>/v* refs run over run (PB-001 used
@@ -168,16 +215,14 @@ if (isMain) {
   // Accept --slug <value> and --slug=<value>: this arg is optional with a
   // default, so an unrecognized spelling would otherwise fall through SILENTLY
   // to `demo` — wrong slug on a fresh target, confusing ref-exists 422 here.
-  const argv = process.argv.slice(2);
-  const i = argv.findIndex((a) => a === '--slug' || a.startsWith('--slug='));
-  const slug = i < 0 ? undefined : argv[i]!.startsWith('--slug=') ? argv[i]!.slice('--slug='.length) : argv[i + 1];
-  if (i >= 0 && (!slug || !/^[a-z0-9][a-z0-9-]*$/.test(slug))) {
-    console.error('usage: propose-plan [--slug <kebab-case-slug>]  (default: demo)');
+  const args = parseSeedArgs(process.argv.slice(2));
+  if (args === null) {
+    console.error(SEED_USAGE);
     process.exit(2);
   }
   const gh = createClient();
   const repo = repoFromEnv();
-  proposeDemoPlan(gh, repo, slug ? { slug } : {})
+  proposeDemoPlan(gh, repo, args)
     .then((r) => {
       console.log(`workload issue #${r.workloadIssue}`);
       console.log(`Andon break  #${r.andonIssue} (andon:open)`);

@@ -29,6 +29,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/StateTransition" },
       "description": "OPTIONAL and must stay so: every plan frozen before GHI #289 carries none, and absent means the plan has no state transitions, never that they are unjudged (FR-042)"
+    },
+    "second_human_review": {
+      "enum": ["required", "deferred"],
+      "description": "OPTIONAL; absent reads as required. `deferred` is the operator's recorded single-operator policy (GHI #319): the person who opened the approval pull request may also approve it, by a comment review of the exact commit plus a consent recorded through the dashboard sign-in. It is part of the bytes that person consents to and never stands for a second person's review. Written by the operator from the dashboard's plan approval page; a plan-authoring agent leaves it out"
     }
   },
   "$defs": {

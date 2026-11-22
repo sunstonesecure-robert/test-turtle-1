@@ -7,6 +7,7 @@ import { errorMessage, errorStatus } from '../dashboard/lib/github/errors';
 import { listPullRequestPaths, resolveMergeAuthority } from '../dashboard/lib/github/builds';
 import { deliverableGate } from './gates/deliverable-gate';
 import { refusalDetail } from './gates/lib/runner';
+import { isHeadMoved } from './gates/lib/pinned-head';
 import { checkpointPathsTouched, parseCheckpointPaths, CHECKPOINT_PATHS_VARIABLE } from './gates/lib/checkpoint-paths';
 import {
   listRequiredCheckRuns,
@@ -80,6 +81,18 @@ import {
  * required checks are green, which is the ordinary path the rules exist to permit.
  * A bypass here would mean automation could land work the gates refused, which is
  * the whole thing the gates are for.
+ *
+ * IT MERGES THE COMMIT IT JUDGED, OR NOTHING (GHI #320). A pull request is read in
+ * several steps here — its files, the gate, the required checks — and each read answers
+ * for the head as it is at that moment. `pulls.merge` without a `sha` merges whatever
+ * the head is when the call arrives. Between the two, a later build of the same step
+ * can append a commit (`build-publish` does exactly that), and any credential with
+ * Contents write can push to a `build/**` branch: the merger would then land a commit
+ * whose files it never read on the authority it decided for a different one, and a
+ * checkpoint path in the new commit would be skipped. So the head SHA is taken ONCE,
+ * every later read is checked against it, and the merge call carries it. A head that
+ * moved is `waiting-on-checks` — nothing merged, nothing wrong, and the next sweep
+ * judges the new head from scratch.
  */
 
 export type MergeOutcome =
@@ -144,6 +157,8 @@ const TRANSIENT_REFUSAL = [
   /is in progress/i,
   /is expected/i,
   /Base branch was modified/i,
+  // the pinned merge's 409 (GHI #320): the head is no longer the commit that was judged
+  /Head branch was modified/i,
   /mergeable state is unknown/i,
 ];
 
@@ -209,6 +224,25 @@ export async function waitForRequiredChecks(
   return pending;
 }
 
+/**
+ * The one sentence for "the head is not the commit that was judged" (GHI #320), whichever
+ * read noticed it. Operator-visible, so it names what happened and what happens next and
+ * no rule by its number.
+ */
+function headMoved(prNumber: number, judged: string, found: string): MergeOutcome {
+  return {
+    outcome: 'waiting-on-checks',
+    prNumber,
+    reason:
+      `the pull request head moved from ${judged.slice(0, 8)} to ${found.slice(0, 8)} ` +
+      'while it was being judged — not merged, and NOT blocked: the files, the gate and the checks were read for a ' +
+      'commit that is no longer the one that would be merged, so none of it is applied to the new one. The next sweep ' +
+      'judges the new head from scratch — an operator dispatch (Actions → build-merge → Run workflow, no inputs), or ' +
+      "the next deliverable's gate. Nothing retries on its own",
+    pending: [],
+  };
+}
+
 /** Mode 1 — merge a pre-authorized deliverable whose gate is green. */
 export async function mergeIfPreAuthorized(
   gh: Octokit,
@@ -219,6 +253,9 @@ export async function mergeIfPreAuthorized(
   const { data: open } = await gh.pulls.list({ ...repo, head: `${repo.owner}:${branch}`, state: 'open', per_page: 10 });
   const pr = open[0];
   if (!pr) return { outcome: 'no-pr', branch };
+  // THE ONE SNAPSHOT (GHI #320). Everything below is a statement about this commit, and
+  // the merge call names it — so nothing else can be merged on what is decided here.
+  const judged = pr.head.sha;
 
   const marker = parseDeliverableMarker(pr.body ?? '');
   if (!marker) {
@@ -230,6 +267,16 @@ export async function mergeIfPreAuthorized(
   // on what this change touches — a subject workflow or an operator-listed path makes
   // it operator-required whatever the repository setting says (T274).
   const touched = await listPullRequestPaths(gh, repo, pr.number);
+  // THAT LIST FOLLOWS THE LIVE HEAD, so it is only evidence about `judged` if the head
+  // was still `judged` once it had been read (GHI #320). Read again and compared: a
+  // head that moved in between means the list may describe a different commit, and the
+  // authority decided from it would be about that commit, not the one pinned above.
+  // Checked BEFORE the authority decision, so even "this waits for you" is never said
+  // about a mixed reading.
+  const { data: reread } = await gh.pulls.list({ ...repo, head: `${repo.owner}:${branch}`, state: 'open', per_page: 10 });
+  const now = reread.find((p) => p.number === pr.number);
+  if (!now) return { outcome: 'no-pr', branch };
+  if (now.head.sha !== judged) return headMoved(pr.number, judged, now.head.sha);
   const checkpointPaths = checkpointPathsTouched(touched, opts.checkpointGlobs ?? []);
   const { authority, reason } = resolveMergeAuthority(step, { requiresOperatorMerge: opts.requiresOperatorMerge, checkpointPaths });
   if (authority === 'operator-merge-required') {
@@ -238,7 +285,15 @@ export async function mergeIfPreAuthorized(
     return { outcome: 'awaiting-operator', prNumber: pr.number, reason };
   }
 
-  const report = await deliverableGate(gh, repo, pr.number);
+  // The gate is handed the same snapshot: it refuses to judge if the head it finds is
+  // not `judged`, and it uses the file list read above rather than a second live one.
+  let report: Awaited<ReturnType<typeof deliverableGate>>;
+  try {
+    report = await deliverableGate(gh, repo, pr.number, { pinned: { headSha: judged, paths: touched } });
+  } catch (error: unknown) {
+    if (isHeadMoved(error)) return headMoved(pr.number, judged, error.found);
+    throw error;
+  }
   if (report.result !== 'pass') {
     return { outcome: 'blocked', prNumber: pr.number, reason: `deliverable-gate is red: ${refusalDetail(report.gates)}` };
   }
@@ -249,13 +304,13 @@ export async function mergeIfPreAuthorized(
   // `pull_request` copy of deliverable-gate can still be running while the sweep copy
   // that started this workflow has already finished. Asked here rather than let
   // GitHub refuse, so the refusal becomes impossible rather than merely recoverable.
-  const pending = await waitForRequiredChecks(gh, repo, pr.head.sha, opts.wait);
+  const pending = await waitForRequiredChecks(gh, repo, judged, opts.wait);
   if (pending.length > 0) {
     return {
       outcome: 'waiting-on-checks',
       prNumber: pr.number,
       reason:
-        `required check ${pendingPhrase(pending)} has not concluded on ${pr.head.sha.slice(0, 8)} — not merged, and ` +
+        `required check ${pendingPhrase(pending)} has not concluded on ${judged.slice(0, 8)} — not merged, and ` +
         'NOT blocked: nothing is wrong with this deliverable and the answer is not available yet. The next sweep ' +
         'will find it — an operator dispatch (Actions → build-merge → Run workflow, no inputs), or the next ' +
         "deliverable's gate. Nothing retries on its own",
@@ -268,6 +323,9 @@ export async function mergeIfPreAuthorized(
       ...repo,
       pull_number: pr.number,
       merge_method: 'merge',
+      // "SHA that pull request head must match to allow merge" — GitHub answers 409 and
+      // merges nothing if the head is anything else (GHI #320).
+      sha: judged,
       commit_title: `${pr.title} (#${pr.number})`,
       commit_message:
         `Pre-authorized by the approved plan (FR-062).\n\n` +
@@ -307,9 +365,18 @@ export async function mergeIfPreAuthorized(
     // the dashboard correctly told the operator that nothing was required of them.
     // Nobody would ever have looked.
     //
-    //   405 / 409  not mergeable: conflicts, required checks unsatisfied, a ruleset.
+    //   405        not mergeable: conflicts, required checks unsatisfied, a ruleset.
     //              A real answer about this pull request, and the operator can merge
     //              it themselves — `blocked` with the reason is exactly right.
+    //   409        GitHub's documented answer when the head is not the `sha` the merge
+    //              named (GHI #320). Nothing merged. But "the head moved" is a claim
+    //              about the repository, so it is READ rather than inferred from a
+    //              status code: the head is fetched once more, and only a head that is
+    //              seen to differ is reported as moved — "not yet", and the next sweep
+    //              judges the new head from scratch. A 409 with the head still on the
+    //              judged commit (or a re-read that failed) is decided on GitHub's own
+    //              words like a 405, so a refusal that is NOT a moved head cannot sit
+    //              forever as a "not yet" that no sweep will ever clear.
     //   422        GitHub's other "cannot merge as asked" response.
     //   anything   an operational failure that says nothing about mergeability. It
     //   else       must fail the run so the retry is visible — and `workflow_dispatch`
@@ -322,6 +389,15 @@ export async function mergeIfPreAuthorized(
     // exits the sweep successfully like `blocked` but says "not yet" instead of "no",
     // so the Builds page keeps showing it and the next sweep can still land it.
     const status = errorStatus(error);
+    if (status === 409) {
+      let found: string | null = null;
+      try {
+        found = (await gh.pulls.get({ ...repo, pull_number: pr.number })).data.head.sha;
+      } catch {
+        // Unreadable is not "moved": fall through to GitHub's own sentence below.
+      }
+      if (found && found !== judged) return headMoved(pr.number, judged, found);
+    }
     if (status === 405 || status === 409 || status === 422) {
       const message = errorMessage(error);
       if (isTransientMergeRefusal(message)) {
