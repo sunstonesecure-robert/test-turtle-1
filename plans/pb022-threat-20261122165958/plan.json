@@ -1,0 +1,53 @@
+{
+  "feature": "pb022-threat-20261122165958",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "45056404244",
+  "andon_issue": 197,
+  "steps": [
+    {
+      "id": "step-hello",
+      "title": "Create standalone hello.py greeting script",
+      "intent": "Add a standalone, disposable Python script that prints a fixed operator greeting to stdout, matching the pattern of other disposable sandbox smoke-test scripts already in this repository.",
+      "acceptance": "Running `python3 pb022-threat-20261122165958.py` from the repo root prints the exact greeting text to stdout and nothing else.",
+      "priority": "MUST",
+      "evidence_tag": "assumption",
+      "stand_in": "Greeting text defaulted to \"Hello from pb022-threat-20261122165958!\" since the workload issue did not specify exact wording.",
+      "high_stakes": false,
+      "depends_on": [],
+      "scope": [
+        "pb022-threat-20261122165958.py"
+      ]
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-hello-greeting",
+      "kind": "exact-copy",
+      "check": "pb022-threat-20261122165958.py exists at the repo root and running it with python3 prints the exact greeting \"Hello from pb022-threat-20261122165958!\" to stdout, with no other output.",
+      "run": "test -f pb022-threat-20261122165958.py && [ \"$(python3 pb022-threat-20261122165958.py)\" = \"Hello from pb022-threat-20261122165958!\" ]",
+      "maps_to": [
+        "step-hello"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-trailing-newline",
+      "description": "A single trailing newline produced by Python's default `print()` behavior still counts as matching the required greeting exactly; any other deviation in text, casing, or extra output is treated as a mismatch.",
+      "step_id": "step-hello"
+    },
+    {
+      "id": "bc-no-side-effects",
+      "description": "The new script must not read, modify, or delete any other file in the repository, and must not require any command-line arguments or external input; it is a standalone script with no side effects.",
+      "step_id": "step-hello"
+    }
+  ],
+  "state_transitions": [
+    {
+      "id": "st-add-script",
+      "description": "The repository gains exactly one new file, pb022-threat-20261122165958.py, at the repo root; no other file is created, modified, or deleted by this plan.",
+      "step_id": "step-hello"
+    }
+  ]
+}
