@@ -1,0 +1,43 @@
+{
+  "feature": "pb022-build-20261122165958",
+  "version": 1,
+  "supersedes": null,
+  "run_id": "demo-run-pb022-build-20261122165958",
+  "andon_issue": 192,
+  "steps": [
+    {
+      "id": "step-hello",
+      "title": "Print the demo greeting from pb022-build-20261122165958.py",
+      "intent": "Add a standalone pb022-build-20261122165958.py at the repo root that prints the operator-facing greeting",
+      "acceptance": "Running `python pb022-build-20261122165958.py` exits 0 and prints exactly the greeting string",
+      "priority": "MUST",
+      "evidence_tag": "verified",
+      "stand_in": null,
+      "high_stakes": false,
+      "authority": null,
+      "depends_on": [],
+      "scope": [
+        "pb022-build-20261122165958.py"
+      ],
+      "tracking_issue": null
+    }
+  ],
+  "verification_targets": [
+    {
+      "id": "vt-hello-copy",
+      "kind": "exact-copy",
+      "check": "stdout of `python pb022-build-20261122165958.py` equals \"Hello, operator!\"",
+      "run": "test \"$(python pb022-build-20261122165958.py)\" = \"Hello, operator!\"",
+      "maps_to": [
+        "step-hello"
+      ]
+    }
+  ],
+  "boundary_cases": [
+    {
+      "id": "bc-empty-name",
+      "description": "When no operator name is configured, the greeting falls back to \"Hello, operator!\"",
+      "step_id": "step-hello"
+    }
+  ]
+}
